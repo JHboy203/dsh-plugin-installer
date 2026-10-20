@@ -1,0 +1,1878 @@
+/**
+ * dsh-plugin-installer — 浏览器半边（client bundle，classic script）。
+ *
+ * 只做三件事：展示流水线状态、收集用户输入与确认、把动作 POST 回宿主。
+ * **不下载、不解包、不装、不读文件** —— 那些全在宿主半边。
+ *
+ * 席位：
+ *   sidebar.panellist  → 侧栏图标（红点挂在这里，收起成窄条也看得见）
+ *   main               → 中央面板（key 与 sidebar 的 id 相同，点图标即切过去）
+ *
+ * 窄屏：面板本身是标准侧栏席位，桌面端/远程端（含 dsh-remote-mobile）由外壳决定
+ * 抽屉/覆盖层；这里只保证 720px 以下内边距、触控尺寸与代码块可横向滚动。
+ */
+window.__ModuleLoader__.load({
+	id: "dsh-plugin-installer",
+	factory: (require) => {
+		const React = require("react");
+		const h = React.createElement;
+		const { useState, useEffect, useRef, useCallback, useReducer } = React;
+
+		const API = "/plugin-installer";
+		const PANEL_LABEL = "插件安装";
+		/* 客户端 build 号（R5.1）：改 client.js 就提一位。
+		   client 会热重载、但没人保证「当前页面跑的是哪一版」—— 这个号随 client-state
+		   一起上报，宿主 /health 的 clientReport.build 就是答案（宿主侧另有 mtime 标签）。 */
+		const BUILD = "r6.0";
+
+		/* ── 迷你 store（模块级，面板关着时图标也在用）──────────────────── */
+
+		const store = {
+			data: null,
+			loading: true,
+			error: null,
+			local: { toast: null, busy: false, ai: null, aiBusy: false, open: false }
+		};
+		const listeners = new Set();
+		function emit() {
+			for (const fn of listeners) {
+				try {
+					fn();
+				} catch (e) {
+					/* 单个订阅者出错不能拖垮别的 */
+				}
+			}
+		}
+		function setStore(patch) {
+			Object.assign(store, patch);
+			emit();
+		}
+		function setLocal(patch) {
+			store.local = { ...store.local, ...patch };
+			emit();
+		}
+		function useStore() {
+			const [, force] = useReducer((x) => x + 1, 0);
+			useEffect(() => {
+				listeners.add(force);
+				return () => listeners.delete(force);
+			}, []);
+			return store;
+		}
+
+		async function api(path, init) {
+			const res = await fetch(API + path, {
+				cache: "no-store",
+				...init,
+				headers: { "content-type": "application/json", ...(init && init.headers ? init.headers : {}) }
+			});
+			let data = null;
+			try {
+				data = await res.json();
+			} catch (e) {
+				data = { ok: false, error: "响应不是 JSON（HTTP " + res.status + "）" };
+			}
+			return data;
+		}
+
+		let polling = null;
+		let refreshing = false;
+		async function refresh() {
+			if (refreshing) return;
+			refreshing = true;
+			try {
+				const data = await api("/state");
+				setStore({ data, loading: false, error: data && data.ok === false ? data.error || "状态读取失败" : null });
+			} catch (e) {
+				setStore({ loading: false, error: String((e && e.message) || e) });
+			} finally {
+				refreshing = false;
+			}
+		}
+		function startPolling(intervalMs) {
+			if (polling) return;
+			refresh();
+			polling = setInterval(refresh, intervalMs || 4000);
+		}
+		function stopPolling() {
+			if (!polling) return;
+			clearInterval(polling);
+			polling = null;
+		}
+
+		/* 客户端自报（排查用；不送正文，只送结构化摘要） */
+		let lastReport = 0;
+		function reportClientState(extra) {
+			const now = Date.now();
+			if (now - lastReport < 5000) return;
+			lastReport = now;
+			const data = store.data || {};
+			try {
+				fetch(API + "/client-state", {
+					method: "POST",
+					headers: { "content-type": "application/json" },
+					body: JSON.stringify({
+						build: BUILD,
+						open: store.local.open,
+						width: window.innerWidth,
+						height: window.innerHeight,
+						jobs: (data.jobs || []).length,
+						dot: Boolean(data.attention && data.attention.dot),
+						activeStatus: data.active ? data.active.status : null,
+						...extra
+					})
+				}).catch(() => {});
+			} catch (e) {
+				/* ignore */
+			}
+		}
+
+		/* ── 小工具 ───────────────────────────────────────────────────── */
+
+		function ago(iso) {
+			if (!iso) return "";
+			const ms = Date.now() - new Date(iso).getTime();
+			if (!Number.isFinite(ms)) return "";
+			if (ms < 60000) return "刚刚";
+			const m = Math.round(ms / 60000);
+			if (m < 60) return m + " 分钟前";
+			const hrs = Math.round(m / 60);
+			if (hrs < 24) return hrs + " 小时前";
+			return Math.round(hrs / 24) + " 天前";
+		}
+
+		function fmtBytes(bytes) {
+			const n = Number(bytes) || 0;
+			if (n < 1024) return n + " B";
+			if (n < 1048576) return Math.round(n / 1024) + " KiB";
+			return (n / 1048576).toFixed(1) + " MiB";
+		}
+
+		function copyText(text) {
+			const value = String(text || "");
+			if (!value) return Promise.resolve(false);
+			try {
+				if (navigator.clipboard && navigator.clipboard.writeText) {
+					return navigator.clipboard.writeText(value).then(() => true).catch(() => fallbackCopy(value));
+				}
+			} catch (e) {
+				/* ignore */
+			}
+			return Promise.resolve(fallbackCopy(value));
+		}
+
+		function fallbackCopy(value) {
+			try {
+				const area = document.createElement("textarea");
+				area.value = value;
+				area.setAttribute("readonly", "readonly");
+				area.style.position = "fixed";
+				area.style.opacity = "0";
+				document.body.appendChild(area);
+				area.select();
+				const ok = document.execCommand && document.execCommand("copy");
+				document.body.removeChild(area);
+				return Boolean(ok);
+			} catch (e) {
+				return false;
+			}
+		}
+
+		function toast(text) {
+			setLocal({ toast: text });
+			setTimeout(() => {
+				if (store.local.toast === text) setLocal({ toast: null });
+			}, 3200);
+		}
+
+		/* ── R6.1：自检快捷键（自检 + 自动修复，任意页面都能按）───────────────
+		 *
+		 * 为什么是「装完之后、重启之前」这个时机：
+		 *   重复的 @deepseek-ai/dsh-tools 这颗雷**只在插件加载那一刻**发作 ——
+		 *   磁盘上多一份包对已经在跑的实例毫无影响（2026-10-16：20:08 埋雷、
+		 *   一直用到 22:02 都没事，22:16 重启才整片插件加载失败）。
+		 *   所以真正有效的动作是在下一次启动**之前**清掉它。
+		 *
+		 * 面板里本来就有「检查 / 一键修复」两个按钮，这里做的是两件事：
+		 *   ① 把它们搬到**任意页面**都能按到的地方（不用先切到插件安装面板）；
+		 *   ② 结果用**游离浮窗**报出来 —— 面板的 toast 走 store，
+		 *      面板没挂载时根本看不见。
+		 */
+		const HOTKEY_KEY = "dpi.selfcheck.hotkey";
+		const HOTKEY_DEFAULT = "Ctrl+Alt+D";
+		const HOTKEY_OFF = "off";
+		/* 预设用面板已有的 SegRow 呈现，不另造一个录制界面 */
+		const HOTKEY_CHOICES = [
+			{ value: HOTKEY_DEFAULT, label: "Ctrl+Alt+D" },
+			{ value: "Ctrl+Shift+D", label: "Ctrl+Shift+D" },
+			{ value: "Alt+Shift+D", label: "Alt+Shift+D" },
+			{ value: HOTKEY_OFF, label: "关闭" }
+		];
+
+		/* 只认「至少一个修饰键 + 一个键位」，否则在输入框里打字就会误触 */
+		function parseHotkey(combo) {
+			const parts = String(combo || "")
+				.split("+")
+				.map((s) => s.trim().toLowerCase())
+				.filter(Boolean);
+			if (parts.length < 2) return null;
+			const out = { ctrl: false, alt: false, shift: false, meta: false, key: "" };
+			for (const part of parts) {
+				if (part === "ctrl" || part === "control") out.ctrl = true;
+				else if (part === "alt") out.alt = true;
+				else if (part === "shift") out.shift = true;
+				else if (part === "meta" || part === "win" || part === "cmd") out.meta = true;
+				else out.key = part;
+			}
+			if (!out.key) return null;
+			if (!out.ctrl && !out.alt && !out.meta) return null;
+			return out;
+		}
+
+		/* 四个修饰键**逐个比对**（不是"包含"）：Ctrl+Alt+D 不应被 Ctrl+D 或 Ctrl+Alt+Shift+D 命中 */
+		function hotkeyMatches(combo, event) {
+			const want = parseHotkey(combo);
+			if (!want || !event) return false;
+			if (String(event.key || "").toLowerCase() !== want.key) return false;
+			if (want.ctrl !== !!event.ctrlKey) return false;
+			if (want.alt !== !!event.altKey) return false;
+			if (want.shift !== !!event.shiftKey) return false;
+			if (want.meta !== !!event.metaKey) return false;
+			return true;
+		}
+
+		function currentHotkey() {
+			try {
+				const raw = localStorage.getItem(HOTKEY_KEY);
+				if (raw === HOTKEY_OFF) return HOTKEY_OFF;
+				if (raw && parseHotkey(raw)) return raw;
+			} catch {
+				/* localStorage 不可用就退回默认 */
+			}
+			return HOTKEY_DEFAULT;
+		}
+
+		function saveHotkey(value) {
+			try {
+				localStorage.setItem(HOTKEY_KEY, value === HOTKEY_OFF ? HOTKEY_OFF : String(value || HOTKEY_DEFAULT));
+			} catch {
+				/* ignore */
+			}
+			bindHotkey();
+		}
+
+		/* 游离浮窗：不依赖 React、不依赖面板挂载、不吃焦点、不建标题栏 */
+		let hotkeyCard = null;
+		let hotkeyCardTimer = 0;
+		function hideHotkeyCard() {
+			clearTimeout(hotkeyCardTimer);
+			try {
+				if (hotkeyCard && hotkeyCard.parentNode) hotkeyCard.parentNode.removeChild(hotkeyCard);
+			} catch {
+				/* ignore */
+			}
+			hotkeyCard = null;
+		}
+		function showHotkeyCard(spec) {
+			if (typeof document === "undefined" || !document.body) return;
+			const tone = (spec && spec.tone) || "info";
+			const lines = spec && Array.isArray(spec.lines) ? spec.lines.filter(Boolean) : [];
+			try {
+				if (!hotkeyCard) {
+					/* 自己的节点自己定位 —— 绝不给 React 管的元素打属性（铁律 1 的反面用法） */
+					hotkeyCard = document.createElement("div");
+					hotkeyCard.setAttribute("data-dpi-hotkey-card", "1");
+					hotkeyCard.style.cssText = [
+						"position:fixed",
+						"right:18px",
+						"bottom:64px",
+						"z-index:2147483000",
+						"max-width:400px",
+						"padding:12px 14px",
+						"border-radius:10px",
+						"font-size:13px",
+						"line-height:1.55",
+						"color:var(--dsw-alias-text-1,#e8e8e8)",
+						"background:var(--dsw-alias-bg-elevated,#232326)",
+						"border:1px solid var(--dsw-alias-border-1,rgba(255,255,255,.14))",
+						"box-shadow:0 10px 30px rgba(0,0,0,.35)",
+						"cursor:pointer"
+					].join(";");
+					hotkeyCard.addEventListener("click", hideHotkeyCard);
+					document.body.appendChild(hotkeyCard);
+				}
+				const colors = { ok: "#3ddc84", warn: "#ffb84d", err: "#ff6b6b", info: "#7aa7ff", busy: "#7aa7ff" };
+				hotkeyCard.textContent = "";
+				const head = document.createElement("div");
+				head.textContent = String((spec && spec.title) || "");
+				head.style.cssText = "font-weight:600;color:" + (colors[tone] || colors.info);
+				hotkeyCard.appendChild(head);
+				for (const line of lines) {
+					const row = document.createElement("div");
+					row.textContent = String(line);
+					row.style.cssText = "opacity:.82;margin-top:3px";
+					hotkeyCard.appendChild(row);
+				}
+				clearTimeout(hotkeyCardTimer);
+				/* 要人处理的那种留久一点，好让人看清 */
+				hotkeyCardTimer = setTimeout(hideHotkeyCard, tone === "err" || tone === "warn" ? 9000 : 4200);
+			} catch {
+				/* 浮窗失败不影响动作本身 */
+			}
+		}
+
+		let selfCheckBusy = false;
+		/**
+		 * 自检 + 自动修复（= 面板上「一键修复」那条路，POST /action {action:"repair"}）。
+		 * 幂等，可在任意页面触发；正在跑时再按只是忽略（不排队、不发第二个请求）。
+		 */
+		function runSelfCheck() {
+			if (selfCheckBusy) return Promise.resolve(null);
+			selfCheckBusy = true;
+			showHotkeyCard({
+				tone: "busy",
+				title: "环境自检中…",
+				lines: ["查 dsh-tools 覆盖 / 悬空 file: 依赖 / trustPolicy / git"]
+			});
+			/* 先问一句「现在有没有任务在跑」：装到一半时 applyRepairs 会和 pnpm 抢同一批文件。
+			   读的是宿主 /state，不是 store.data —— 面板没挂载时 store 可能是空的。 */
+			return api("/state", { method: "GET" })
+				.then((state) => {
+					if (state && state.active) {
+						const job = state.active;
+						showHotkeyCard({
+							tone: "warn",
+							title: "正在装东西，先别动环境",
+							lines: [
+								String(job.name || job.input || job.id || "有一个任务") + "（" + String(job.status || "进行中") + "）",
+								"等它结束再按一次 " + currentHotkey()
+							]
+						});
+						return null;
+					}
+					return api("/action", { method: "POST", body: JSON.stringify({ action: "repair" }) });
+				})
+				.then((r) => {
+					if (!r) return null;
+					if (r.report) setLocal({ doctor: r.report });
+					if (r && r.state) setStore({ data: r.state });
+					const report = (r && r.report) || {};
+					/* 宿主那边也有自己的闸：装到一半时它会拒绝并发修复 */
+					if (report.busy) {
+						showHotkeyCard({
+							tone: "warn",
+							title: "正在装东西，先别动环境",
+							lines: [String(report.error || "等安装结束再按一次")]
+						});
+						return r;
+					}
+					const findings = Array.isArray(report.findings) ? report.findings : [];
+					const actions = Array.isArray(report.actions) ? report.actions : [];
+					const fixed = actions.filter((a) => a && a.ok && !a.skipped);
+					const failed = actions.filter((a) => a && a.ok === false);
+					const errors = findings.filter((f) => f && f.severity === "error");
+					if (failed.length > 0) {
+						/* 最要紧的一句：没修干净就别重启 —— 重启只会把问题放大成整片插件加载失败 */
+						showHotkeyCard({
+							tone: "err",
+							title: "有 " + failed.length + " 项没修掉 —— 先别重启",
+							lines: [
+								String(failed[0].kind || "") + "：" + String(failed[0].error || "未知错误"),
+								"打开「插件安装」面板看完整清单"
+							]
+						});
+					} else if (fixed.length > 0) {
+						showHotkeyCard({
+							tone: "ok",
+							title: "清掉了 " + fixed.length + " 项 —— 现在重启是安全的",
+							lines: fixed.slice(0, 3).map((a) => "✓ " + String(a.kind || "已处理"))
+						});
+					} else if (errors.length > 0) {
+						showHotkeyCard({
+							tone: "warn",
+							title: "没有能自动修的，但有 " + errors.length + " 处要看一眼",
+							lines: errors.slice(0, 2).map((f) => String(f.title || f.detail || "").slice(0, 90))
+						});
+					} else if (findings.length > 0) {
+						showHotkeyCard({
+							tone: "info",
+							title: "环境基本正常（" + findings.length + " 条提示）",
+							lines: [String(findings[0].title || "").slice(0, 90), "没有需要修的东西"]
+						});
+					} else {
+						showHotkeyCard({
+							tone: "ok",
+							title: "环境正常，没有埋雷",
+							lines: ["dsh-tools 无覆盖 · 无悬空依赖 · 随时可以重启"]
+						});
+					}
+					return r;
+				})
+				.catch((e) => {
+					showHotkeyCard({
+						tone: "err",
+						title: "自检没跑起来",
+						lines: [String((e && e.message) || e), "宿主半边可能还没重启（面板路由要重启才生效）"]
+					});
+					return null;
+				})
+				.finally(() => {
+					selfCheckBusy = false;
+				});
+		}
+
+		/**
+		 * 换绑快捷键。
+		 * ★ client.js 是热重载的：每次重载都会再生一个模块实例，
+		 *   所以必须先摘掉上一份监听，否则按一次键会发 N 个请求（N = 重载次数）。
+		 *   旧实例的闭包已经没意义，最新实例就该是唯一活着的那一个。
+		 */
+		function bindHotkey() {
+			if (typeof window === "undefined" || typeof window.addEventListener !== "function") return;
+			try {
+				const previous = window.__dpiSelfCheckKeydown;
+				if (previous) window.removeEventListener("keydown", previous, true);
+			} catch {
+				/* ignore */
+			}
+			const combo = currentHotkey();
+			if (combo === HOTKEY_OFF) {
+				window.__dpiSelfCheckKeydown = null;
+				return;
+			}
+			const handler = (event) => {
+				try {
+					if (!hotkeyMatches(combo, event)) return;
+					event.preventDefault();
+					event.stopPropagation();
+					runSelfCheck();
+				} catch {
+					/* 一个监听里的异常不能污染整个页面 */
+				}
+			};
+			window.__dpiSelfCheckKeydown = handler;
+			/* 捕获阶段拿：比面板里的输入框更早知道，避免被吞 */
+			window.addEventListener("keydown", handler, true);
+		}
+
+		/* ── 设置（R6）───────────────────────────────────────────────────
+		 * 默认档 = R5.1 的现有行为：红点开、声音/弹窗关、审核普通、跳过审核按钮开、
+		 * 轮询 2.5s、历史 8 条、快照留 40、三个源全开。
+		 * 宿主侧存 settings.json 并负责真正的门禁（审核档位 / 红点 / 搜索源）；
+		 * 客户端只负责「看得见的那些」：轮询节奏、历史条数、声音与弹窗。
+		 */
+		const SETTING_DEFAULTS = {
+			redDot: true,
+			sound: false,
+			desktopPopup: false,
+			reviewLevel: "normal",
+			skipReview: true,
+			pollMs: 2500,
+			historyLimit: 8,
+			snapshotKeep: 40,
+			sources: { npm: true, github: true, hub: true }
+		};
+
+		function currentSettings() {
+			const data = store.data || {};
+			const raw = data.settings || {};
+			return {
+				...SETTING_DEFAULTS,
+				...raw,
+				sources: { ...SETTING_DEFAULTS.sources, ...(raw.sources || {}) }
+			};
+		}
+
+		function saveSettings(patch) {
+			return api("/settings", { method: "POST", body: JSON.stringify(patch) })
+				.then((r) => {
+					if (r && r.state) setStore({ data: r.state });
+					else if (r && r.settings) setStore({ data: { ...(store.data || {}), settings: r.settings } });
+					return r;
+				})
+				.catch((e) => {
+					toast("设置没保存上：" + String((e && e.message) || e));
+				});
+		}
+
+		/* 声音：不引音频文件，用 WebAudio 打一短音（权限/自动播放失败一律静默） */
+		let audioCtx = null;
+		function beep() {
+			try {
+				const Ctx = window.AudioContext || window.webkitAudioContext;
+				if (!Ctx) return;
+				audioCtx = audioCtx || new Ctx();
+				if (audioCtx.state === "suspended") audioCtx.resume().catch(() => {});
+				const osc = audioCtx.createOscillator();
+				const gain = audioCtx.createGain();
+				osc.type = "sine";
+				osc.frequency.value = 880;
+				gain.gain.value = 0.05;
+				osc.connect(gain);
+				gain.connect(audioCtx.destination);
+				osc.start();
+				osc.stop(audioCtx.currentTime + 0.14);
+			} catch (e) {
+				/* 没声音不该影响别的 */
+			}
+		}
+
+		/* 桌面弹窗：浏览器 Notification；没授权先问一次，仍不行就退回面板内提示 */
+		function desktopNotify(title, body) {
+			try {
+				if (typeof Notification === "undefined") {
+					toast(title + " · " + body);
+					return;
+				}
+				const fire = () => {
+					try {
+						new Notification(title, { body, silent: true });
+					} catch (e) {
+						toast(title + " · " + body);
+					}
+				};
+				if (Notification.permission === "granted") fire();
+				else if (Notification.permission === "default") {
+					Notification.requestPermission().then((p) => {
+						if (p === "granted") fire();
+						else toast(title + " · " + body);
+					}).catch(() => toast(title + " · " + body));
+				} else {
+					toast(title + " · " + body);
+				}
+			} catch (e) {
+				/* 弹窗失败不影响面板 */
+			}
+		}
+
+		const STATUS_TEXT = {
+			running: "进行中",
+			"awaiting-confirm": "等待确认",
+			done: "已完成",
+			failed: "失败",
+			cancelled: "已取消",
+			"rolled-back": "已回滚"
+		};
+
+		const STAGE_ICON = { ok: "✓", warn: "!", fail: "×", running: "…", skip: "–", pending: "·" };
+
+		/* ── 图标 ─────────────────────────────────────────────────────── */
+
+		function InstallIcon(props) {
+			const size = props && props.size ? props.size : 18;
+			return h(
+				"svg",
+				{
+					width: size,
+					height: size,
+					viewBox: "0 0 24 24",
+					"aria-hidden": true,
+					style: { display: "block", pointerEvents: "none" }
+				},
+				h("path", {
+					d: "M3.2 7.4 12 3l8.8 4.4v9.2L12 21l-8.8-4.4z",
+					fill: "none",
+					stroke: "currentColor",
+					strokeWidth: 1.5,
+					strokeLinejoin: "round",
+					opacity: 0.55
+				}),
+				h("path", {
+					d: "M3.4 7.5 12 11.9l8.6-4.4M12 11.9V20.8",
+					fill: "none",
+					stroke: "currentColor",
+					strokeWidth: 1.4,
+					strokeLinejoin: "round",
+					opacity: 0.45
+				}),
+				h("path", {
+					d: "M12 7.1v5.2m0 0-2.3-2.3M12 12.3l2.3-2.3",
+					fill: "none",
+					stroke: "currentColor",
+					strokeWidth: 1.9,
+					strokeLinecap: "round",
+					strokeLinejoin: "round"
+				})
+			);
+		}
+
+		function SidebarEntry(props) {
+			const s = useStore();
+			const dot = Boolean(s.data && s.data.attention && s.data.attention.dot);
+			const count = (s.data && s.data.attention && s.data.attention.count) || 0;
+			const size = props && props.size ? props.size : 18;
+			return h(
+				"span",
+				{
+					className: "dpi-entry" + (props && props.active ? " is-active" : ""),
+					title: dot ? "插件安装 · " + count + " 条待处理" : "插件安装"
+				},
+				h(InstallIcon, { size }),
+				dot ? h("i", { className: "dpi-dot", "aria-label": count + " 条待处理" }) : null
+			);
+		}
+
+		/* ── 小组件 ───────────────────────────────────────────────────── */
+
+		function Pill(props) {
+			return h("span", { className: "dpi-pill dpi-pill-" + props.tone }, props.children);
+		}
+
+		function Row(props) {
+			return h("div", { className: "dpi-row " + (props.className || "") }, props.children);
+		}
+
+		function Copyable(props) {
+			const [done, setDone] = useState(false);
+			return h(
+				"div",
+				{ className: "dpi-cmd" },
+				h("code", null, props.children),
+				h(
+					"button",
+					{
+						className: "dpi-mini",
+						onClick: () => {
+							copyText(props.children).then((ok) => {
+								setDone(ok);
+								if (ok) toast("已复制命令");
+								else toast("复制失败：请手动选中");
+								setTimeout(() => setDone(false), 1600);
+							});
+						}
+					},
+					done ? "已复制" : "复制"
+				)
+			);
+		}
+
+		/* 「怎么解决」：把每条发现的处置步骤摊开（命令仍可一键复制）。
+		   数据来自宿主半边的 finding.fix = [{text, command?}]；老任务没有这个字段时退回到
+		   finding.action（只有 label/command），所以历史记录不会变成空白。 */
+		function FixSteps(props) {
+			const steps = props.steps || [];
+			const action = props.action;
+			if (steps.length === 0 && !(action && action.label)) return null;
+			return h(
+				"div",
+				{ className: "dpi-fixbox" },
+				h("div", { className: "dpi-fixhead" }, "怎么解决"),
+				steps.length > 0
+					? h("ol", { className: "dpi-fixlist" }, steps.map((s, i) => {
+						const text = typeof s === "string" ? s : (s && (s.text || s.label)) || "";
+						const cmd = s && typeof s === "object" ? s.command : null;
+						return h("li", { key: "fx" + i }, h("span", null, text), cmd ? h(Copyable, null, cmd) : null);
+					}))
+					: null,
+				action && action.label
+					? h("div", { className: "dpi-fixaction" },
+						h("span", null, "面板动作：" + action.label),
+						action.command ? h(Copyable, null, action.command) : null)
+					: null
+			);
+		}
+
+		/* 「大白话解释」开关（用户指定的名字，别再改回「通俗讲给我听」）。
+		   存 localStorage：同一个用户下次打开面板仍然是他上次选的模式。 */
+		const PLAIN_KEY = "dpi.plain-explain";
+
+		function usePlainMode() {
+			const [on, setOn] = useState(false);
+			useEffect(() => {
+				try {
+					if (localStorage.getItem(PLAIN_KEY) === "1") setOn(true);
+				} catch {
+					/* localStorage 不可用就保持默认 */
+				}
+				return () => {};
+			}, []);
+			const flip = () => {
+				const next = !on;
+				setOn(next);
+				try {
+					localStorage.setItem(PLAIN_KEY, next ? "1" : "0");
+				} catch {
+					/* ignore */
+				}
+			};
+			return [on, flip];
+		}
+
+		function PlainToggle(props) {
+			return h("button", {
+				className: "dpi-btn dpi-btn-sm dpi-plain-btn" + (props.on ? " is-on" : ""),
+				title: props.on ? "现在显示的是大白话；点一下换回术语细节" : "点一下把术语翻译成大白话",
+				onClick: props.onFlip
+			}, props.on ? "大白话解释 ✓" : "大白话解释");
+		}
+
+		/* 一批发现（安装后诊断 / 环境体检共用）。plain = 大白话模式。 */
+		function FindingsList(props) {
+			const findings = props.findings || [];
+			const plain = !!props.plain;
+			return h(
+				"ul",
+				{ className: "dpi-list dpi-list-" + props.tone },
+				findings.map((f, i) =>
+					h("li", { key: "fd" + i },
+						h("b", null, (f.title || "") + (f.fixable ? "（可自动修复）" : "")),
+						plain && f.plain
+							? h("span", { className: "dpi-detail is-plain" }, f.plain)
+							: (f.detail ? h("span", { className: "dpi-detail" }, f.detail) : null),
+						plain && f.plain && f.detail
+							? h("details", { className: "dpi-hits" },
+								h("summary", null, "术语原文"),
+								h("div", { className: "dpi-detail" }, f.detail))
+							: null,
+						h(FixSteps, { steps: f.fix || [], action: f.action })
+					)
+				)
+			);
+		}
+
+		/* 阶段时间线 */
+		function StageList(props) {
+
+			const stages = props.stages || [];
+			return h(
+				"ol",
+				{ className: "dpi-stages" },
+				stages.map((stage) => {
+					if (stage.status === "pending") return null;
+					return h(
+						"li",
+						{ key: stage.key, className: "dpi-stage is-" + stage.status },
+						h("span", { className: "dpi-stage-icon" }, STAGE_ICON[stage.status] || "·"),
+						h(
+							"span",
+							{ className: "dpi-stage-body" },
+							h("span", { className: "dpi-stage-label" }, stage.label),
+							stage.detail ? h("span", { className: "dpi-stage-detail" }, stage.detail) : null
+						),
+						typeof stage.ms === "number" && stage.ms > 400
+							? h("span", { className: "dpi-stage-ms" }, (stage.ms / 1000).toFixed(1) + "s")
+							: null
+					);
+				})
+			);
+		}
+
+		/* 预检结论 */
+		function PrecheckCard(props) {
+			const pc = props.precheck;
+			if (!pc) return null;
+			const reasons = pc.reasons || [];
+			const blocks = reasons.filter((r) => r.level === "block");
+			const warns = reasons.filter((r) => r.level === "warn");
+			const infos = reasons.filter((r) => r.level === "info");
+			const risks = pc.risks || {};
+			return h(
+				"div",
+				{ className: "dpi-card dpi-precheck" },
+				h(
+					"div",
+					{ className: "dpi-card-head" },
+					h("strong", null, "安全预检"),
+					h(Pill, { tone: pc.blocked ? "error" : warns.length > 0 ? "warn" : "ok" },
+						pc.blocked ? "阻断" : warns.length > 0 ? "需确认" : "通过"),
+					pc.compat && pc.compat.verdict
+						? h(Pill, { tone: pc.compat.verdict === "ok" ? "ok" : pc.compat.verdict === "mismatch" ? "error" : "warn" },
+							"兼容：" + (pc.compat.verdict === "ok" ? "满足" : pc.compat.verdict === "mismatch" ? "不匹配" : pc.compat.verdict === "exempted" ? "已豁免" : "无法确认"))
+						: null,
+					pc.compat && pc.compat.runtimeVersion
+						? h("span", { className: "dpi-muted" }, "宿主 " + pc.compat.runtimeVersion + " · " + (pc.compat.via || ""))
+						: null
+				),
+				blocks.length > 0
+					? h("ul", { className: "dpi-list dpi-list-block" }, blocks.map((r, i) => h("li", { key: "b" + i }, h("b", null, r.text), r.detail ? h("span", { className: "dpi-detail" }, r.detail) : null)))
+					: null,
+				warns.length > 0
+					? h("ul", { className: "dpi-list dpi-list-warn" }, warns.map((r, i) => h("li", { key: "w" + i }, h("b", null, r.text), r.detail ? h("span", { className: "dpi-detail" }, r.detail) : null)))
+					: null,
+				h(
+					"div",
+					{ className: "dpi-risks" },
+					h("span", { className: "dpi-muted" }, "静态扫描：" + (risks.summary || "未扫描")),
+					risks.hits && risks.hits.length > 0
+						? h(
+							"details",
+							{ className: "dpi-hits" },
+							h("summary", null, "看 " + risks.hits.length + " 条命中"),
+							h(
+								"ul",
+								null,
+								risks.hits.map((hit, i) => h("li", { key: "h" + i },
+									h("code", null, hit.file + ":" + hit.line),
+									" ",
+									h("span", { className: "dpi-tag dpi-tag-" + hit.severity }, hit.label),
+									h("div", { className: "dpi-excerpt" }, hit.excerpt)
+								))
+							)
+						)
+						: null,
+					risks.combos && risks.combos.length > 0
+						? h("ul", { className: "dpi-list dpi-list-warn" }, risks.combos.map((combo, i) => h("li", { key: "c" + i }, h("b", null, combo.label), h("span", { className: "dpi-detail" }, combo.detail))))
+						: null
+				),
+				infos.length > 0
+					? h("ul", { className: "dpi-list dpi-list-info" }, infos.slice(0, 6).map((r, i) => h("li", { key: "i" + i }, r.text, r.detail ? h("span", { className: "dpi-detail" }, r.detail) : null)))
+					: null,
+				pc.fixes && pc.fixes.length > 0
+					? h(
+						"div",
+						{ className: "dpi-fixes" },
+						h("div", { className: "dpi-muted" }, "下一步"),
+						pc.fixes.map((fix, i) =>
+							fix.command
+								? h(Copyable, { key: "f" + i }, fix.command)
+								: h("div", { key: "f" + i, className: "dpi-muted" }, "· " + fix.label)
+						)
+					)
+					: null,
+				/* 用途 vs 权限（R3）：先说是干什么的，再说它要的能力对不对得上。
+				   用户明确要「按用途判断权限是否合理」，所以这块单独成卡，不藏在命中列表里。 */
+				pc.purpose
+					? h("div", { className: "dpi-purpose" },
+						h("div", { className: "dpi-purpose-head" },
+							h("strong", null, "用途 vs 权限"),
+							h("span", { className: "dpi-tag dpi-tag-kind" }, (pc.purpose.purpose && pc.purpose.purpose.label) || "未识别"),
+							h(Pill, {
+								tone: pc.purpose.verdict === "ok" ? "ok" : pc.purpose.verdict === "warn" ? "warn" : pc.purpose.verdict === "error" ? "error" : "idle"
+							}, pc.purpose.verdict === "ok" ? "匹配" : pc.purpose.verdict === "warn" ? "略超范围" : pc.purpose.verdict === "error" ? "明显不符" : "未判"),
+							pc.purpose.purpose && pc.purpose.purpose.confidence ? h("span", { className: "dpi-muted" }, "判断把握：" + (pc.purpose.purpose.confidence === "high" ? "高" : pc.purpose.purpose.confidence === "medium" ? "中" : "低")) : null),
+						h("div", { className: "dpi-detail is-plain" }, pc.purpose.plain || ""),
+						pc.purpose.findings && pc.purpose.findings.length > 0
+							? h("ul", { className: "dpi-list dpi-list-warn" }, pc.purpose.findings.map((f, i) =>
+								h("li", { key: "pp" + i }, h("b", null, f.text), f.detail ? h("span", { className: "dpi-detail" }, f.detail) : null)))
+							: null,
+						pc.purpose.present && pc.purpose.present.length > 0
+							? h("div", { className: "dpi-muted" }, "它实际用到的能力：" + pc.purpose.present.join("、"))
+							: null,
+						pc.purpose.advice && pc.purpose.advice.length > 0
+							? h(FixSteps, { steps: pc.purpose.advice.map((t) => ({ text: t })) })
+							: null)
+					: null,
+				pc.trust && pc.trust.notes && pc.trust.notes.length > 0
+					? h("ul", { className: "dpi-list dpi-list-info" }, pc.trust.notes.map((note, i) => h("li", { key: "t" + i }, note)))
+					: null
+			);
+		}
+
+		/* 安装后诊断：结论 + 每条发现 + 怎么解决 + 大白话解释开关。
+		   用户的原话是「不仅要给诊断，还要交代怎么解决」，所以这里默认就把处置步骤摊开，
+		   不需要先点开什么；「大白话解释」是给不想看术语的人准备的另一种说法。 */
+		function DiagnosisCard(props) {
+			const diag = props.diagnosis;
+			const [plain, flip] = usePlainMode();
+			if (!diag) return null;
+			const findings = diag.findings || [];
+			const hasPlain = findings.some((f) => f && typeof f.plain === "string" && f.plain.length > 0);
+			const plainLine = diag.plain || (diag.verdict === "ok"
+				? "大白话：装好了，宿主也认得它，没发现要处理的。"
+				: diag.verdict === "warn"
+					? "大白话：装上了，但有地方不太对劲，下面每条都写了怎么解决。"
+					: "大白话：这次没能正常用起来，下面每条都写了怎么解决。");
+			return h(
+				"div",
+				{ className: "dpi-card" },
+				h(
+					"div",
+					{ className: "dpi-card-head" },
+					h("strong", null, "安装后诊断"),
+					h(Pill, { tone: diag.verdict === "ok" ? "ok" : diag.verdict === "warn" ? "warn" : "error" },
+						diag.verdict === "ok" ? "一切正常" : diag.verdict === "warn" ? "有告警" : "需要处理"),
+					hasPlain ? h(PlainToggle, { on: plain, onFlip: flip }) : null
+				),
+				h("div", { className: "dpi-detail is-plain" }, plainLine),
+				findings.length > 0
+					? h(FindingsList, {
+						findings,
+						plain,
+						tone: diag.verdict === "ok" ? "info" : diag.verdict === "warn" ? "warn" : "block"
+					})
+					: h("div", { className: "dpi-muted" }, "没有发现问题。")
+			);
+		}
+
+		/* AI 审查结果 */
+		function ReviewCard(props) {
+			const review = props.review;
+			if (!review) return null;
+			const skipped = review.status === "skipped";
+			const tone = skipped ? "idle" : review.verdict === "safe" ? "ok" : review.verdict === "malicious" ? "error" : "warn";
+			return h(
+				"div",
+				{ className: "dpi-card" },
+				h("div", { className: "dpi-card-head" },
+					h("strong", null, "AI 语义审查"),
+					h(Pill, { tone }, skipped ? "已跳过" : (review.verdict || review.status)),
+					review.model ? h("span", { className: "dpi-muted" }, review.model) : null,
+					/* R4：把「这次审查花了多少 token / 省了多少」直接写出来 —— 用户问过一次成本，就让他从此看得见。 */
+					review.estTokens && review.estTokens.total
+						? h("span", { className: "dpi-muted" }, "≈" + review.estTokens.total + " token")
+						: (review.estTokens && review.estTokens.saved ? h("span", { className: "dpi-muted" }, "省下 ≈" + review.estTokens.saved + " token") : null)
+				),
+				h("div", { className: "dpi-muted" },
+					review.status === "pending" ? "排队中（异步，不阻塞安装）"
+						: skipped ? (review.skipReason || review.note || "常规能力，不需要模型判断")
+							: review.status === "unavailable" ? "AI 通道未启用"
+								: review.error ? "未完成：" + review.error
+									: review.verdict === "safe" ? "判 safe 不单独放行：最终仍以静态扫描为准"
+										: review.verdict === "malicious" ? "判恶意：建议立刻回滚"
+											: "结论不确定：请自己看上面的命中片段"
+				),
+				review.findings && review.findings.length > 0
+					? h("ul", { className: "dpi-list dpi-list-info" }, review.findings.map((f, i) =>
+						h("li", { key: "r" + i }, h("b", null, f.title), f.why ? h("span", { className: "dpi-detail" }, f.why) : null, f.evidence ? h("div", { className: "dpi-excerpt" }, f.evidence) : null)))
+					: null
+			);
+		}
+
+		/* 一个任务的全部细节 */
+		function JobDetail(props) {
+			const job = props.job;
+			const [busy, setBusy] = useState(null);
+			if (!job) return null;
+			const detected = job.detected;
+			const act = async (action, extra) => {
+				setBusy(action);
+				try {
+					const result = await api("/action", { method: "POST", body: JSON.stringify({ action, id: job.id, ...(extra || {}) }) });
+					if (result && result.state) setStore({ data: result.state });
+					if (result && result.ok === false) toast(result.message || "操作失败");
+					else if (action === "rollback") toast("已回滚到安装前快照");
+					else if (action === "confirm") toast("继续安装");
+					else if (action === "ack") toast("已清除红点");
+				} catch (e) {
+					toast("操作失败：" + String((e && e.message) || e));
+				} finally {
+					setBusy(null);
+				}
+			};
+
+			return h(
+				"div",
+				{ className: "dpi-job" },
+				h(
+					"div",
+					{ className: "dpi-job-head" },
+					h(Pill, { tone: job.status === "failed" ? "error" : job.status === "done" ? "ok" : job.status === "awaiting-confirm" ? "warn" : "idle" },
+						STATUS_TEXT[job.status] || job.status),
+					h("span", { className: "dpi-job-title" }, job.title || (job.input && job.input.raw) || job.id),
+					detected && detected.kind
+						? h("span", { className: "dpi-tag dpi-tag-kind" }, detected.kind === "bundle" ? "插件" : detected.kind === "skill" ? "Skill" : detected.kind)
+						: null,
+					detected && detected.version ? h("span", { className: "dpi-muted" }, "v" + detected.version) : null,
+					h("span", { className: "dpi-muted dpi-right" }, ago(job.updatedAt || job.createdAt))
+				),
+
+				job.error
+					? h("div", { className: "dpi-error" },
+						h("b", null, (job.error.stage ? "[" + job.error.stage + "] " : "") + job.error.message),
+						job.error.hint ? h("div", { className: "dpi-detail" }, "建议：" + job.error.hint) : null)
+					: null,
+
+				detected ? h("div", { className: "dpi-meta" },
+					detected.description ? h("div", null, detected.description) : null,
+					h("div", { className: "dpi-muted" },
+						(detected.name || "未命名") +
+						(detected.files ? " · " + detected.files + " 个文件 / " + fmtBytes(detected.bytes) : "") +
+						(detected.wrappers && detected.wrappers.length ? " · 剥壳 " + detected.wrappers.join("/") : "") +
+						(detected.skill && detected.skill.name ? " · 技能 " + detected.skill.name : "")
+					)
+				) : null,
+
+				h(StageList, { stages: job.stages }),
+				h(PrecheckCard, { precheck: job.precheck }),
+
+				job.status === "awaiting-confirm"
+					? h("div", { className: "dpi-actions" },
+						h("button", { className: "dpi-btn dpi-btn-primary", disabled: busy !== null, onClick: () => act("confirm") }, busy === "confirm" ? "继续中…" : "确认安装"),
+						h(SkipReviewButton, { job, busy, act }),
+						h("button", { className: "dpi-btn", disabled: busy !== null, onClick: () => act("cancel") }, "取消"),
+						h("span", { className: "dpi-muted" }, "有告警才停下来问你；确认后秒装。")
+					)
+					: null,
+
+				job.install && job.install.kind === "bundle" && job.install.result
+					? h("details", { className: "dpi-hits" },
+						h("summary", null, "插件管理器回执"),
+						h("pre", { className: "dpi-pre" }, JSON.stringify(job.install.result, null, 2)))
+					: null,
+
+				h(DiagnosisCard, { diagnosis: job.diagnosis }),
+				h(ReviewCard, { review: job.review }),
+
+				job.rollback
+					? h("div", { className: "dpi-card" },
+						h("div", { className: "dpi-card-head" }, h("strong", null, "已回滚"), h("span", { className: "dpi-muted" }, ago(job.rollback.at))),
+						h("ul", { className: "dpi-list dpi-list-info" },
+							job.rollback.results.map((r, i) => h("li", { key: "rb" + i }, r.step + (r.ok === false ? "（失败：" + (r.reason || "?") + "）" : " ✓")))))
+					: null,
+
+				h("div", { className: "dpi-actions dpi-actions-end" },
+					job.detected && job.status !== "running" && job.status !== "awaiting-confirm"
+						? h("button", { className: "dpi-btn", disabled: busy !== null, onClick: () => act("rediagnose") },
+							busy === "rediagnose" ? "诊断中…" : "重新诊断")
+						: null,
+					job.precheck && job.precheck.needsAiReview && (!job.review || job.review.status === "pending" || job.review.status === "failed")
+						? h("button", { className: "dpi-btn", disabled: busy !== null, onClick: () => act("review") }, busy === "review" ? "审查中…" : "跑一次 AI 审查")
+						: null,
+					job.snapshot
+						? h("button", { className: "dpi-btn", disabled: busy !== null, onClick: () => act("rollback") },
+							busy === "rollback" ? "回滚中…" : job.rollback ? "再回滚一次" : "回滚到安装前")
+						: null,
+					job.status === "failed" && job.input
+						? h("button", { className: "dpi-btn", onClick: () => { submitInput(job.input.raw); } }, "重试")
+						: null,
+					(store.data && store.data.attention && store.data.attention.count > 0)
+						? h("button", { className: "dpi-btn dpi-btn-ghost", onClick: () => act("ack") }, "清除红点")
+						: null
+				)
+			);
+		}
+
+		/* ── 提交 ─────────────────────────────────────────────────────── */
+
+		let inputValue = "";
+		function submitInput(raw) {
+			const text = String(raw || "").trim();
+			if (!text) return Promise.resolve();
+			setLocal({ busy: true });
+			return api("/submit", { method: "POST", body: JSON.stringify({ input: text, source: "panel" }) })
+				.then((result) => {
+					if (result.state) setStore({ data: result.state });
+					if (!result.ok) {
+						if (result.reason === "netdisk") toast(result.message);
+						else if (result.reason === "name" || (result.candidates && result.candidates.items)) {
+							setLocal({ search: result.candidates || null, ai: null });
+							toast("只给了名字：先看下面的候选");
+						} else toast(result.message || result.reason || "提交失败");
+						return result;
+					}
+					inputValue = "";
+					setLocal({ search: null });
+					return result;
+				})
+				.catch((e) => {
+					toast("提交失败：" + String((e && e.message) || e));
+				})
+				.finally(() => setLocal({ busy: false }));
+		}
+
+		/* ── 面板 ─────────────────────────────────────────────────────── */
+
+		function Composer() {
+			const s = useStore();
+			const [text, setText] = useState(inputValue);
+			const [dragging, setDragging] = useState(false);
+			const areaRef = useRef(null);
+			const busy = s.local.busy;
+
+			const send = () => {
+				inputValue = text;
+				submitInput(text).then(() => setText(""));
+			};
+
+			const drop = async (event) => {
+				event.preventDefault();
+				setDragging(false);
+				const files = event.dataTransfer && event.dataTransfer.files;
+				if (!files || files.length === 0) {
+					const textData = event.dataTransfer && event.dataTransfer.getData && event.dataTransfer.getData("text");
+					if (textData) {
+						setText(textData.trim());
+						toast("已从剪贴板填入链接，点安装即可");
+					}
+					return;
+				}
+				const file = files[0];
+				if (file.size > 80 * 1024 * 1024) {
+					toast("文件超过 80 MB：请把它放到本机，然后在上面填绝对路径");
+					return;
+				}
+				setLocal({ busy: true });
+				try {
+					const res = await fetch(API + "/upload", {
+						method: "POST",
+						headers: { "x-file-name": encodeURIComponent(file.name) },
+						body: file
+					});
+					const result = await res.json();
+					if (result.state) setStore({ data: result.state });
+					if (!result.ok) toast((result.submitted && result.submitted.message) || "上传后处理失败");
+					else toast("已收到 " + file.name + "（" + Math.round(file.size / 1024) + " KiB）");
+				} catch (e) {
+					toast("上传失败：" + String((e && e.message) || e));
+				} finally {
+					setLocal({ busy: false });
+				}
+			};
+
+			return h(
+				"div",
+				{
+					className: "dpi-composer" + (dragging ? " is-drag" : ""),
+					onDragOver: (e) => {
+						e.preventDefault();
+						setDragging(true);
+					},
+					onDragLeave: () => setDragging(false),
+					onDrop: drop
+				},
+				h("textarea", {
+					ref: areaRef,
+					className: "dpi-input",
+					rows: 2,
+					placeholder: "GitHub 链接 / Release 页 / .tgz·.zip 直链 / 本机绝对路径 / 包名。也可以直接把文件拖进来。",
+					value: text,
+					onChange: (e) => setText(e.target.value),
+					onKeyDown: (e) => {
+						if (e.key === "Enter" && !e.shiftKey) {
+							e.preventDefault();
+							if (!busy) send();
+						}
+					}
+				}),
+				h("div", { className: "dpi-composer-row" },
+					h("button", { className: "dpi-btn dpi-btn-primary", disabled: busy || !text.trim(), onClick: send },
+						busy ? "处理中…" : "安装"),
+					h("button", { className: "dpi-btn", disabled: busy || !text.trim(), onClick: () => { const t = text.trim(); setText(""); setLocal({ ai: { reply: "搜索中…", recommendations: [] }, aiBusy: true });
+						api("/search", { method: "POST", body: JSON.stringify({ query: t }) }).then((r) => {
+							setLocal({ ai: { reply: "搜索：" + t + "（" + ((r.items || []).length) + " 条）", recommendations: (r.items || []).map((x) => ({ ...x, why: x.description })), searchOnly: true }, aiBusy: false });
+						}).catch((e) => setLocal({ ai: { reply: "搜索失败：" + String((e && e.message) || e), recommendations: [] }, aiBusy: false })); }
+					}, "只搜索"),
+					h("span", { className: "dpi-muted dpi-hint" }, "网盘链接不自动下载；只给名字会先搜候选")
+				),
+				dragging ? h("div", { className: "dpi-drop-veil" }, "松手：我会把它交给宿主解包识别") : null
+			);
+		}
+
+		function AiBox() {
+			const s = useStore();
+			const [text, setText] = useState("");
+			const busy = s.local.aiBusy;
+			const result = s.local.ai;
+			const ask = () => {
+				const query = text.trim();
+				if (!query || busy) return;
+				setLocal({ aiBusy: true, ai: { reply: "想…", recommendations: [] } });
+				api("/ai", { method: "POST", body: JSON.stringify({ message: query }) })
+					.then((r) => {
+						if (r && r.ok === false && r.error === "empty") return setLocal({ ai: { reply: r.reply, recommendations: [] }, aiBusy: false });
+						setLocal({ ai: r, aiBusy: false });
+					})
+					.catch((e) => setLocal({ ai: { reply: "AI 调用失败：" + String((e && e.message) || e), recommendations: [] }, aiBusy: false }));
+			};
+			return h(
+				"div",
+				{ className: "dpi-card dpi-ai" },
+				h("div", { className: "dpi-card-head" },
+					h("strong", null, "AI 推荐"),
+					h("span", { className: "dpi-muted" }, "只有三件事：搜索 / 推荐 / 递安装请求 —— 它不能装，装的是宿主代码")),
+				h("div", { className: "dpi-composer-row" },
+					h("input", {
+						className: "dpi-input dpi-input-line",
+						placeholder: "想装什么？例如「给对话加折叠」「视频下载」",
+						value: text,
+						onChange: (e) => setText(e.target.value),
+						onKeyDown: (e) => {
+							if (e.key === "Enter") ask();
+						}
+					}),
+					h("button", { className: "dpi-btn", disabled: busy || !text.trim(), onClick: ask }, busy ? "思考中…" : "问 AI")),
+				result && result.reply ? h("div", { className: "dpi-ai-reply" }, result.reply) : null,
+				result && result.recommendations && result.recommendations.length > 0
+					? h("div", { className: "dpi-recos" }, result.recommendations.map((item, i) =>
+						h("div", { className: "dpi-reco", key: "reco" + i },
+							h("div", { className: "dpi-reco-head" },
+								h("b", null, item.name),
+								item.stars ? h("span", { className: "dpi-tag" }, "★" + item.stars) : null,
+								item.downloads ? h("span", { className: "dpi-tag" }, "⬇" + item.downloads + "/周") : null,
+								item.installs ? h("span", { className: "dpi-tag", title: "商店统计的确认安装次数（比 stars 更接近真实使用量）" }, "装过 " + item.installs) : null,
+								item.rating && item.rating.average ? h("span", { className: "dpi-tag", title: "商店用户评分（样本 " + (item.rating.count || 0) + " 条）" }, "★" + item.rating.average + "(" + (item.rating.count || 0) + ")") : null,
+								h("span", { className: "dpi-tag" }, item.source || "?"),
+								item.rankScore ? h("span", { className: "dpi-tag dpi-tag-kind", title: "本面板按「可信度 + 知名度 + 相关度」算的综合分，不是市场评分" }, "评分 " + Math.round(item.rankScore)) : null),
+							/* 可信度徽章与红旗（R3）：官方 / 许可证 / 有源码 / 近期更新，以及无仓库、刷星这类红旗。
+							   这些都来自确定性数据，不来自模型，可以当事实读。 */
+							item.trust && item.trust.badges && item.trust.badges.length
+								? h("div", { className: "dpi-badges" }, item.trust.badges.map((b, bi) =>
+									h("span", { key: "bd" + bi, className: "dpi-tag dpi-tag-" + (b.tone === "ok" ? "kind" : "medium"), title: b.why || "" }, b.label)))
+								: null,
+							item.trust && item.trust.flags && item.trust.flags.length
+								? h("div", { className: "dpi-flags" }, item.trust.flags.map((f, fi) =>
+									h("div", { key: "fl" + fi, className: "dpi-flag is-" + (f.tone || "warn") }, "⚠ " + f.text)))
+								: null,
+							item.why ? h("div", { className: "dpi-reco-why" }, item.why) : null,
+							h("div", { className: "dpi-actions dpi-actions-tight" },
+								h("button", { className: "dpi-btn dpi-btn-primary dpi-btn-sm", onClick: () => submitInput(item.spec || item.name) }, "安装这个"),
+								item.url ? h("a", { className: "dpi-link", href: item.url, target: "_blank", rel: "noreferrer" }, "看来源") : null))))
+					: null,
+				result && result.searchSuggestions && result.searchSuggestions.length ? h("div", { className: "dpi-muted" }, "换个搜索词：" + result.searchSuggestions.join("、")) : null,
+				result && result.degraded ? h("div", { className: "dpi-muted" }, "（AI 不可用，这里给的是确定性搜索的结果）") : null
+			);
+		}
+
+		function History(props) {
+			const s = useStore();
+			const [openId, setOpenId] = useState(null);
+			const jobs = (s.data && s.data.jobs) || [];
+			const activeId = s.data && s.data.active ? s.data.active.id : null;
+			const limit = currentSettings().historyLimit;
+			const all = jobs.filter((job) => job.id !== activeId);
+			const past = all.slice(0, limit);
+			if (past.length === 0) return null;
+			return h(
+				"div",
+				{ className: "dpi-card" },
+				h("div", { className: "dpi-card-head" },
+					h("strong", null, "历史"),
+					h("span", { className: "dpi-muted" }, past.length + (all.length > past.length ? " / " + all.length : "") + " 条")),
+				past.map((job) =>
+					h("div", { key: job.id, className: "dpi-history" },
+						h("button", {
+							className: "dpi-history-row",
+							onClick: () => setOpenId(openId === job.id ? null : job.id)
+						},
+							h("i", { className: "dpi-dot-static is-" + job.status }),
+							h("span", { className: "dpi-history-title" }, job.title || (job.input && job.input.raw) || job.id),
+							h("span", { className: "dpi-muted" }, (STATUS_TEXT[job.status] || job.status) + " · " + ago(job.updatedAt || job.createdAt)),
+							h("span", { className: "dpi-chev" }, openId === job.id ? "▾" : "▸")),
+						openId === job.id ? h(JobDetail, { job }) : null)
+				)
+			);
+		}
+
+		function DoctorBox() {
+			const s = useStore();
+			const [open, setOpen] = useState(false);
+			const [busy, setBusy] = useState(null);
+			const [plain, flipPlain] = usePlainMode();
+			const report = s.local.doctor || null;
+			const runCheck = () => {
+				setBusy("check");
+				setOpen(true);
+				api("/doctor", { method: "GET" })
+					.then((r) => setLocal({ doctor: r.report || null }))
+					.catch((e) => toast("体检失败：" + String((e && e.message) || e)))
+					.finally(() => setBusy(null));
+			};
+			const repair = () => {
+				setBusy("repair");
+				api("/action", { method: "POST", body: JSON.stringify({ action: "repair" }) })
+					.then((r) => {
+						if (r && r.report && r.report.busy) {
+							toast(String(r.report.error || "正在装东西，等它结束再修"));
+							return;
+						}
+						if (r && r.report) setLocal({ doctor: r.report });
+						if (r && r.state) setStore({ data: r.state });
+						const n = r && r.report && Array.isArray(r.report.actions) ? r.report.actions.filter((a) => a.ok && !a.skipped).length : 0;
+						toast(n > 0 ? "修好了 " + n + " 项" : "没有需要修的东西");
+					})
+					.catch((e) => toast("修复失败：" + String((e && e.message) || e)))
+					.finally(() => setBusy(null));
+			};
+			const fixable = report && Array.isArray(report.findings) && report.findings.some((f) => f.fixable);
+			return h(
+				"div",
+				{ className: "dpi-card dpi-doctor" },
+				h("div", { className: "dpi-card-head" },
+					h("strong", null, "环境体检"),
+					h("span", { className: "dpi-muted" }, "dsh-tools 覆盖 / 悬空 file: 依赖 / trustPolicy / git"),
+					h("span", {
+						className: "dpi-muted",
+						title: "任意页面按这个组合键 = 自检 + 自动修复（设置里可改 / 可关）",
+						style: {
+							padding: "1px 6px",
+							borderRadius: 6,
+							border: "1px solid currentColor",
+							opacity: 0.72,
+							fontSize: 11,
+							whiteSpace: "nowrap"
+						}
+					}, currentHotkey() === HOTKEY_OFF ? "快捷键已关" : "快捷键 " + currentHotkey()),
+					h("button", { className: "dpi-btn dpi-btn-sm", style: { marginLeft: "auto" }, disabled: busy !== null, onClick: runCheck },
+						busy === "check" ? "检查中…" : report ? "再查一次" : "检查"),
+					fixable ? h("button", { className: "dpi-btn dpi-btn-sm dpi-btn-primary", disabled: busy !== null, onClick: repair },
+						busy === "repair" ? "修复中…" : "一键修复") : null),
+				open && report
+					? h("div", null,
+						h("div", { className: "dpi-muted" },
+							"profile " + (report.info.profile || "?") + " · vendor " + report.info.vendor.files + " 个产物 · trustPolicy " + (report.info.trustPolicy || "未设置") + " · git " + (report.info.git ? "有" : "无")),
+						/* R5.1：宿主侧不热重载，所以「跑的是哪一版」必须看得见。
+						   宿主那半是源码 mtime 标签，客户端这半是手动提的 build 号。 */
+						h("div", { className: "dpi-muted" },
+							"客户端 " + BUILD + " · 宿主 " + ((s.data && s.data.host && s.data.host.build) || "未知（重启 DSH 后可见）")),
+						report.findings && report.findings.some((f) => f && f.plain)
+							? h("div", { className: "dpi-actions dpi-actions-tight" }, h(PlainToggle, { on: plain, onFlip: flipPlain }))
+							: null,
+						report.findings.length === 0
+							? h("div", { className: "dpi-muted" }, "没有发现问题。")
+							: h(FindingsList, {
+								findings: report.findings,
+								plain,
+								tone: report.findings.some((f) => f.severity === "error") ? "block" : "warn"
+							}),
+						Array.isArray(report.actions) && report.actions.length > 0
+							? h("ul", { className: "dpi-list dpi-list-info" }, report.actions.map((a, i) =>
+								h("li", { key: "act" + i }, a.kind + " → " + (a.ok ? (a.skipped ? "跳过（" + a.skipped + "）" : "完成") : "失败：" + a.error))))
+							: null,
+						report.info.guiPort ? h("div", { className: "dpi-muted" },
+							"手机打不开（ts.net 502）= tailscale serve 还指着旧端口。一次性修：tailscale serve --bg --https=443 http://127.0.0.1:" + report.info.guiPort) : null,
+						h("div", { className: "dpi-muted" },
+							"一劳永逸：跑一次 dev\\install-serve-watch.ps1（管理员），它注册开机看护任务 —— 端口一变自己重指，热键 Ctrl+Alt+Y 也能当场触发。")
+					)
+					: null
+			);
+		}
+
+		/* ── 设置面板（R6）────────────────────────────────────────────── */
+
+		function ToggleRow(props) {
+			const { label, hint, on, onChange } = props;
+			return h(
+				"div",
+				{ className: "dpi-set-row" },
+				h("div", { className: "dpi-set-label" },
+					h("div", null, label),
+					hint ? h("div", { className: "dpi-muted dpi-set-hint" }, hint) : null),
+				h("button", {
+					className: "dpi-switch" + (on ? " is-on" : ""),
+					role: "switch",
+					"aria-checked": on ? "true" : "false",
+					"aria-label": label,
+					onClick: () => onChange(!on)
+				}, h("i", null))
+			);
+		}
+
+		function SegRow(props) {
+			const { label, hint, value, options, onChange } = props;
+			return h(
+				"div",
+				{ className: "dpi-set-row dpi-set-row-col" },
+				h("div", { className: "dpi-set-label" },
+					h("div", null, label),
+					hint ? h("div", { className: "dpi-muted dpi-set-hint" }, hint) : null),
+				h("div", { className: "dpi-seg" }, options.map((opt) =>
+					h("button", {
+						key: String(opt.value),
+						className: "dpi-seg-btn" + (String(opt.value) === String(value) ? " is-on" : ""),
+						onClick: () => onChange(opt.value)
+					}, opt.label)))
+			);
+		}
+
+		function SettingsModal() {
+			const st = currentSettings();
+			const close = () => setLocal({ settingsOpen: false });
+			const setSources = (key, next) => {
+				const sources = { ...st.sources, [key]: next };
+				if (!sources.npm && !sources.github && !sources.hub) {
+					toast("至少要留一个搜索源");
+					return;
+				}
+				saveSettings({ sources });
+			};
+			return h(
+				"div",
+				{ className: "dpi-overlay", onClick: close, role: "dialog", "aria-label": "设置" },
+				h("div", { className: "dpi-settings", onClick: (e) => e.stopPropagation() },
+					h("div", { className: "dpi-card-head" },
+						h("strong", null, "设置"),
+						h("span", { className: "dpi-muted" }, "默认档 = 现在的行为"),
+						h("button", { className: "dpi-btn dpi-btn-ghost dpi-btn-sm", style: { marginLeft: "auto" }, onClick: close }, "关闭")),
+
+					h("div", { className: "dpi-set-body" },
+						h("div", { className: "dpi-set-section" },
+							h("div", { className: "dpi-set-section-title" }, "提醒"),
+							h(ToggleRow, {
+								label: "侧边栏红点",
+								hint: "关掉后图标不再冒红点；面板里仍会写「N 条待处理（红点已关）」",
+								on: st.redDot,
+								onChange: (v) => saveSettings({ redDot: v })
+							}),
+							h(ToggleRow, {
+								label: "声音提醒",
+								hint: "有任务变成「等待确认」或「失败」时响一声（不引音频文件，浏览器可能要求先交互一次）",
+								on: st.sound,
+								onChange: (v) => saveSettings({ sound: v })
+							}),
+							h(ToggleRow, {
+								label: "桌面弹窗",
+								hint: "同上，但走系统通知；没授权会先问一次，拒绝则退回面板内提示",
+								on: st.desktopPopup,
+								onChange: (v) => {
+									saveSettings({ desktopPopup: v });
+									if (v && typeof Notification !== "undefined" && Notification.permission === "default") {
+										Notification.requestPermission().catch(() => {});
+									}
+								}
+							})),
+
+						h("div", { className: "dpi-set-section" },
+							h("div", { className: "dpi-set-section-title" }, "审核"),
+							h(SegRow, {
+								label: "审核强度",
+								hint: "普通 = 一直以来的标准强度（默认）。严格 = 检出任何能力特征就停下来问，且中危常规能力也交给 AI 看一眼。关闭 = 不再停下来问、也不调模型，但装不了的东西照样阻断。",
+								value: st.reviewLevel,
+								options: [{ value: "strict", label: "严格" }, { value: "normal", label: "普通" }, { value: "off", label: "关闭" }],
+								onChange: (v) => saveSettings({ reviewLevel: v })
+							}),
+							h(ToggleRow, {
+								label: "允许「跳过审核」按钮",
+								hint: "给「信任这个插件 / 想赶紧用上 / 想省 token」的人一个选择。开着时确认卡上多一个按钮，点它还要再确认一次；关掉则完全没有这个入口。",
+								on: st.skipReview,
+								onChange: (v) => saveSettings({ skipReview: v })
+							})),
+
+						h("div", { className: "dpi-set-section" },
+							h("div", { className: "dpi-set-section-title" }, "界面与性能"),
+							h(SegRow, {
+								label: "状态轮询间隔",
+								hint: "面板开着时的刷新节奏。调慢能少发请求，代价是进度看起来更「跳」。",
+								value: st.pollMs,
+								options: [{ value: 2500, label: "2.5 秒" }, { value: 5000, label: "5 秒" }, { value: 10000, label: "10 秒" }],
+								onChange: (v) => saveSettings({ pollMs: v })
+							}),
+							h(SegRow, {
+								label: "历史显示条数",
+								hint: "只影响显示；任务本身最多留 40 条。",
+								value: st.historyLimit,
+								options: [{ value: 5, label: "5 条" }, { value: 8, label: "8 条" }, { value: 20, label: "20 条" }],
+								onChange: (v) => saveSettings({ historyLimit: v })
+							}),
+							h(SegRow, {
+								label: "快照保留份数",
+								hint: "回滚就靠这些快照。调少省磁盘，但很久以前的安装就回不去了。",
+								value: st.snapshotKeep,
+								options: [{ value: 20, label: "20 份" }, { value: 40, label: "40 份" }, { value: 80, label: "80 份" }],
+								onChange: (v) => saveSettings({ snapshotKeep: v })
+							})),
+
+						h("div", { className: "dpi-set-section" },
+							h("div", { className: "dpi-set-section-title" }, "自检快捷键"),
+							h("div", { className: "dpi-muted dpi-set-hint" },
+								"任意页面按一下 = 环境自检 + 自动修复，不用先切到这个面板。结果落在右下角的游离浮窗里，会直接告诉你「现在能不能重启」—— 重复的 dsh-tools 只在插件加载那一刻发作，所以有效的时机就是重启之前。"),
+							h(SegRow, {
+								label: "按键",
+								hint: "默认 Ctrl+Alt+D。若被别的程序抢了（Windows 的 Ctrl+Alt+字母常被输入法 / 显卡驱动占住），换一个即可；选「关闭」就不注册监听。存在这台浏览器的 localStorage 里，不走宿主设置。",
+								value: currentHotkey(),
+								options: HOTKEY_CHOICES,
+								onChange: (v) => {
+									saveHotkey(v);
+									toast(v === HOTKEY_OFF ? "自检快捷键已关闭" : "自检快捷键改为 " + v);
+								}
+							})),
+
+						h("div", { className: "dpi-set-section" },
+							h("div", { className: "dpi-set-section-title" }, "搜索来源"),
+							h("div", { className: "dpi-muted dpi-set-hint" }, "关掉某个源能少发请求（GitHub 搜索未认证只有 10 次/分）；至少要留一个。"),
+							h(ToggleRow, { label: "npm registry", on: st.sources.npm, onChange: (v) => setSources("npm", v) }),
+							h(ToggleRow, { label: "GitHub（仓库搜索 / topic 发现）", on: st.sources.github, onChange: (v) => setSources("github", v) }),
+							h(ToggleRow, { label: "dsh-hub 商店（评分 / 安装量）", on: st.sources.hub, onChange: (v) => setSources("hub", v) }))),
+
+					h("div", { className: "dpi-actions" },
+						h("button", {
+							className: "dpi-btn",
+							onClick: () => saveSettings(SETTING_DEFAULTS).then(() => toast("已恢复默认（= 现在的标准版）"))
+						}, "恢复默认"),
+						h("span", { className: "dpi-muted" }, "改动立刻生效，存在 data/settings.json")))
+			);
+		}
+
+		/**
+		 * 「跳过审核，直接安装」（R6）。
+		 * 只在「等待确认 + 这次本来要审」时出现；点了先在原地展开二次确认，
+		 * 把后果写清楚再让他自己按下去 —— 按钮提供选择，不替用户做决定。
+		 */
+		function SkipReviewButton(props) {
+			const { job, busy, act } = props;
+			const st = currentSettings();
+			const [asking, setAsking] = useState(false);
+			if (!st.skipReview) return null;
+			if (!job || !job.precheck || !job.precheck.needsAiReview) return null;
+			if (!asking) {
+				return h("button", { className: "dpi-btn dpi-btn-ghost", disabled: busy !== null, onClick: () => setAsking(true) }, "跳过审核，直接安装");
+			}
+			return h("div", { className: "dpi-ask" },
+				h("b", null, "确认跳过审核？"),
+				h("div", { className: "dpi-detail" },
+					"这会：① 不再停下来等你确认；② 不调用模型、不花那笔 token（≈2–4k）。",
+					"风险提示仍然全部有效，装完仍会做诊断，出问题可以一键回滚。"),
+				h("div", { className: "dpi-actions dpi-actions-tight" },
+					h("button", { className: "dpi-btn dpi-btn-sm", onClick: () => setAsking(false) }, "再想想"),
+					h("button", {
+						className: "dpi-btn dpi-btn-primary dpi-btn-sm",
+						disabled: busy !== null,
+						onClick: () => {
+							setAsking(false);
+							act("skip-review");
+						}
+					}, "我确认跳过")));
+		}
+
+		function Panel() {
+			const s = useStore();
+			const data = s.data || {};
+			const active = data.active;
+			const attention = data.attention || { dot: false, count: 0 };
+			const host = data.host || {};
+			const settings = currentSettings();
+			const pollMs = settings.pollMs;
+			const prevStatus = useRef({});
+			useEffect(() => {
+				setLocal({ open: true });
+				reportClientState();
+				stopPolling();
+				startPolling(pollMs);
+				return () => {
+					setLocal({ open: false });
+					stopPolling();
+					startPolling(6000);
+				};
+			}, []);
+			/* 改了轮询间隔就当场换节奏（面板关着时不管，收起态固定 6s） */
+			useEffect(() => {
+				if (!polling) return;
+				stopPolling();
+				startPolling(pollMs);
+			}, [pollMs]);
+			/* 提醒（R6）：任务变成「等待确认 / 失败」的那一刻响一声 / 弹一次，每个任务只触发一次 */
+			useEffect(() => {
+				const jobs = (data.jobs || []).slice();
+				if (data.active) jobs.unshift(data.active);
+				const next = {};
+				let alertJob = null;
+				for (const job of jobs) {
+					if (!job || !job.id) continue;
+					next[job.id] = job.status;
+					const before = prevStatus.current[job.id];
+					if (!alertJob && before && before !== job.status && (job.status === "awaiting-confirm" || job.status === "failed")) {
+						alertJob = job;
+					}
+				}
+				prevStatus.current = next;
+				if (!alertJob) return;
+				const title = alertJob.status === "awaiting-confirm" ? "有任务在等你确认" : "安装任务失败";
+				const body = (alertJob.title || alertJob.id) + (alertJob.error && alertJob.error.message ? " · " + alertJob.error.message : "");
+				if (settings.sound) beep();
+				if (settings.desktopPopup) desktopNotify(title, body);
+			}, [data]);
+
+			return h(
+				"div",
+				{ className: "dpi-panel" },
+				h("header", { className: "dpi-header" },
+					h("div", { className: "dpi-brand" },
+						h("span", { className: "dpi-brand-icon" }, h(InstallIcon, { size: 22 })),
+						h("div", null,
+							h("div", { className: "dpi-title" }, "插件 / Skill 安装"),
+							h("div", { className: "dpi-muted" },
+								"DSH " + (host.dsh || "?") + " · " + (host.profile || "?") + " 档 · 安装不花 token"
+								+ (attention.count > 0 ? " · " + attention.count + " 条待处理" + (attention.dot ? "" : "（红点已关）") : "")))),
+					h("div", { className: "dpi-header-actions" },
+						h("button", { className: "dpi-btn dpi-btn-ghost dpi-btn-sm", onClick: () => setLocal({ settingsOpen: true }) }, "设置"),
+						h("button", { className: "dpi-btn dpi-btn-ghost dpi-btn-sm", onClick: () => refresh() }, "刷新"),
+						attention.dot ? h("button", { className: "dpi-btn dpi-btn-ghost dpi-btn-sm", onClick: () => api("/action", { method: "POST", body: JSON.stringify({ action: "ack" }) }).then((r) => r.state && setStore({ data: r.state })) }, "清除红点") : null)),
+
+				s.error ? h("div", { className: "dpi-error" }, "面板读不到状态：" + s.error + "（宿主半边可能还没重启）") : null,
+
+				data.warnings && data.warnings.length > 0
+					? h("div", { className: "dpi-warnbar" },
+						h("b", null, "已自动处理 " + data.warnings.length + " 处环境隐患"),
+						data.warnings.slice(-2).map((w, i) => h("div", { key: "warn" + i, className: "dpi-detail" }, w.message + (w.to ? "（备份在 " + w.to + "）" : ""))),
+						h("button", {
+							className: "dpi-btn dpi-btn-sm",
+							onClick: () => api("/action", { method: "POST", body: JSON.stringify({ action: "fix-landmine" }) }).then((r) => {
+								if (r && r.state) setStore({ data: r.state });
+								toast(r && r.landmine && r.landmine.moved ? "又清理了一份" : "没有发现新的覆盖");
+							})
+						}, "再查一遍"))
+					: null,
+
+				h(Composer),
+
+				data.active ? h("div", { className: "dpi-card dpi-active" }, h(JobDetail, { job: data.active })) : null,
+
+				attention.count > 0 && attention.items && attention.items.length > 0
+					? h("ul", { className: "dpi-attention" }, attention.items.map((item) =>
+						h("li", { key: "att" + item.id }, h("b", null, item.title), h("span", { className: "dpi-detail" }, item.reason))))
+					: null,
+
+				h(AiBox),
+				h(History),
+				h(DoctorBox),
+
+				h("footer", { className: "dpi-footer" },
+					h("span", null, "profile：" + (host.profileDir || "?")),
+					h("span", null, "技能根：" + ((host.skillRoots && host.skillRoots[0]) || "?")),
+					h("span", null, "数据：" + (host.dataDir || "?")),
+					s.local.toast ? h("span", { className: "dpi-toast" }, s.local.toast) : null),
+
+				s.local.settingsOpen ? h(SettingsModal) : null
+			);
+		}
+
+		/* ── 样式 ─────────────────────────────────────────────────────── */
+
+		const CSS = `
+.dpi-entry{position:relative;display:inline-flex;align-items:center;justify-content:center;line-height:0}
+.dpi-entry .dpi-dot{position:absolute;top:-3px;right:-4px;width:8px;height:8px;border-radius:50%;
+  background:var(--dsw-alias-state-error-primary,#e5484d);box-shadow:0 0 0 2px var(--dsw-specific-sidebar-fill,transparent)}
+.dpi-panel{box-sizing:border-box;height:100%;overflow:auto;padding:20px 22px 40px;
+  color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-base)}
+.dpi-panel *{box-sizing:border-box}
+.dpi-header{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:16px}
+.dpi-brand{display:flex;gap:10px;align-items:center;min-width:0}
+.dpi-brand-icon{display:flex;align-items:center;justify-content:center;width:34px;height:34px;border-radius:10px;
+  color:var(--dsw-alias-brand-primary);background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l1)}
+.dpi-title{font-size:15px;font-weight:600;line-height:1.3}
+.dpi-muted{color:var(--dsw-alias-label-secondary);font-size:12px;line-height:1.5}
+.dpi-header-actions{display:flex;gap:6px;flex-shrink:0}
+.dpi-composer{position:relative;border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);
+  border-radius:12px;padding:10px;margin-bottom:14px}
+.dpi-composer.is-drag{border-color:var(--dsw-alias-brand-primary);box-shadow:0 0 0 2px color-mix(in srgb,var(--dsw-alias-brand-primary) 22%,transparent)}
+.dpi-drop-veil{position:absolute;inset:0;border-radius:12px;display:flex;align-items:center;justify-content:center;
+  background:color-mix(in srgb,var(--dsw-alias-brand-primary) 12%,transparent);font-size:13px;pointer-events:none}
+.dpi-input{width:100%;border:none;outline:none;resize:vertical;background:transparent;color:inherit;
+  font:inherit;font-size:13px;line-height:1.6;min-height:44px}
+.dpi-input-line{min-height:34px;border:1px solid var(--dsw-alias-border-l1);border-radius:8px;padding:6px 10px;
+  background:var(--dsw-alias-bg-layer-2);flex:1}
+.dpi-composer-row{display:flex;gap:8px;align-items:center;margin-top:6px;flex-wrap:wrap}
+.dpi-hint{margin-left:auto}
+.dpi-btn{border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-2);color:inherit;
+  border-radius:8px;padding:6px 12px;font-size:12.5px;cursor:pointer;line-height:1.4}
+.dpi-btn:hover:not(:disabled){border-color:var(--dsw-alias-border-l2)}
+.dpi-btn:disabled{opacity:.5;cursor:default}
+.dpi-btn-primary{background:var(--dsw-alias-brand-primary);border-color:transparent;
+  color:var(--dsw-alias-bg-base);font-weight:500}
+.dpi-btn-ghost{background:transparent}
+.dpi-btn-sm{padding:4px 9px;font-size:12px}
+.dpi-mini{border:1px solid var(--dsw-alias-border-l1);background:transparent;color:var(--dsw-alias-label-secondary);
+  border-radius:6px;padding:2px 7px;font-size:11px;cursor:pointer;flex-shrink:0}
+.dpi-card{border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);border-radius:12px;
+  padding:12px 14px;margin-bottom:12px}
+.dpi-card-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px;font-size:13px}
+.dpi-active{border-color:var(--dsw-alias-border-l2)}
+.dpi-job-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px}
+.dpi-job-title{font-weight:600;font-size:13.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:52ch}
+.dpi-right{margin-left:auto}
+.dpi-pill{display:inline-block;padding:1px 8px;border-radius:99px;font-size:11.5px;border:1px solid transparent}
+.dpi-pill-ok{color:var(--dsw-alias-state-success-primary);background:color-mix(in srgb,var(--dsw-alias-state-success-primary) 13%,transparent)}
+.dpi-pill-warn{color:var(--dsw-alias-state-warn-primary);background:color-mix(in srgb,var(--dsw-alias-state-warn-primary) 14%,transparent)}
+.dpi-pill-error{color:var(--dsw-alias-state-error-primary);background:color-mix(in srgb,var(--dsw-alias-state-error-primary) 13%,transparent)}
+.dpi-pill-idle{color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-layer-2)}
+.dpi-stages{list-style:none;margin:6px 0 10px;padding:0;display:flex;flex-direction:column;gap:3px}
+.dpi-stage{display:flex;align-items:baseline;gap:8px;font-size:12.5px}
+.dpi-stage-icon{width:14px;text-align:center;font-weight:700;color:var(--dsw-alias-label-secondary);flex-shrink:0}
+.dpi-stage.is-ok .dpi-stage-icon{color:var(--dsw-alias-state-success-primary)}
+.dpi-stage.is-warn .dpi-stage-icon{color:var(--dsw-alias-state-warn-primary)}
+.dpi-stage.is-fail .dpi-stage-icon{color:var(--dsw-alias-state-error-primary)}
+.dpi-stage.is-running .dpi-stage-icon{color:var(--dsw-alias-brand-primary)}
+.dpi-stage-body{display:flex;gap:8px;flex-wrap:wrap;min-width:0}
+.dpi-stage-label{flex-shrink:0}
+.dpi-stage-detail{color:var(--dsw-alias-label-secondary);font-size:12px;word-break:break-word}
+.dpi-stage-ms{margin-left:auto;color:var(--dsw-alias-label-secondary);font-size:11px;flex-shrink:0}
+.dpi-list{list-style:none;margin:6px 0;padding:0;display:flex;flex-direction:column;gap:6px;font-size:12.5px}
+.dpi-list li{padding-left:10px;border-left:2px solid var(--dsw-alias-border-l1);display:flex;flex-direction:column;gap:3px}
+.dpi-list-block li{border-left-color:var(--dsw-alias-state-error-primary)}
+.dpi-list-warn li{border-left-color:var(--dsw-alias-state-warn-primary)}
+.dpi-list-info li{border-left-color:var(--dsw-alias-border-l2)}
+.dpi-detail{color:var(--dsw-alias-label-secondary);font-size:12px;white-space:pre-wrap;word-break:break-word}
+.dpi-tag{display:inline-block;padding:0 6px;border-radius:5px;font-size:11px;background:var(--dsw-alias-bg-layer-2);
+  color:var(--dsw-alias-label-secondary);border:1px solid var(--dsw-alias-border-l1)}
+.dpi-tag-high{border-color:var(--dsw-alias-state-error-primary);color:var(--dsw-alias-state-error-primary)}
+.dpi-tag-medium{border-color:var(--dsw-alias-state-warn-primary);color:var(--dsw-alias-state-warn-primary)}
+.dpi-tag-kind{border-color:var(--dsw-alias-brand-primary);color:var(--dsw-alias-brand-primary)}
+.dpi-excerpt{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11.5px;color:var(--dsw-alias-label-secondary);
+  background:var(--dsw-alias-bg-layer-2);border-radius:6px;padding:4px 6px;overflow-x:auto;white-space:pre}
+.dpi-pre{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11px;background:var(--dsw-alias-bg-layer-2);
+  border-radius:8px;padding:8px;overflow:auto;max-height:260px;margin:6px 0 0}
+.dpi-hits summary{cursor:pointer;font-size:12px;color:var(--dsw-alias-label-secondary);margin-top:6px}
+.dpi-hits ul{list-style:none;margin:6px 0 0;padding:0;display:flex;flex-direction:column;gap:6px;font-size:12px}
+.dpi-fixes{margin-top:8px;display:flex;flex-direction:column;gap:6px}
+/* 「怎么解决」：每条发现下面一段带编号的处置步骤，命令仍然是可复制的块。 */
+.dpi-fixbox{margin-top:7px;border-radius:8px;padding:7px 9px;border:1px dashed var(--dsw-alias-border-l1);
+  display:flex;flex-direction:column;gap:6px}
+.dpi-fixhead{font-size:12px;font-weight:600;color:var(--dsw-alias-label-primary)}
+.dpi-fixlist{margin:0;padding-left:18px;display:flex;flex-direction:column;gap:5px;font-size:12px;
+  line-height:1.6;color:var(--dsw-alias-label-secondary)}
+.dpi-fixlist li{padding-left:2px}
+.dpi-fixaction{font-size:12px;color:var(--dsw-alias-label-secondary);display:flex;flex-direction:column;gap:5px}
+/* 「大白话解释」开关：术语细节 ⇄ 大白话。颜色用 brand-primary，暗色主题下也够亮。 */
+.dpi-plain-btn{margin-left:auto}
+.dpi-plain-btn.is-on{border-color:var(--dsw-alias-brand-primary);color:var(--dsw-alias-brand-primary)}
+.dpi-detail.is-plain{color:var(--dsw-alias-label-primary);font-size:12.5px;line-height:1.65}
+.dpi-cmd{display:flex;gap:8px;align-items:flex-start;background:var(--dsw-alias-bg-layer-2);border-radius:8px;padding:6px 8px}
+.dpi-cmd code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11.5px;overflow-x:auto;
+  white-space:pre;flex:1;color:var(--dsw-alias-label-primary)}
+.dpi-error{border-left:2px solid var(--dsw-alias-state-error-primary);padding:6px 10px;margin:8px 0;
+  background:color-mix(in srgb,var(--dsw-alias-state-error-primary) 7%,transparent);border-radius:6px;font-size:12.5px}
+.dpi-warnbar{border:1px solid var(--dsw-alias-state-warn-primary);border-radius:9px;padding:8px 10px;margin-bottom:12px;
+  font-size:12.5px;display:flex;flex-direction:column;gap:5px;
+  background:color-mix(in srgb,var(--dsw-alias-state-warn-primary) 8%,transparent)}
+.dpi-warnbar b{color:var(--dsw-alias-state-warn-primary)}
+.dpi-warnbar .dpi-btn{align-self:flex-start;margin-top:2px}
+.dpi-meta{font-size:12.5px;margin-bottom:8px;display:flex;flex-direction:column;gap:4px}
+.dpi-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:10px}
+.dpi-actions-end{justify-content:flex-end}
+.dpi-actions-tight{margin-top:6px}
+.dpi-attention{list-style:none;margin:0 0 12px;padding:0;display:flex;flex-direction:column;gap:6px;font-size:12px}
+.dpi-attention li{border-left:2px solid var(--dsw-alias-state-error-primary);padding-left:8px;display:flex;flex-direction:column;gap:2px}
+.dpi-ai .dpi-ai-reply{margin-top:8px;font-size:12.5px;line-height:1.6}
+.dpi-recos{display:flex;flex-direction:column;gap:8px;margin-top:8px}
+.dpi-reco{border:1px solid var(--dsw-alias-border-l1);border-radius:9px;padding:8px 10px}
+.dpi-reco-head{display:flex;gap:8px;align-items:center;font-size:12.5px}
+.dpi-reco-why{color:var(--dsw-alias-label-secondary);font-size:12px;margin-top:4px;line-height:1.55}
+/* R3：可信度徽章 / 红旗 / 用途-权限卡 */
+.dpi-badges{display:flex;flex-wrap:wrap;gap:5px;margin-top:6px}
+.dpi-flags{display:flex;flex-direction:column;gap:4px;margin-top:6px}
+.dpi-flag{font-size:11.5px;line-height:1.5;padding:4px 7px;border-radius:6px;
+  border-left:2px solid var(--dsw-alias-state-warn-primary);color:var(--dsw-alias-label-secondary);
+  background:color-mix(in srgb,var(--dsw-alias-state-warn-primary) 8%,transparent)}
+.dpi-flag.is-error{border-left-color:var(--dsw-alias-state-error-primary);
+  background:color-mix(in srgb,var(--dsw-alias-state-error-primary) 8%,transparent)}
+.dpi-purpose{margin-top:10px;border:1px solid var(--dsw-alias-border-l1);border-radius:9px;padding:8px 10px;
+  display:flex;flex-direction:column;gap:5px;background:var(--dsw-alias-bg-layer-1)}
+.dpi-purpose-head{display:flex;gap:8px;align-items:center;font-size:12.5px;flex-wrap:wrap}
+.dpi-link{font-size:12px;color:var(--dsw-alias-brand-primary);text-decoration:none}
+.dpi-history{display:flex;flex-direction:column}
+.dpi-history-row{display:flex;gap:8px;align-items:center;width:100%;background:transparent;border:none;color:inherit;
+  padding:6px 4px;cursor:pointer;text-align:left;font:inherit;font-size:12.5px;border-radius:6px}
+.dpi-history-row:hover{background:var(--dsw-alias-bg-layer-2)}
+.dpi-history-title{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dpi-chev{color:var(--dsw-alias-label-secondary);font-size:11px}
+.dpi-dot-static{width:7px;height:7px;border-radius:50%;background:var(--dsw-alias-state-idle-primary);flex-shrink:0}
+.dpi-dot-static.is-done{background:var(--dsw-alias-state-success-primary)}
+.dpi-dot-static.is-failed{background:var(--dsw-alias-state-error-primary)}
+.dpi-dot-static.is-awaiting-confirm{background:var(--dsw-alias-state-warn-primary)}
+.dpi-dot-static.is-running{background:var(--dsw-alias-brand-primary)}
+.dpi-footer{display:flex;flex-direction:column;gap:2px;margin-top:18px;padding-top:10px;
+  border-top:1px solid var(--dsw-alias-border-l1);font-size:11px;color:var(--dsw-alias-label-secondary);word-break:break-all}
+.dpi-toast{margin-top:6px;color:var(--dsw-alias-brand-primary)}
+
+/* ── 设置（R6）───────────────────────────────────────────────────── */
+.dpi-overlay{position:fixed;inset:0;z-index:60;background:rgba(0,0,0,.42);
+  display:flex;align-items:flex-start;justify-content:center;padding:48px 16px;overflow:auto}
+.dpi-settings{width:min(620px,100%);max-height:calc(100vh - 96px);overflow:auto;box-sizing:border-box;
+  background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);border-radius:14px;
+  border:1px solid var(--dsw-alias-border-l1);padding:16px 18px 18px;box-shadow:0 18px 48px rgba(0,0,0,.35)}
+.dpi-set-body{display:flex;flex-direction:column;gap:14px;margin-top:10px}
+.dpi-set-section{display:flex;flex-direction:column;gap:8px;padding:10px 0 2px;border-top:1px solid var(--dsw-alias-border-l1)}
+.dpi-set-section-title{font-size:12px;letter-spacing:.06em;color:var(--dsw-alias-label-secondary)}
+.dpi-set-row{display:flex;align-items:center;gap:14px;justify-content:space-between}
+.dpi-set-row-col{flex-direction:column;align-items:stretch;gap:8px}
+.dpi-set-label{display:flex;flex-direction:column;gap:3px;font-size:13px;min-width:0}
+.dpi-set-hint{font-size:11.5px;line-height:1.5}
+.dpi-switch{width:42px;height:24px;border-radius:999px;border:1px solid var(--dsw-alias-border-l2);
+  background:var(--dsw-alias-bg-layer-2);position:relative;cursor:pointer;flex-shrink:0;padding:0;
+  transition:background .15s ease}
+.dpi-switch i{position:absolute;top:2px;left:2px;width:18px;height:18px;border-radius:50%;
+  background:var(--dsw-alias-label-secondary);transition:transform .15s ease,background .15s ease}
+.dpi-switch.is-on{background:var(--dsw-alias-brand-primary);border-color:var(--dsw-alias-brand-primary)}
+.dpi-switch.is-on i{transform:translateX(18px);background:var(--dsw-alias-bg-base)}
+.dpi-seg{display:inline-flex;gap:6px;flex-wrap:wrap}
+.dpi-seg-btn{padding:6px 12px;border-radius:8px;border:1px solid var(--dsw-alias-border-l1);
+  background:transparent;color:var(--dsw-alias-label-secondary);cursor:pointer;font:inherit;font-size:12.5px}
+.dpi-seg-btn:hover{border-color:var(--dsw-alias-border-l2)}
+.dpi-seg-btn.is-on{background:var(--dsw-alias-brand-primary);border-color:var(--dsw-alias-brand-primary);
+  color:var(--dsw-alias-bg-base)}
+.dpi-ask{display:flex;flex-direction:column;gap:6px;width:100%;margin-top:8px;padding:10px 12px;
+  border-radius:10px;border:1px solid var(--dsw-alias-state-warn-primary,#d89614);
+  background:var(--dsw-alias-bg-layer-2)}
+@media (max-width:760px){
+  .dpi-overlay{padding:12px 8px}
+  .dpi-settings{max-height:calc(100vh - 24px);padding:12px}
+}
+@media (max-width:760px){
+  .dpi-panel{padding:14px 12px 32px}
+  .dpi-job-title{max-width:100%;white-space:normal}
+  .dpi-hint{display:none}
+  .dpi-btn{padding:9px 14px;font-size:13px}
+  .dpi-btn-sm{padding:7px 11px}
+  .dpi-header{flex-direction:column;align-items:stretch}
+  .dpi-header-actions{justify-content:flex-end}
+}
+`;
+
+		/* ── 插件体 ───────────────────────────────────────────────────── */
+
+		function apply(ctx) {
+			ctx.effect(() => {
+				const style = document.createElement("style");
+				style.setAttribute("data-plugin", "dsh-plugin-installer");
+				style.textContent = CSS;
+				document.head.appendChild(style);
+				return () => {
+					try {
+						style.remove();
+					} catch (e) {
+						/* ignore */
+					}
+				};
+			}, "plugin-installer: styles");
+
+			ctx.effect(() => {
+				startPolling(4000);
+				return () => stopPolling();
+			}, "plugin-installer: polling");
+
+			ctx.slots.inject("sidebar.panellist", () =>
+				ctx.slots.register(
+					{ name: "sidebar.panellist", id: "installer", order: 30, label: () => PANEL_LABEL },
+					SidebarEntry
+				)
+			);
+
+			ctx.slots.inject("main", () =>
+				ctx.slots.register({ name: "main", key: "installer" }, Panel)
+			);
+		}
+
+		const exports = { apply, inject: ["slots"] };
+		exports.__test = {
+			PANEL_LABEL,
+			InstallIcon,
+			SidebarEntry,
+			Panel,
+			JobDetail,
+			PrecheckCard,
+			ReviewCard,
+			DiagnosisCard,
+			copyText,
+			ago,
+			store,
+			refresh,
+			submitInput,
+			startPolling,
+			stopPolling,
+			/* R6：设置面板与「跳过审核」按钮也要能被无头渲染到 */
+			SETTING_DEFAULTS,
+			currentSettings,
+			beep,
+			desktopNotify,
+			SettingsModal,
+			SkipReviewButton,
+			/* R6.1：自检快捷键（无头渲染与自测也要能摸到这几个） */
+			runSelfCheck,
+			bindHotkey,
+			hotkeyMatches,
+			parseHotkey,
+			currentHotkey,
+			saveHotkey,
+			showHotkeyCard,
+			hideHotkeyCard,
+			HOTKEY_DEFAULT,
+			HOTKEY_OFF,
+			HOTKEY_CHOICES
+		};
+
+		/* 模块加载即绑定：client bundle 在启动时跑一次，
+		   所以快捷键从一开始就是活的 —— 不用先打开「插件安装」面板。 */
+		bindHotkey();
+
+		return exports;
+	}
+});

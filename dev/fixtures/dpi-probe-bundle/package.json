@@ -1,0 +1,20 @@
+{
+  "name": "dpi-probe-bundle",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "dsh-plugin-installer 的端到端自检用 bundle（装完立刻回滚）。它什么都不做，只用来验证「预检→确认→安装→诊断→回滚」这条链路。",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js"
+  },
+  "files": [
+    "index.js",
+    "cordis.patch.yml"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

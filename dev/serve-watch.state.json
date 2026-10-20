@@ -1,0 +1,21 @@
+﻿{
+    "at":  "2026-10-20T20:03:12.7627766+08:00",
+    "hotkey":  "ctrl+alt+y",
+    "startedAt":  "2026-10-20T02:44:10.4593248+08:00",
+    "error":  null,
+    "target":  49683,
+    "lastReason":  "timer",
+    "checks":  2535,
+    "heals":  7,
+    "pid":  9392,
+    "mode":  "daemon",
+    "ok":  true,
+    "intervalSec":  20,
+    "hotkeys":  [
+                    "ctrl+alt+y"
+                ],
+    "thread":  14760,
+    "lastCheck":  "2026-10-20T20:03:12.5886478+08:00",
+    "port":  49683,
+    "action":  "already-correct"
+}

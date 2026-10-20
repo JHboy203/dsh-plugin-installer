@@ -1,0 +1,4 @@
+# dpi-probe-bundle 的 patch：插一行什么都不做的插件。
+- insert:
+    - id: dpi-probe
+      name: dpi-probe-bundle

@@ -1,0 +1,6 @@
+# dsh-plugin-installer bundle patch：把宿主半边挂进 profile。
+# ⚠️ 改完这个文件必须重启 DSH（Desktop 不 watch patch 层）。
+# 宿主半边持有下载/解包/校验/安装/快照/诊断/回滚；客户端半边只做展示与交互。
+- insert:
+    - id: plugin-installer
+      name: dsh-plugin-installer

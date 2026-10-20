@@ -1,0 +1,5 @@
+{
+  "hotkeys": ["ctrl+alt+y", "ctrl+alt+g", "alt+shift+t"],
+  "intervalSec": 20,
+  "port": 0
+}

@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Plugin Installer",
+    "description": "Drop a GitHub link, a Release asset, a .tgz/.zip URL or a local archive into the sidebar panel: the Host downloads, unpacks, classifies, pre-checks, installs, snapshots and diagnoses it deterministically, without spending tokens on the installation itself."
+  }
+}

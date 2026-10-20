@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Plugin Installer">
+  <defs>
+    <linearGradient id="pi-box" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#5b8cff"/>
+      <stop offset="1" stop-color="#2f5fd0"/>
+    </linearGradient>
+  </defs>
+  <!-- 箱体：安装包 -->
+  <path d="M10 22 L32 11 L54 22 L32 33 Z" fill="url(#pi-box)" opacity="0.95"/>
+  <path d="M10 22 L10 42 L32 53 L32 33 Z" fill="#24479c"/>
+  <path d="M54 22 L54 42 L32 53 L32 33 Z" fill="#1b3576"/>
+  <!-- 向下箭头：装进去 -->
+  <path d="M32 24 L32 38" stroke="#ffffff" stroke-width="4.2" stroke-linecap="round"/>
+  <path d="M25.5 32.5 L32 39.5 L38.5 32.5" fill="none" stroke="#ffffff" stroke-width="4.2"
+        stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- 落位托盘 -->
+  <path d="M22 45.5 L32 50.5 L42 45.5" fill="none" stroke="#9fc0ff" stroke-width="3"
+        stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
