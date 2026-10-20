@@ -27,3 +27,6 @@ secrets/
 .netrc
 configs/*-secret.json
 configs/*-config.json
+
+# dev 服务器运行时状态（每次启动都变）
+dev/serve-watch.state.json
