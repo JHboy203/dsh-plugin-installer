@@ -1,12 +1,12 @@
 ﻿{
-    "at":  "2026-10-20T20:03:12.7627766+08:00",
+    "at":  "2026-10-21T00:22:20.1402461+08:00",
     "hotkey":  "ctrl+alt+y",
     "startedAt":  "2026-10-20T02:44:10.4593248+08:00",
     "error":  null,
-    "target":  49683,
+    "target":  11648,
     "lastReason":  "timer",
-    "checks":  2535,
-    "heals":  7,
+    "checks":  3293,
+    "heals":  8,
     "pid":  9392,
     "mode":  "daemon",
     "ok":  true,
@@ -15,7 +15,7 @@
                     "ctrl+alt+y"
                 ],
     "thread":  14760,
-    "lastCheck":  "2026-10-20T20:03:12.5886478+08:00",
-    "port":  49683,
+    "lastCheck":  "2026-10-21T00:22:20.0623379+08:00",
+    "port":  11648,
     "action":  "already-correct"
 }

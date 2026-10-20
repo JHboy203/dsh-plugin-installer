@@ -92,6 +92,12 @@
 >
 > 自检 194 → **245**（+设置 23、审核三档 9、红点与跳过审核 7、搜索源 3、路由/客户端契约 9）；
 > 渲染 22 → **42**（真渲染设置面板两轮 + 跳过审核按钮三态）。
+>
+> **R7（2026-10-20 19:20）自检热键 `Ctrl+Alt+D`**（纯客户端）：任意页面按一下就跑一次环境自检
+> （复用宿主 `action:"repair"`，不新开一套判据），结果用**游离浮窗**报（面板没挂载也看得见），
+> 浮窗自己消失、热重载先摘旧监听（否则一次按键发 N 个请求）；键位存 `dpi.selfcheck.hotkey`，
+> 可在设置里改 `Ctrl+Shift+D` / `Alt+Shift+D` / 关闭；有任务在跑时拒绝动手，宿主 `doctor(apply)`
+> 也有并发闸。自检 +15 → **260**。
 
 > **R8（2026-10-20 19:40）把「装完就起不来」的判据并进面板**（宿主侧，重启生效）：
 > 1. **预检第 ⑤ 项：工具注册契约**（`lib/contract.js`）。DSH 0.2.1 起 `ctx.tools.register()`
@@ -106,6 +112,16 @@
 > 3. **一次调用看全**：`install_hub_doctor` 默认只回「一行结论 + 每条发现一行」，`verbose:true`
 >    才带 detail；`contract:false` 可跳过已装插件扫描提速。换会话 / 装完 / 起不来时只需这一个工具。
 > 4. 自检 260 → **269**（+契约扫描 4、profile 体检与修复 5）。
+>
+> **R6.1（2026-10-20 22:30）把「怎么验收」固化成 `dev/audit.mjs`**（收尾轮）：
+> 28 项自洽检查 —— **默认档冻结快照**（改 `DEFAULTS` 而不改承诺会红）/ **5 个工具的 output 契约** /
+> **构建标记格式**（`0.1.0 · YYYY-MM-DD HH:MM`，且 `/health` 不许写死）/ 客户端设置与热键入口 /
+> `settings.json` 归一化后逐字不变 / 等待确认任务的 staging 现场还在 / README 与交接文件里的
+> 断言数是否等于 `EXPECTED_ASSERTIONS`。**不碰宿主、不 spawn、不写盘**，只打印
+> 「接着跑 host_selfcheck（269）+ render-check（42）」。
+> 三层分工至此固定：**audit = 自洽，host_selfcheck = 行为，render-check = 界面**。
+> 线上实测：构建标签 `0.1.0 · 2026-10-20 19:45`、客户端 `r6.0`、`GET/POST /settings` 正常
+> （非法值当场夹取回默认）、`clientReport` 里有 360×658 的窄屏实例。
 
 | 项目 | 值 |
 |---|---|
@@ -230,13 +246,21 @@ dsh-tools 钉子是否过期、最近一次崩溃日志），可一键修其中�
 
 ## 7. 自检与排障
 
+**三个层次，别混**：`audit` = 自洽（不碰宿主）→ `host_selfcheck` = 行为 → `render-check` = 界面。
+
 ```bash
-# 245 项确定性自检（解包围栏 / 识别短路 / 扫描与密度 / 快照回滚 / 重打包 / prune 保鲜 / 地雷 / 预检 /
-#   已装版本对照 / 设置归一化与审核三档 / 红点与跳过审核门禁 / 体检 / 诊断的 plain+fix 数据契约 /
-#   client 静态契约 / 7z 往返与围栏 / 搜索缓存 / 工具契约）
+# ① 自洽体检（最快，不碰宿主、不重启；换会话先跑这条）
+node DSH-Plugin/dsh-plugin-installer/dev/audit.mjs
+#   28 项：默认档冻结快照 / 5 个工具的 output 契约 / 构建标记形如「0.1.0 · 2026-10-20 19:45」/
+#   契约扫描与 profile 体检是否真的接着线 / 客户端设置与热键入口 / settings.json 归一化后不变 /
+#   等待确认任务的 staging 现场 / README 与交接文件里的断言数是否等于 EXPECTED_ASSERTIONS（改测试就同步它）
+
+# ② 269 项确定性自检（解包围栏 / 识别短路 / 扫描与密度 / 快照回滚 / 重打包 / prune 保鲜 / 地雷 /
+#   契约扫描 / profile 体检与修复 / 已装版本对照 / 设置归一化与审核三档 / 红点与跳过审核门禁 /
+#   热键 / 7z 往返与围栏 / 搜索缓存 / 工具契约）
 host_selfcheck({ plugin: "dsh-plugin-installer" })
 
-# 无头渲染自检（微型 React 真的渲染一遍；42 项：诊断卡 / 预检卡 / 审查卡 / 设置面板 / 跳过审核按钮）
+# ③ 无头渲染自检（微型 React 真的渲染一遍；42 项：诊断卡 / 预检卡 / 审查卡 / 设置面板 / 跳过审核按钮）
 node DSH-Plugin/dsh-plugin-installer/dev/render-check.cjs
 
 # 环境体检：只读 → 修（幂等：挪 dsh-tools、从 node_modules 重打包补回 .tgz）
@@ -288,7 +312,7 @@ DSH 每次启动换随机端口（`dsh-desktop-host` 里写死 `--port 0`），�
 
 | 场景 | 结果 |
 |---|---|
-| 确定性自检 | **89/89 通过**（`dev/hosttest.mjs`，含 zip/tar 构造、穿越与软链接拒绝、比例炸弹、5 种识别分支、快照还原、重打包往返、prune 引用保护、地雷处置） |
+| 确定性自检 | **269/269 通过**（`dev/hosttest.mjs`，含 zip/tar 构造、穿越与软链接拒绝、比例炸弹、5 种识别分支、快照还原、重打包往返、prune 引用保护、地雷处置、契约扫描、profile 体检与修复、设置归一化、审核三档、热键）；另 **42 项**无头渲染 + **28 项**自洽体检 |
 | Skill 端到端（本机目录） | 1.8s 完成：识别 `dpi-selftest` → 预检通过 → 快照（插件 57/行 233/技能 54）→ 落位 → 诊断 ok（`skills: 58`）；技能目录清单**当场出现**该技能 |
 | 同一任务回滚 | 技能目录被删除、profile 三件套「未变化」、技能目录清单里它消失 |
 | GitHub 端到端 | `github.com/octocat/Hello-World`：API 983ms → 下载 504ms → 解包 4ms → 识别为「未识别」→ 预检**阻断**并红点；耗时与原因都写在面板上 |
@@ -335,9 +359,13 @@ lib/repair.js            环境体检 + 幂等修复（dsh-tools / 悬空 file: 
 lib/ai.js                面板 AI（搜索/推荐/递请求）+ 语义审查 + 材料裁剪
 lib/sources.js           6 个搜索源 + trust/popularity 判定 + TTL 缓存（memoizeTtl）+ 源开关
 lib/settings.js          个性化设置：默认档 = 原行为；归一化/夹取、原子落盘、一行摘要
+lib/contract.js          R8：工具注册契约静态扫描（漏 output 会让插件失活/中止启动）
+lib/profilehealth.js     R8：profile 层体检（bundles 对账 / 契约 / pnpm 钉子 / 崩溃日志）+ 幂等修复
 lib/purpose.js           用途推断 + 用途↔能力对账（ok / warn / error / unknown）
 lib/tools.js             五个宿主工具定义（含 output 契约）
-dev/hosttest.mjs         245 项确定性自检（宿主进程跑）
+dev/hosttest.mjs         269 项确定性自检（宿主进程跑）
+dev/render-check.cjs     42 项无头渲染自检（诊断卡 / 预检卡 / 审查卡 / 设置面板 / 跳过审核）
+dev/audit.mjs            28 项自洽体检（不碰宿主；换会话先跑这个）
 dev/quarantine-dshtools.mjs  手动兜底：把埋下的 dsh-tools 挪进备份（薄壳，复用 lib/landmine.js）
 dev/restore-vendor-tarball.mjs 手动兜底：把断掉的 file: 依赖补回来（薄壳，复用 lib/repair.js）
 dev/fix-tailscale-serve.ps1  管理员脚本：找到当前 GUI 端口并重指 tailscale serve
