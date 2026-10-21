@@ -45,7 +45,7 @@ export const FROZEN_DEFAULTS = {
 };
 
 /** 文档里声明的自检项数（改断言就先跑一次 host_selfcheck，再同步这个数）。 */
-export const EXPECTED_ASSERTIONS = 372;
+export const EXPECTED_ASSERTIONS = 383;
 
 /** 期望注册的宿主工具（漏一个 = 模型看不见一项能力）。 */
 const EXPECTED_TOOLS = [
@@ -160,6 +160,16 @@ async function main() {
 	ok("授权动作不暴露给模型（风险只能人接受）", !/exempt-version/.test(toolsSrc) && !/exemptVersion/.test(toolsSrc));
 	ok("面板有版本不兼容卡 + 二次确认", clientSrc.includes("CompatExemptCard") && clientSrc.includes("我确认风险"));
 	ok("体检会报告「已豁免但声明不兼容」的知情条目", /bundle-incompatible-exempted/.test(profileSrc));
+
+	/* ⑤e R11：两件「不提醒就等于没有」的事 —— staging 不能按时间清掉还在等确认的现场；
+	   状态工具里要有一行读得出「豁免失效 / 待批准脚本」。 */
+	ok("staging 保留在等确认的任务现场（R11）", /liveDirs/.test(pipelineSrc) && /awaiting-confirm/.test(pipelineSrc));
+	ok("状态工具有一行「环境注意」", /environmentCaveats/.test(pipelineSrc) && /环境注意/.test(toolsSrc));
+	ok("环境注意同时覆盖豁免失效与待批准脚本", /已失效/.test(pipelineSrc) && /待批准安装脚本/.test(pipelineSrc));
+	/* R11：把「跑的是不是新代码」从人工行为探针变成自动答案 */
+	const codestampSrc = await readText("lib\\codestamp.js");
+	ok("codestamp 模块存在（R11）", Boolean(codestampSrc) && /export async function freshness/.test(codestampSrc));
+	ok("健康检查回传「运行中 vs 磁盘」", /freshness\(\)/.test(indexSrc2) && /describeFreshness/.test((await readText("lib\\tools.js")) || ""));
 
 	/* ⑥ 数据目录：设置文件是否与运行时会一致（手改过就会出现差异） */
 	const settingsFile = join(dataDir(), "settings.json");

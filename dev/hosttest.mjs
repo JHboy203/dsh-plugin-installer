@@ -9,7 +9,7 @@
  * 覆盖：semver / 输入分类 / ZIP·TAR·tar.gz 解包与围栏 / 识别短路顺序 /
  *       静态扫描与脱敏 / 快照与回滚 / 预检阻断 / 审查材料裁剪。
  */
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gzipSync, deflateRawSync } from "node:zlib";
@@ -45,6 +45,7 @@ import {
 import { judgePurpose } from "../lib/purpose.js";
 import * as mExemptions from "../lib/exemptions.js";
 import * as mCompat from "../lib/compat.js";
+import * as mCodestamp from "../lib/codestamp.js";
 import { exemptionKey, parseExemptionKey, lookupExemption, summarizeExemptions, exemptionTarget } from "../lib/exemptions.js";
 import { buildInstallerTools } from "../lib/tools.js";
 import { clearSourceCaches, judgeTrust, memoizeTtl, normalizePopularity, searchAll, shapeGithub, shapeHub, shapeNpm, trustLine } from "../lib/sources.js";
@@ -1135,7 +1136,58 @@ async function main() {
 	ok("豁免动作: 任务笔记留痕", (happyJob.notes || []).some((n) => /精确版本豁免/.test(n)), JSON.stringify(happyJob.notes));
 	ok("豁免动作: 新任务从旧任务来（fromJob 留痕）", submitted && submitted.opts && submitted.opts.fromJob === "j8", JSON.stringify(submitted && submitted.opts));
 	eq("豁免动作: 新任务重试用原输入", submitted && submitted.raw, "some-plugin");
-	eq("豁免动作: 记录真的写进 compatibility.json", JSON.parse(await readFile(happyFile, "utf8"))["@anweat/dsh-browser@0.2.1"], ["0.2.1-rc.2"]);
+	ok("暴露动作: 记录真的写进 compatibility.json", JSON.parse(await readFile(happyFile, "utf8"))["@anweat/dsh-browser@0.2.1"], ["0.2.1-rc.2"]);
+
+	/* R11：staging 生命周期按「任务是否还有后续动作」判，不再纯按 24 小时。
+	   旧行为下，一个「等待确认」的任务放一天多再点确认 → 解包现场没了 → 用户看到
+	   「文件不在」而他什么也没做错。这里用真目录 + 真 mtime 验一遍。 */
+	const pruneRoot = dir("prune-root");
+	const stagingDir = join(pruneRoot, "staging");
+	const snapDir = join(pruneRoot, "snapshots");
+	await mkdir(join(stagingDir, "job-live"), { recursive: true });
+	await mkdir(join(stagingDir, "job-done"), { recursive: true });
+	await mkdir(snapDir, { recursive: true });
+	await writeFile(join(stagingDir, "job-live", "payload.txt"), "x", "utf8");
+	await writeFile(join(stagingDir, "job-done", "payload.txt"), "x", "utf8");
+	const old = new Date(Date.now() - 48 * 60 * 60 * 1000);
+	await utimes(join(stagingDir, "job-live"), old, old);
+	await utimes(join(stagingDir, "job-done"), old, old);
+	const pruneThis = {
+		jobs: [{ id: "job-live", status: "awaiting-confirm" }, { id: "job-done", status: "done", ack: true }],
+		settings: { snapshotKeep: 5 },
+		dirs: () => ({ staging: stagingDir, snapshots: snapDir }),
+		referencedStagingDirs: async () => new Set()
+	};
+	await Installer.prototype.prune.call(pruneThis);
+	const left = await readdir(stagingDir);
+	ok("staging: 等待确认任务的现场不按时间清", left.includes("job-live"), left.join(","));
+	ok("staging: 已结束任务的旧现场照常清掉", !left.includes("job-done"), left.join(","));
+
+	/* R11：状态里那一行「环境注意」——两条会静默卡住安装的事实，必须能在一行里读出来 */
+	const caveatProfile = dir("caveat-profile");
+	await mkdir(caveatProfile, { recursive: true });
+	await writeFile(join(caveatProfile, "pnpm-workspace.yaml"), "allowBuilds:\n  esbuild: \"set this to true or false\"\n", "utf8");
+	await writeFile(join(caveatProfile, "compatibility.json"), JSON.stringify({ "a@1.0.0": ["0.2.1-rc.2"], "b@2.0.0": ["0.2.1-rc.1"] }), "utf8");
+	const caveatLine = await Installer.prototype.environmentCaveats.call(
+		{ ctx: { pluginManager: null } },
+		{ profileDir: caveatProfile, runtimeVersion: "0.2.1-rc.2" });
+	ok("环境注意: 数出豁免总数", /版本豁免 2 条/.test(caveatLine), caveatLine);
+	ok("环境注意: 点名对当前 DSH 失效的记录", /b@2\.0\.0/.test(caveatLine), caveatLine);
+	ok("环境注意: 点名待批准安装脚本", /待批准安装脚本 1 个（esbuild）/.test(caveatLine), caveatLine);
+	const caveatClean = await Installer.prototype.environmentCaveats.call(
+		{ ctx: { pluginManager: null } },
+		{ profileDir: dir("caveat-clean"), runtimeVersion: "0.2.1-rc.2" });
+	ok("环境注意: 干净环境也要说清「0 条」", /版本豁免 0 条/.test(caveatClean) && !/待批准/.test(caveatClean), caveatClean);
+
+	/* R11：codestamp —— 「运行中的代码是不是磁盘这一版」要能自动回答，
+	   不能每次都靠人工做行为探针（R9/R10 各踩一次）。 */
+	const codeState = await mCodestamp.freshness();
+	eq("codestamp: 自检进程里跑的正是磁盘这份（fresh）", codeState.fresh, true);
+	ok("codestamp: 指纹覆盖 index.js + client.js + lib/*.js", codeState.disk && codeState.disk.files >= 20, codeState.disk && codeState.disk.files);
+	ok("codestamp: 一句话能说清「一致」", /一致/.test(mCodestamp.describeFreshness(codeState)), mCodestamp.describeFreshness(codeState));
+	const fakeStale = { fresh: false, loaded: { digest: "aaaa" }, disk: { digest: "bbbb", files: 30, newestFile: "lib/x.js" }, at: "t" };
+	ok("codestamp: 一句话能说清「旧、需要重启」", /旧/.test(mCodestamp.describeFreshness(fakeStale)) && /重启/.test(mCodestamp.describeFreshness(fakeStale)), mCodestamp.describeFreshness(fakeStale));
+	eq("codestamp: 读不到源码时也不抛（降级成一句人话）", typeof mCodestamp.describeFreshness(null), "string");
 
 	/* R9 实测撞出来的真 bug：save() 用固定 `state.json.tmp`，并发两次就 ENOENT，
 	   而那条错误会被当成「安装失败」记在任务上。现在要求：并发调用串行 + tmp 名唯一。 */

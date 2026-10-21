@@ -121,7 +121,7 @@
 > **构建标记格式**（`0.1.0 · YYYY-MM-DD HH:MM`，且 `/health` 不许写死）/ 客户端设置与热键入口 /
 > `settings.json` 归一化后逐字不变 / 等待确认任务的 staging 现场还在 / README 与交接文件里的
 > 断言数是否等于 `EXPECTED_ASSERTIONS`。**不碰宿主、不 spawn、不写盘**，只打印
-> 「接着跑 host_selfcheck（372）+ render-check（62）」。
+> 「接着跑 host_selfcheck（383）+ render-check（62）」。
 > 三层分工至此固定：**audit = 自洽，host_selfcheck = 行为，render-check = 界面**。
 > 线上实测：构建标签 `0.1.0 · 2026-10-20 19:45`、客户端 `r6.0`、`GET/POST /settings` 正常
 > （非法值当场夹取回默认）、`clientReport` 里有 360×658 的窄屏实例。
@@ -173,6 +173,26 @@
 >    **17 个**插件判成不兼容（宿主真值 3 个）。现在两条修正：`evaluateCompat` 接受调用方显式
 >    传入的运行版本；本地判定改用宿主的宽容口径（`includePrerelease`）。修完实测与宿主**完全一致**：
 >    `incompatible=0 / exempted=3`。
+>
+> **R11（2026-10-22 02:00）「等确认的现场不许被按时间清掉」+ 状态里多一行「环境注意」**：
+> 1. **staging 生命周期按「任务还有没有后续动作」判**（真 bug）：`prune()` 原来只按 24 小时清
+>    `data/staging/*`，于是一个「等待确认」的任务放一天多再点确认，解包现场已经没了 ——
+>    用户看到「文件不在」而他什么也没做错。现在：非终态任务（`queued` / `running` /
+>    `awaiting-confirm`）的现场一律不按时间清；终态的老现场照常清。
+> 2. **`install_hub_status` 多一行「环境注意」**：把「版本豁免 N 条（M 条对当前 DSH 已失效：
+>    …）」与「待批准安装脚本 K 个（…）—— 下次装同一个依赖还会卡住」压成一行。这两件事
+>    不提醒就等于没有（一个让插件安静消失、一个让下一次安装卡在同一处），但都只读、只提醒，
+>    修/批仍然只能在面板里由人点头。
+> 3. 自检 372 → **378**（+6：staging 真目录 + 真 mtime 验证两条 / 环境注意四态），
+>    自洽 52 → **55**（+3：三处接线）。
+>
+> **R11.1（2026-10-22 02:05）「跑的是不是新代码」变成自动答案（`lib/codestamp.js`）**：
+> R9/R10 各踩一次「改了 `lib/*` 却没换新」，当时只能人工做行为探针（加一个动作、再打一次请求看谁回话）。
+> 现在：模块首次被 import 时把 `index.js + client.js + lib/*.js` 的内容哈希记在内存里（那就是真正被加载的代码），
+> 之后 `/health` 的 `code` 与 `install_hub_status` 的「**运行中的代码**」一行直接回答：
+> `与磁盘一致（31 个文件 · ab12…）` 或 `旧（磁盘已改：lib/x.js，需要重启 DSH 才会换新）`。
+> 构建标签（源码 mtime）从此只用于「磁盘上新不新」，不再冒充「跑的是哪一版」。
+> 自检 378 → **383**（+5：freshness 判定 / 指纹覆盖面 / 两种人话 / 降级），自洽 55 → **57**（+2）。
 
 | 项目 | 值 |
 |---|---|
@@ -302,15 +322,16 @@ dsh-tools 钉子是否过期、最近一次崩溃日志），可一键修其中�
 ```bash
 # ① 自洽体检（最快，不碰宿主、不重启；换会话先跑这条）
 node DSH-Plugin/dsh-plugin-installer/dev/audit.mjs
-#   52 项：默认档冻结快照 / 5 个工具的 output 契约 / 构建标记形如「0.1.0 · 2026-10-22 01:15」/
+#   57 项：默认档冻结快照 / 5 个工具的 output 契约 / 构建标记形如「0.1.0 · 2026-10-22 01:15」/
 #   契约扫描与 profile 体检是否真的接着线 / 失败分诊与批准闭环是否接线 / 版本豁免是否三处一起接 /
-#   「批准」与「授权」都没暴露给模型 / 客户端设置与热键入口 / settings.json 归一化后不变 /
-#   等待确认任务的 staging 现场 / README 与交接文件里的断言数是否等于 EXPECTED_ASSERTIONS（改测试就同步它）
+#   staging 是否保住「等确认」的现场 / 状态工具的「环境注意」行 / 「批准」与「授权」都没暴露给模型 /
+#   客户端设置与热键入口 / settings.json 归一化后不变 / 等待确认任务的 staging 现场 /
+#   README 与交接文件里的断言数是否等于 EXPECTED_ASSERTIONS（改测试就同步它）
 
-# ② 372 项确定性自检（解包围栏 / 识别短路 / 扫描与密度 / 快照回滚 / 重打包 / prune 保鲜 / 地雷 /
+# ② 383 项确定性自检（解包围栏 / 识别短路 / 扫描与密度 / 快照回滚 / 重打包 / prune 保鲜 / 地雷 /
 #   契约扫描 / profile 体检与修复 / 已装版本对照 / 设置归一化与审核三档 / 红点与跳过审核门禁 /
 #   热键 / 7z 往返与围栏 / 搜索缓存 / 工具契约 / pnpm 失败分诊 / allowBuilds 解析 / 批准重装 /
-#   版本豁免读写与回读确认 / 兼容降级口径）
+#   版本豁免读写与回读确认 / 兼容降级口径 / staging 生命周期 / 环境注意）
 host_selfcheck({ plugin: "dsh-plugin-installer" })
 
 # ③ 无头渲染自检（微型 React 真的渲染一遍；62 项：诊断卡 / 预检卡 / 审查卡 / 设置面板 /
@@ -366,7 +387,7 @@ DSH 每次启动换随机端口（`dsh-desktop-host` 里写死 `--port 0`），�
 
 | 场景 | 结果 |
 |---|---|
-| 确定性自检 | **372/372 通过**（`dev/hosttest.mjs`，含 zip/tar 构造、穿越与软链接拒绝、比例炸弹、5 种识别分支、快照还原、重打包往返、prune 引用保护、地雷处置、契约扫描、profile 体检与修复、设置归一化、审核三档、热键、pnpm 失败分诊、allowBuilds 解析、批准重装与三道闸、落盘串行、版本豁免读写与回读确认、兼容降级口径、预检「已授权不再阻断」回归）；另 **62 项**无头渲染 + **52 项**自洽体检 |
+| 确定性自检 | **383/383 通过**（`dev/hosttest.mjs`，含 zip/tar 构造、穿越与软链接拒绝、比例炸弹、5 种识别分支、快照还原、重打包往返、prune 引用保护、地雷处置、契约扫描、profile 体检与修复、设置归一化、审核三档、热键、pnpm 失败分诊、allowBuilds 解析、批准重装与三道闸、落盘串行、版本豁免读写与回读确认、兼容降级口径、预检「已授权不再阻断」回归、staging 生命周期、环境注意、运行中代码指纹）；另 **62 项**无头渲染 + **57 项**自洽体检 |
 | Skill 端到端（本机目录） | 1.8s 完成：识别 `dpi-selftest` → 预检通过 → 快照（插件 57/行 233/技能 54）→ 落位 → 诊断 ok（`skills: 58`）；技能目录清单**当场出现**该技能 |
 | 同一任务回滚 | 技能目录被删除、profile 三件套「未变化」、技能目录清单里它消失 |
 | GitHub 端到端 | `github.com/octocat/Hello-World`：API 983ms → 下载 504ms → 解包 4ms → 识别为「未识别」→ 预检**阻断**并红点；耗时与原因都写在面板上 |
@@ -418,9 +439,9 @@ lib/profilehealth.js     R8：profile 层体检（bundles 对账 / 契约 / pnpm
 lib/purpose.js           用途推断 + 用途↔能力对账（ok / warn / error / unknown）
 lib/installfailure.js    R9：pnpm 失败 10 类分诊 + 管理拒绝码 11 条 + allowBuilds（待批准脚本）读写
 lib/tools.js             五个宿主工具定义（含 output 契约）
-dev/hosttest.mjs         372 项确定性自检（宿主进程跑）
+dev/hosttest.mjs         383 项确定性自检（宿主进程跑）
 dev/render-check.cjs     62 项无头渲染自检（诊断卡 / 预检卡 / 审查卡 / 设置面板 / 跳过审核 / 批准卡 / 兼容卡）
-dev/audit.mjs            52 项自洽体检（不碰宿主；换会话先跑这个）
+dev/audit.mjs            57 项自洽体检（不碰宿主；换会话先跑这个）
 dev/quarantine-dshtools.mjs  手动兜底：把埋下的 dsh-tools 挪进备份（薄壳，复用 lib/landmine.js）
 dev/restore-vendor-tarball.mjs 手动兜底：把断掉的 file: 依赖补回来（薄壳，复用 lib/repair.js）
 dev/fix-tailscale-serve.ps1  管理员脚本：找到当前 GUI 端口并重指 tailscale serve

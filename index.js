@@ -26,6 +26,7 @@ import { buildInstallerTools } from "./lib/tools.js";
 import { createReviewer, runPanelAi } from "./lib/ai.js";
 import { checkDshToolsShadow } from "./lib/landmine.js";
 import { buildStamp, dataDir, hostVersions, profileDir, skillRoots } from "./lib/hostinfo.js";
+import { freshness, describeFreshness } from "./lib/codestamp.js";
 import { DEFAULTS as DEFAULT_SETTINGS, REVIEW_LEVELS, CHOICES as SETTING_CHOICES } from "./lib/settings.js";
 
 const PREFIX = "/plugin-installer";
@@ -203,12 +204,16 @@ export async function apply(ctx) {
 						? tools.schemas().map((s) => s.name).filter((n) => String(n).startsWith("install_hub_"))
 						: [];
 					const landmine = await checkDshToolsShadow(profileDir()).catch(() => ({ present: false }));
+					/* R11：`code` 回答的是「**运行中**的代码是不是磁盘这一版」——
+					   build（源码 mtime）只能证明磁盘新，证明不了跑的是哪一版。 */
+					const code = await freshness().catch(() => null);
 					return json(res, 200, {
 						ok: true,
 						/* R5.1：以前写死 "p2-pack" —— 宿主侧不热重载时，
 						   这是唯一能回答「现在跑的是哪一版」的东西。 */
 						build: build ? build.label : null,
 						buildDetail: build,
+						code: code ? { fresh: code.fresh, at: code.at, loaded: code.loaded && code.loaded.digest, disk: code.disk && code.disk.digest, newestFile: code.disk && code.disk.newestFile, line: describeFreshness(code) } : null,
 						versions,
 						profileDir: profileDir(),
 						skillRoots: skillRoots(),
