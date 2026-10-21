@@ -33,7 +33,15 @@ import { checkDshToolsShadow, quarantineDshTools, removeDanglingLink } from "../
 import { fileDepsOf, findDanglingFileDeps, inspectEnvironment } from "../lib/repair.js";
 import { scanToolContract, describeContractScan } from "../lib/contract.js";
 import { inspectProfile, repairProfile } from "../lib/profilehealth.js";
-import { diagnose } from "../lib/install.js";
+import { diagnose, installPlugin } from "../lib/install.js";
+import {
+	UNDECIDED_BUILD,
+	classifyPnpmFailure,
+	describeInstallFailure,
+	ignoredBuildNames,
+	parseAllowBuilds,
+	pendingBuildFinding
+} from "../lib/installfailure.js";
 import { judgePurpose } from "../lib/purpose.js";
 import { buildInstallerTools } from "../lib/tools.js";
 import { clearSourceCaches, judgeTrust, memoizeTtl, normalizePopularity, searchAll, shapeGithub, shapeHub, shapeNpm, trustLine } from "../lib/sources.js";
@@ -929,6 +937,52 @@ async function main() {
 	);
 	eq("跳过审核: 只有「等待确认」的任务可用", skipWrongState.ok, false);
 
+	/* R9：批准安装脚本的三道闸（空名单 / 有任务在跑 / 名字不在当前 pending 名单里）。
+	   最后一条是**安全判据**：面板只递意图，名单有效性由这里按 profile 现存的 allowBuilds 复核。 */
+	const approveThis = (over) => Object.assign({
+		_running: null,
+		jobs: [],
+		jobById: () => ({ id: "j1", status: "failed", input: { raw: "x", kind: "name" }, install: {} }),
+		log: async () => {},
+		save: async () => {},
+		submit: async () => ({ ok: true, job: { id: "j2" } }),
+		root: root
+	}, over || {});
+	const approveEmpty = await Installer.prototype.approveBuilds.call(approveThis(), "j1", []);
+	eq("批准: 空名单直接拒", approveEmpty.ok, false);
+	const approveBusy = await Installer.prototype.approveBuilds.call(approveThis({ _running: Promise.resolve() }), "j1", ["anything"]);
+	eq("批准: 有任务在跑时不动手", approveBusy.ok, false);
+	ok("批准: 忙的时候说清等什么", /在跑/.test(approveBusy.message), approveBusy.message);
+	const approveStale = await Installer.prototype.approveBuilds.call(approveThis(), "j1", ["definitely-not-a-pending-package"]);
+	eq("批准: 名字不在 pending 名单里就拒（不给自己放宽权限）", approveStale.ok, false);
+	ok("批准: 拒绝时给下一步（看现状 / 检查 profile）", /重新诊断|profile/.test(approveStale.message), approveStale.message);
+
+	/* R9 实测撞出来的真 bug：save() 用固定 `state.json.tmp`，并发两次就 ENOENT，
+	   而那条错误会被当成「安装失败」记在任务上。现在要求：并发调用串行 + tmp 名唯一。 */
+	let activeSaves = 0;
+	let maxActiveSaves = 0;
+	const serializeThis = {
+		jobs: [],
+		_dismissed: new Set(),
+		statePath: join(dir("state-queue"), "state.json"),
+		writeStateFile: async () => {
+			activeSaves += 1;
+			maxActiveSaves = Math.max(maxActiveSaves, activeSaves);
+			await new Promise((r) => setTimeout(r, 5));
+			activeSaves -= 1;
+		}
+	};
+	await Promise.all([1, 2, 3, 4, 5].map(() => Installer.prototype.save.call(serializeThis)));
+	eq("save: 并发 5 次也串行执行（不会自己和自己抢 tmp）", maxActiveSaves, 1);
+	const stateDir = dir("state-write");
+	await mkdir(stateDir, { recursive: true });
+	const writerThis = { jobs: [{ id: "job-a", status: "done" }], _dismissed: new Set(), statePath: join(stateDir, "state.json") };
+	await Installer.prototype.writeStateFile.call(writerThis);
+	const written = await readFile(writerThis.statePath, "utf8");
+	ok("save: 落盘内容能读回", written.includes("job-a") && JSON.parse(written).version === 1);
+	const collisions = await Promise.all([1, 2, 3].map(() => Installer.prototype.writeStateFile.call(writerThis).then(() => null, (e) => String(e && e.code))));
+	eq("save: 同一实例并发写同一个 state 不再撞 ENOENT", collisions.filter(Boolean), []);
+
 	/* 搜索源开关：关掉的源一个请求都不该发 */
 	const realFetch2 = globalThis.fetch;
 	const seenUrls2 = [];
@@ -982,7 +1036,7 @@ async function main() {
 	const hotkeyPipelineSrc = await readFile(join(pluginRoot, "lib", "pipeline.js"), "utf8");
 	ok("hotkey: 宿主 doctor(apply) 也有自己的并发闸", hotkeyPipelineSrc.includes("apply && this._running"));
 	ok("hotkey: 两条路都会把 busy 翻译成人话", clientSrc.includes('report.busy') && clientSrc.includes("先别动环境"));
-	ok("client: build 号已随本轮改动提到 r6", /BUILD\s*=\s*"r6\./.test(clientSrc), clientSrc.match(/BUILD\s*=\s*"[^"]+"/));
+	ok("client: build 号已随本轮改动提到 r9", /BUILD\s*=\s*"r9\./.test(clientSrc), clientSrc.match(/BUILD\s*=\s*"[^"]+"/));
 
 	/* ⑫ 7z / rar：外包给系统 bsdtar，解完再按**实际落盘**的东西复核围栏。
 	   注意：这一组要 spawn 子进程，只有宿主进程里跑得动（沙箱里 spawn 会 EPERM）。 */
@@ -1013,6 +1067,128 @@ async function main() {
 		}
 		eq("7z: 单文件上限在 bsdtar 之后仍然生效", fenceCode, "too-big");
 	}
+
+	/* ⑰ R9：装不上时的分诊 ——「为什么 + 下一步」+ 安装脚本待批准的闭环。
+	   判据全部落在宿主契约上：哨兵串、Ignored build scripts 这一行、approvedBuilds 选项。 */
+	eq("failure: 哨兵串与宿主一致", UNDECIDED_BUILD, "set this to true or false");
+
+	const yamlPolicy = [
+		"packages:",
+		"  - .",
+		"allowBuilds:",
+		"  # 注释不算条目",
+		"  '@jackwener/opencli': false",
+		"  cloudflared: true",
+		'  esbuild: "set this to true or false"',
+		"minimumReleaseAgeExclude:",
+		"  - dsh-ops@0.3.0"
+	].join("\n");
+	const parsedPolicy = parseAllowBuilds(yamlPolicy);
+	eq("policy: 认出待批准的包", parsedPolicy.pending, ["esbuild"]);
+	eq("policy: 认清已决定的两条", parsedPolicy.decided, { "@jackwener/opencli": false, cloudflared: true });
+	const inlinePolicy = parseAllowBuilds('allowBuilds: { "a": true, b: "set this to true or false" }');
+	eq("policy: 一行写法也认", inlinePolicy.pending, ["b"]);
+	eq("policy: 一行写法里的决定值", inlinePolicy.decided, { a: true });
+	eq("policy: 没有这个块 = 空", parseAllowBuilds("packages:\n  - .\n").pending, []);
+
+	eq("pnpm: 认出构建脚本被拦", classifyPnpmFailure({ output: "ERR_PNPM_IGNORED_BUILDS Ignored build scripts: x" }), "build-blocked");
+	eq("pnpm: 认出 404", classifyPnpmFailure({ output: "ERR_PNPM_FETCH_404 Not Found - GET https://reg/x" }), "not-found");
+	eq("pnpm: 认出没有匹配版本", classifyPnpmFailure({ output: "ERR_PNPM_NO_MATCHING_VERSION No matching version found" }), "no-matching-version");
+	eq("pnpm: 认出磁盘满", classifyPnpmFailure({ output: "ENOSPC: no space left on device" }), "disk-full");
+	eq("pnpm: 认出权限", classifyPnpmFailure({ output: "EPERM: operation not permitted, open D:\\x" }), "permission");
+	eq("pnpm: 认出校验失败", classifyPnpmFailure({ output: "EINTEGRITY sha512-abc" }), "integrity");
+	eq("pnpm: 认出网络断", classifyPnpmFailure({ output: "ECONNRESET socket hang up" }), "network");
+	eq("pnpm: 超时优先", classifyPnpmFailure({ output: "ERR_PNPM_FETCH_404", timedOut: true }), "timeout");
+	eq("pnpm: 没有 pnpm 可执行文件", classifyPnpmFailure({ output: "", errno: "ENOENT" }), "pnpm-missing");
+	eq("pnpm: 认不出就老实说 unknown", classifyPnpmFailure({ output: "something odd happened" }), "unknown");
+
+	eq("failure: 从输出里点名待批准的包", ignoredBuildNames("Ignored build scripts: esbuild, sharp\nRun pnpm approve-builds"), ["esbuild", "sharp"]);
+	const buildBlocked = describeInstallFailure({
+		message: "ERR_PNPM_IGNORED_BUILDS Ignored build scripts: esbuild, sharp"
+	});
+	eq("failure: 归类为 build-blocked", buildBlocked.kind, "build-blocked");
+	eq("failure: 待批准名单带出来", buildBlocked.pendingBuilds, ["esbuild", "sharp"]);
+	eq("failure: 具体包名可以逐条批准", buildBlocked.canApproveBuilds, true);
+	ok("failure: 标题里点名包名（不是一句英文原文）", /esbuild/.test(buildBlocked.title) && /安装脚本/.test(buildBlocked.title), buildBlocked.title);
+	ok("failure: 带大白话", typeof buildBlocked.plain === "string" && buildBlocked.plain.length > 10);
+	ok("failure: 带处置步骤", Array.isArray(buildBlocked.fix) && buildBlocked.fix.length >= 2);
+	const wildcardOnly = describeInstallFailure({ message: "Ignored build scripts: *" });
+	eq("failure: 通配符不能逐条批准", wildcardOnly.canApproveBuilds, false);
+	ok("failure: 通配符时说明要人工改 yaml", /通配/.test(wildcardOnly.title), wildcardOnly.title);
+
+	const hostRefused = describeInstallFailure({
+		code: "incompatible-version",
+		message: "incompatible-version",
+		incompatible: [{ name: "x", version: "1.0.0", runtimeVersion: "0.2.1", requirements: { "engines.dsh": ">=0.3" } }]
+	});
+	eq("failure: 宿主拒绝码单独归类", hostRefused.kind, "management:incompatible-version");
+	ok("failure: 拒绝码翻成人话（不是那个码本身）", !/^incompatible-version$/.test(hostRefused.title) && /版本/.test(hostRefused.title), hostRefused.title);
+	ok("failure: 拒绝时点名包与不满足的条件", /x@1\.0\.0/.test(hostRefused.title) && /engines\.dsh/.test(hostRefused.title), hostRefused.title);
+	const notBundle = describeInstallFailure({ code: "not-bundle", message: "not-bundle" });
+	const notBundleText = [notBundle.title, notBundle.plain, notBundle.hint].concat(notBundle.fix.map((s) => s.text)).join(" ");
+	ok("failure: not-bundle 指向「可能是个 Skill」", /Skill/.test(notBundleText), notBundleText.slice(0, 80));
+	const stale = describeInstallFailure({ code: "stale-approval", message: "stale-approval" });
+	ok("failure: stale-approval 让人重新读 pending", /重新诊断/.test(stale.hint), stale.hint);
+	const odd = describeInstallFailure({ message: "完全看不懂的一段输出" });
+	eq("failure: 认不出时不硬编原因", odd.kind, "unknown");
+	ok("failure: 认不出也保留原始输出", odd.raw.includes("完全看不懂"), odd.raw.slice(0, 40));
+	eq("failure: 空输入不炸", describeInstallFailure().kind, "unknown");
+
+	eq("finding: 没有待批准时不打扰", pendingBuildFinding({ pending: [] }), null);
+	const buildFinding = pendingBuildFinding({ pending: ["esbuild"], decided: { cloudflared: true } });
+	eq("finding: 有待批准时是 warn", buildFinding && buildFinding.severity, "warn");
+	ok("finding: 写明「不影响 DSH 本身」", /不会让 DSH 坏掉/.test(buildFinding.plain), buildFinding.plain);
+	ok("finding: 给出三条处置", buildFinding.fix.length >= 2);
+
+	/* installPlugin：第一次被拦 → 拿到包名；带 approvedBuilds 重试 → 真把选项递给宿主 */
+	const nativeDir = dir("native-pkg");
+	await mkdir(nativeDir, { recursive: true });
+	await writeFile(join(nativeDir, "package.json"), JSON.stringify({ name: "fake-native", version: "1.0.0", dsh: { bundle: {} } }));
+	const packDir1 = dir("pack");
+	const packDir2 = dir("pack2");
+	await mkdir(packDir1, { recursive: true });
+	await mkdir(packDir2, { recursive: true });
+	const pmCalls = [];
+	const fakeInstallPm = {
+		listBundles: async () => [],
+		installBundle: async (spec, options) => {
+			pmCalls.push({ spec, options });
+			if (options && Array.isArray(options.approvedBuilds) && options.approvedBuilds.length > 0) {
+				return { application: "applied", bundle: "fake-native", version: "1.0.0" };
+			}
+			throw new Error("ERR_PNPM_IGNORED_BUILDS Ignored build scripts: fake-native");
+		}
+	};
+	const blockedInstall = await installPlugin({
+		pluginManager: fakeInstallPm,
+		detected: { kind: "bundle", payload: { dir: nativeDir, manifest: { name: "fake-native", version: "1.0.0" } } },
+		source: { type: "local", spec: nativeDir },
+		packDir: packDir1
+	});
+	eq("install: 被拦时 ok=false", blockedInstall.ok, false);
+	eq("install: 包名带回来（面板据此渲染批准卡）", blockedInstall.pendingBuilds, ["fake-native"]);
+	ok("install: 错误里有「为什么 + 下一步」", Boolean(blockedInstall.failure && blockedInstall.failure.plain && blockedInstall.failure.fix));
+	eq("install: 第一次没带 approvedBuilds", pmCalls[0].options.approvedBuilds, undefined);
+	const approvedInstall = await installPlugin({
+		pluginManager: fakeInstallPm,
+		detected: { kind: "bundle", payload: { dir: nativeDir, manifest: { name: "fake-native", version: "1.0.0" } } },
+		source: { type: "local", spec: nativeDir },
+		packDir: packDir2,
+		approvedBuilds: ["fake-native"]
+	});
+	eq("install: 批准后装成", approvedInstall.ok, true);
+	eq("install: 批准名单真的递给了宿主", pmCalls[1].options.approvedBuilds, ["fake-native"]);
+	eq("install: 成功时仍说明批准了什么", approvedInstall.approvedBuilds, ["fake-native"]);
+
+	const pipelineSrcR9 = await readFile(join(pluginRoot, "lib", "pipeline.js"), "utf8");
+	const indexSrcR9 = await readFile(join(pluginRoot, "index.js"), "utf8");
+	ok("pipeline: 把批准名单递给 installPlugin", /approvedBuilds/.test(pipelineSrcR9));
+	ok("pipeline: 任务上记着 buildApproval", /buildApproval/.test(pipelineSrcR9));
+	ok("pipeline: approveBuilds 复核 pending 再重试", /async approveBuilds/.test(pipelineSrcR9) && /policy\.pending/.test(pipelineSrcR9));
+	ok("index: 有 approve-builds 动作", /approve-builds/.test(indexSrcR9) && /approveBuilds/.test(indexSrcR9));
+	ok("client: 有批准卡与二次确认", clientSrc.includes("BuildApprovalCard") && clientSrc.includes("我确认允许"));
+	ok("client: 错误块渲染大白话与处置步骤", clientSrc.includes("job.error.plain") && clientSrc.includes("job.error.fix"));
+	ok("tools: 批准动作不暴露给模型（信任决定只能人在面板按）", !/approve-builds/.test(await readFile(join(pluginRoot, "lib", "tools.js"), "utf8")));
 
 	await rm(root, { recursive: true, force: true });
 

@@ -23,7 +23,7 @@ window.__ModuleLoader__.load({
 		/* 客户端 build 号（R5.1）：改 client.js 就提一位。
 		   client 会热重载、但没人保证「当前页面跑的是哪一版」—— 这个号随 client-state
 		   一起上报，宿主 /health 的 clientReport.build 就是答案（宿主侧另有 mtime 标签）。 */
-		const BUILD = "r6.0";
+		const BUILD = "r9.0";
 
 		/* ── 迷你 store（模块级，面板关着时图标也在用）──────────────────── */
 
@@ -928,6 +928,54 @@ window.__ModuleLoader__.load({
 			);
 		}
 
+		/* R9：安装脚本待批准 —— 「允许并重试」。
+		记两条纪律：① 名单必须一个个列出来给人看（批准 = 让作者写的脚本在本机跑）；
+		② 二次确认后才发请求；宿主还会再核一遍名单是否仍然 pending。 */
+		function BuildApprovalCard(props) {
+			const job = props.job;
+			const busy = props.busy;
+			const act = props.act;
+			const [asking, setAsking] = useState(false);
+			const install = (job && job.install) || null;
+			const names = install && Array.isArray(install.pendingBuilds) ? install.pendingBuilds.filter(Boolean) : [];
+			if (names.length === 0) return null;
+			const failure = install.failure || null;
+			const already = Array.isArray(install.approvedBuilds) && install.approvedBuilds.length > 0;
+			return h(
+				"div",
+				{ className: "dpi-card dpi-card-warn" },
+				h("div", { className: "dpi-card-head" },
+					h("strong", null, "安装脚本待批准：" + names.length + " 个包"),
+					h(Pill, { tone: "warn" }, "要你点头"),
+					already ? h("span", { className: "dpi-muted" }, "已批准过：" + install.approvedBuilds.join("、")) : null),
+				h("div", { className: "dpi-muted" },
+					failure && failure.plain
+						? failure.plain
+						: "大白话：这些包装的时候要跑一段脚本（常是编译原生模块、下平台二进制）。宿主不让它们自己偷偷跑，所以这次停在这儿了。"),
+				h("ul", { className: "dpi-list dpi-list-warn" },
+					names.map((name, i) => h("li", { key: "bp" + i }, h("b", null, name)))),
+				asking
+					? h("div", { className: "dpi-ask" },
+						h("b", null, "确认让这些包在本机跑安装脚本？"),
+						h("div", { className: "dpi-detail" },
+							"批准 = 允许 " + names.join("、") + " 作者写的脚本以你的权限执行（编译、下载二进制都可能）。",
+							"只批准你认识、且来源可信的包；不确定就先别批 —— 换一个不需要构建脚本的版本也行。"),
+						h("div", { className: "dpi-actions dpi-actions-tight" },
+							h("button", { className: "dpi-btn dpi-btn-sm", onClick: () => setAsking(false) }, "再想想"),
+							h("button", {
+								className: "dpi-btn dpi-btn-primary dpi-btn-sm",
+								disabled: busy !== null,
+								onClick: () => {
+									setAsking(false);
+									act("approve-builds", { names });
+								}
+							}, busy === "approve-builds" ? "重试中…" : "我确认允许")))
+					: h("div", { className: "dpi-actions dpi-actions-tight" },
+						h("button", { className: "dpi-btn dpi-btn-primary dpi-btn-sm", disabled: busy !== null, onClick: () => setAsking(true) }, "允许这些包跑安装脚本并重试"),
+						h("span", { className: "dpi-muted" }, "会开一条新任务重新装一遍（批准记录写进 profile 的 allowBuilds）"))
+			);
+		}
+
 		/* 一个任务的全部细节 */
 		function JobDetail(props) {
 			const job = props.job;
@@ -943,6 +991,7 @@ window.__ModuleLoader__.load({
 					else if (action === "rollback") toast("已回滚到安装前快照");
 					else if (action === "confirm") toast("继续安装");
 					else if (action === "ack") toast("已清除红点");
+					else if (action === "approve-builds") toast("已批准安装脚本，正在重新安装");
 				} catch (e) {
 					toast("操作失败：" + String((e && e.message) || e));
 				} finally {
@@ -969,8 +1018,13 @@ window.__ModuleLoader__.load({
 				job.error
 					? h("div", { className: "dpi-error" },
 						h("b", null, (job.error.stage ? "[" + job.error.stage + "] " : "") + job.error.message),
-						job.error.hint ? h("div", { className: "dpi-detail" }, "建议：" + job.error.hint) : null)
+						job.error.plain ? h("div", { className: "dpi-detail" }, job.error.plain) : null,
+						job.error.hint ? h("div", { className: "dpi-detail" }, "建议：" + job.error.hint) : null,
+						job.error.fix && job.error.fix.length > 0 ? h(FixSteps, { steps: job.error.fix }) : null)
 					: null,
+
+				/* R9：安装脚本待批准 —— 面板上直接给「允许并重试」，别让人自己去翻 yaml */
+				h(BuildApprovalCard, { job, busy, act }),
 
 				detected ? h("div", { className: "dpi-meta" },
 					detected.description ? h("div", null, detected.description) : null,
@@ -1655,6 +1709,8 @@ window.__ModuleLoader__.load({
 .dpi-card{border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);border-radius:12px;
   padding:12px 14px;margin-bottom:12px}
 .dpi-card-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px;font-size:13px}
+/* R9：安装脚本待批准 / 需要用户点头的卡片 */
+.dpi-card-warn{border-color:var(--dsw-alias-state-warn-primary)}
 .dpi-active{border-color:var(--dsw-alias-border-l2)}
 .dpi-job-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px}
 .dpi-job-title{font-weight:600;font-size:13.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:52ch}
@@ -1855,6 +1911,8 @@ window.__ModuleLoader__.load({
 			desktopNotify,
 			SettingsModal,
 			SkipReviewButton,
+			/* R9：安装脚本待批准卡（无头渲染要摸得到，否则二次确认态没人验） */
+			BuildApprovalCard,
 			/* R6.1：自检快捷键（无头渲染与自测也要能摸到这几个） */
 			runSelfCheck,
 			bindHotkey,

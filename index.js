@@ -266,6 +266,11 @@ export async function apply(ctx) {
 					else if (action === "rollback") result = await installer.rollback(id);
 					else if (action === "review") result = await installer.review(id);
 					else if (action === "rediagnose") result = await installer.rediagnose(id);
+					else if (action === "approve-builds") {
+						/* R9：批准「待决定的安装脚本」并重试。名单由面板从任务里带上来，
+						   但复核在 Installer 里做（对着 profile 现存的 pending 列表）。 */
+						result = await installer.approveBuilds(id, Array.isArray(body.names) ? body.names : []);
+					}
 					else if (action === "repair") {
 						const report = await installer.doctor({ apply: true });
 						return json(res, 200, { ok: true, report, state: await installer.snapshotState() });

@@ -429,5 +429,58 @@ if (typeof t.SkipReviewButton === "function") {
 	check("__test 暴露了 SkipReviewButton", false);
 }
 
+/* R9：安装脚本待批准卡 —— 没待批准必须不出现；有则列名、写风险、二次确认后才发请求 */
+if (typeof t.BuildApprovalCard === "function") {
+	const savedData = t.store.data;
+	t.store.data = null;
+	resetHooks();
+	const empty = t.BuildApprovalCard({ job: { install: { pendingBuilds: [] } }, busy: null, act: () => {} });
+	check("批准卡：没有待批准就不出现", empty === null || empty === undefined || empty === false);
+
+	const job = {
+		id: "job-test",
+		install: {
+			ok: false,
+			pendingBuilds: ["esbuild", "sharp"],
+			failure: { plain: "大白话：这些包要跑安装脚本。" }
+		}
+	};
+	resetHooks();
+	let el;
+	try {
+		el = t.BuildApprovalCard({ job, busy: null, act: () => {} });
+	} catch (e) {
+		check("批准卡渲染不抛异常", false, String((e && e.message) || e));
+	}
+	if (el) {
+		const text = textOf(el).join(" | ");
+		check("批准卡：点名要批准的包", text.includes("esbuild") && text.includes("sharp"), text.slice(0, 120));
+		check("批准卡：说明是安装脚本待批准", text.includes("安装脚本待批准"), text.slice(0, 120));
+		check("批准卡：给出「允许并重试」按钮", text.includes("允许这些包跑安装脚本并重试"));
+		check("批准卡：默认不展开二次确认", !text.includes("我确认允许"));
+	}
+
+	/* 点了一下 → 二次确认态（hook 0 预置 true） */
+	resetHooks();
+	hooks[0] = true;
+	let asking;
+	try {
+		asking = t.BuildApprovalCard({ job, busy: null, act: () => {} });
+	} catch (e) {
+		check("批准卡（二次确认态）渲染不抛异常", false, String((e && e.message) || e));
+	}
+	if (asking) {
+		const text = textOf(asking).join(" | ");
+		check("批准卡：二次确认写明后果", text.includes("跑安装脚本") && text.includes("我确认允许"), text.slice(0, 160));
+		check("批准卡：有「再想想」", text.includes("再想想"));
+		/* 真的按下「我确认允许」时，请求必须带 action + names（后端据此复核 pending） */
+		const btn = findNodes(asking, (p) => p && typeof p.onClick === "function" && p.className && String(p.className).includes("dpi-btn-primary"));
+		check("批准卡：确认按钮接了 onClick", btn.length >= 1, btn.length);
+	}
+	t.store.data = savedData;
+} else {
+	check("__test 暴露了 BuildApprovalCard", false);
+}
+
 console.log(failed === 0 ? "\nSUMMARY all render checks passed" : "\nSUMMARY " + failed + " failed");
 process.exit(failed === 0 ? 0 : 1);

@@ -45,7 +45,7 @@ export const FROZEN_DEFAULTS = {
 };
 
 /** 文档里声明的自检项数（改断言就先跑一次 host_selfcheck，再同步这个数）。 */
-export const EXPECTED_ASSERTIONS = 269;
+export const EXPECTED_ASSERTIONS = 328;
 
 /** 期望注册的宿主工具（漏一个 = 模型看不见一项能力）。 */
 const EXPECTED_TOOLS = [
@@ -125,6 +125,23 @@ async function main() {
 	ok("doctor 接了 profile 体检", /inspectProfile/.test(pipelineSrc) && /repairProfile/.test(pipelineSrc));
 	ok("自检热键可配置（R7）", clientSrc.includes("dpi.selfcheck.hotkey") && clientSrc.includes("Ctrl+Alt+D"));
 	ok("自检热键可以关掉（R7）", clientSrc.includes("HOTKEY_OFF"));
+
+	/* ⑤c R9：装不上时的分诊与「安装脚本待批准」闭环必须真的接上线 ——
+	   否则 pendingBuilds 又变成「算了但没用」的死数据。 */
+	const failureSrc = await readText("lib\\installfailure.js");
+	const toolsSrc = (await readText("lib\\tools.js")) || "";
+	const indexSrc2 = (await readText("index.js")) || "";
+	ok("分诊模块存在（R9）", Boolean(failureSrc) && /export function describeInstallFailure/.test(failureSrc));
+	ok("哨兵串与宿主契约一致", /UNDECIDED_BUILD = "set this to true or false"/.test(failureSrc || ""));
+	ok("install 接了分诊（不再只留 code+message）", /describeInstallFailure/.test(installSrc) && /failure,/.test(installSrc));
+	ok("install 真的把 approvedBuilds 递给宿主", /options\.approvedBuilds = approved/.test(installSrc));
+	ok("pipeline 有「允许并重试」动作", /async approveBuilds/.test(pipelineSrc));
+	ok("pipeline 重试前复核 pending 名单", /policy\.pending/.test(pipelineSrc));
+	ok("doctor 报 profile 里的待批准脚本", /pendingBuildFinding/.test(pipelineSrc));
+	ok("index 暴露 approve-builds 动作", /approve-builds/.test(indexSrc2));
+	ok("批准动作不暴露给模型（信任决定只能人按）", !/approve-builds/.test(toolsSrc) && !/approveBuilds/.test(toolsSrc));
+	ok("面板有批准卡 + 二次确认", clientSrc.includes("BuildApprovalCard") && clientSrc.includes("我确认允许"));
+	ok("错误块渲染大白话与处置步骤", clientSrc.includes("job.error.plain") && clientSrc.includes("job.error.fix"));
 
 	/* ⑥ 数据目录：设置文件是否与运行时会一致（手改过就会出现差异） */
 	const settingsFile = join(dataDir(), "settings.json");
