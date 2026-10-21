@@ -1,5 +1,8 @@
 # dsh-plugin-installer · 插件 / Skill 安装面板
 
+[English](README.en.md)
+
+
 侧边栏一个图标，点开是「插件 / Skill 安装」面板：把 GitHub 链接、Release 页、`.tgz`/`.zip`
 直链，或者本机压缩包/目录丢进去，面板自己完成 **下载 → 解包 → 识别 → 安全预检 → 快照 →
 安装 → 诊断 →（按需）回滚**。
