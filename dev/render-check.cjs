@@ -482,5 +482,88 @@ if (typeof t.BuildApprovalCard === "function") {
 	check("__test 暴露了 BuildApprovalCard", false);
 }
 
+/* R10：版本不兼容卡 —— 非 mismatch 不出现；mismatch 要点名「包@版本 + 当前 DSH」、
+   写清风险、二次确认后才发请求；已豁免的版本不再劝人授权。 */
+if (typeof t.CompatExemptCard === "function") {
+	const savedData = t.store.data;
+	t.store.data = null;
+
+	const okJob = { id: "job-ok", precheck: { compat: { verdict: "ok", exempted: false } } };
+	resetHooks();
+	check("兼容卡：兼容时不出现", t.CompatExemptCard({ job: okJob, busy: null, act: () => {} }) == null);
+
+	const exemptJob = { id: "job-ex", precheck: { compat: { verdict: "exempted", exempted: true, name: "x", version: "1.0.0", runtimeVersion: "0.2.1-rc.2" } } };
+	resetHooks();
+	check("兼容卡：已豁免的版本不出现（不再劝一次）", t.CompatExemptCard({ job: exemptJob, busy: null, act: () => {} }) == null);
+
+	const blocked = {
+		id: "job-c",
+		precheck: {
+			compat: {
+				verdict: "mismatch",
+				exempted: false,
+				name: "@anweat/dsh-browser",
+				version: "0.2.1",
+				runtimeVersion: "0.2.1-rc.2",
+				requirements: { "@deepseek-ai/dsh-tools": ">=0.2.0-rc.2 <0.2.1-0" }
+			}
+		}
+	};
+	resetHooks();
+	let el;
+	try {
+		el = t.CompatExemptCard({ job: blocked, busy: null, act: () => {} });
+	} catch (e) {
+		check("兼容卡渲染不抛异常", false, String((e && e.message) || e));
+	}
+	if (el) {
+		const text = textOf(el).join(" | ");
+		check("兼容卡：点名包@版本", text.includes("@anweat/dsh-browser@0.2.1"), text.slice(0, 120));
+		check("兼容卡：写出当前宿主版本与被跳过的事实", text.includes("0.2.1-rc.2") && text.includes("跳过"));
+		check("兼容卡：把不满足的范围原样列出", text.includes("@deepseek-ai/dsh-tools") && text.includes(">=0.2.0-rc.2"));
+		check("兼容卡：默认不展开二次确认", !text.includes("我确认风险"));
+	}
+
+	resetHooks();
+	hooks[0] = true;
+	let asking;
+	try {
+		asking = t.CompatExemptCard({ job: blocked, busy: null, act: () => {} });
+	} catch (e) {
+		check("兼容卡（二次确认态）渲染不抛异常", false, String((e && e.message) || e));
+	}
+	if (asking) {
+		const text = textOf(asking).join(" | ");
+		check("兼容卡：二次确认说清「可能崩溃或损坏数据」", text.includes("可能崩溃或损坏数据"), text.slice(0, 160));
+		check("兼容卡：说明豁免只对精确版本生效", text.includes("compatibility.json") && text.includes("精确版本"));
+		check("兼容卡：有「再想想」", text.includes("再想想"));
+		const btn = findNodes(asking, (p) => p && typeof p.onClick === "function" && p.className && String(p.className).includes("dpi-btn-primary"));
+		check("兼容卡：确认按钮接了 onClick", btn.length >= 1, btn.length);
+	}
+
+	/* 旧豁免对当前版本失效 —— 要明确告诉人「重新授权一次即可」，别让人以为已经好了 */
+	const stale = {
+		id: "job-stale",
+		precheck: {
+			compat: {
+				verdict: "mismatch",
+				exempted: false,
+				name: "pkg-x",
+				version: "2.0.0",
+				runtimeVersion: "0.2.1-rc.2",
+				requirements: { "@deepseek-ai/dsh": ">=0.2.0-rc.2 <0.2.1-0" },
+				exemption: { key: "pkg-x@2.0.0", granted: false, runtimes: ["0.2.1-rc.1"], forOtherRuntimes: true }
+			}
+		}
+	};
+	resetHooks();
+	const staleEl = t.CompatExemptCard({ job: stale, busy: null, act: () => {} });
+	const staleText = staleEl ? textOf(staleEl).join(" | ") : "";
+	check("兼容卡：旧豁免失效时点名旧版本并说「重新授权」", staleText.includes("0.2.1-rc.1") && staleText.includes("重新授权"), staleText.slice(0, 160));
+	t.store.data = savedData;
+} else {
+	check("__test 暴露了 CompatExemptCard", false);
+}
+
 console.log(failed === 0 ? "\nSUMMARY all render checks passed" : "\nSUMMARY " + failed + " failed");
 process.exit(failed === 0 ? 0 : 1);

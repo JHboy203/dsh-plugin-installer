@@ -23,7 +23,7 @@ window.__ModuleLoader__.load({
 		/* 客户端 build 号（R5.1）：改 client.js 就提一位。
 		   client 会热重载、但没人保证「当前页面跑的是哪一版」—— 这个号随 client-state
 		   一起上报，宿主 /health 的 clientReport.build 就是答案（宿主侧另有 mtime 标签）。 */
-		const BUILD = "r9.0";
+		const BUILD = "r10.0";
 
 		/* ── 迷你 store（模块级，面板关着时图标也在用）──────────────────── */
 
@@ -976,6 +976,64 @@ window.__ModuleLoader__.load({
 			);
 		}
 
+		/* R10：版本不兼容 —— 以前这里是一条「先退出 DSH 再跑 CLI」的死路。
+		   现在把宿主的精确版本豁免做成同一套「二次确认 → 宿主授权 → 重试」。 */
+		function CompatExemptCard(props) {
+			const job = props.job;
+			const busy = props.busy;
+			const act = props.act;
+			const [asking, setAsking] = useState(false);
+			const compat = (job && job.precheck && job.precheck.compat) || null;
+			if (!compat) return null;
+			const blocked = compat.verdict === "mismatch" && compat.exempted !== true;
+			if (!blocked) return null;
+			const name = compat.name || "这个包";
+			const version = compat.version || "?";
+			const runtime = compat.runtimeVersion || "未知";
+			const key = (compat.exemption && compat.exemption.key) || (name + "@" + version);
+			const staleFor = compat.exemption && compat.exemption.forOtherRuntimes ? compat.exemption.runtimes || [] : [];
+			const req = compat.requirements && Object.keys(compat.requirements).length
+				? Object.entries(compat.requirements).map(([dep, range]) => dep + " 要求 " + range).join("；")
+				: "";
+			const granted = job && job.install && job.install.versionExemption;
+			return h(
+				"div",
+				{ className: "dpi-card dpi-card-warn" },
+				h("div", { className: "dpi-card-head" },
+					h("strong", null, "版本不兼容：" + key),
+					h(Pill, { tone: "warn" }, "要你决定"),
+					granted ? h("span", { className: "dpi-muted" }, "已授权过精确版本豁免") : null),
+				h("div", { className: "dpi-muted" },
+					"这个版本声明不接受本机 DSH " + runtime + (req ? "（" + req + "）" : "") +
+					"。宿主会直接跳过它 —— 不报错，插件和它的工具一起消失。"),
+				staleFor.length > 0
+					? h("div", { className: "dpi-detail" },
+						"宿主里有一条给这个版本的旧豁免，但只对 " + staleFor.join(" / ") + " 生效，对当前 " + runtime +
+						" 不生效（多半是升级 DSH 之后失效的）。重新授权一次即可。")
+					: null,
+				asking
+					? h("div", { className: "dpi-ask" },
+						h("b", null, "确认在这个 DSH 上强行走 " + key + "？"),
+						h("div", { className: "dpi-detail" },
+							"放行 = 让作者写的代码在它没声明支持的环境里跑，可能崩溃或损坏数据。",
+							"豁免只对**这一个精确版本 + 当前 DSH 版本**生效，写进 profile 的 compatibility.json（宿主留痕）。",
+							"升级 DSH 或换插件版本后自动失效，需要重新授权。"),
+						h("div", { className: "dpi-actions dpi-actions-tight" },
+							h("button", { className: "dpi-btn dpi-btn-sm", onClick: () => setAsking(false) }, "再想想"),
+							h("button", {
+								className: "dpi-btn dpi-btn-primary dpi-btn-sm",
+								disabled: busy !== null,
+								onClick: () => {
+									setAsking(false);
+									act("exempt-version", {});
+								}
+							}, busy === "exempt-version" ? "授权中…" : "我确认风险，授权这一次")))
+					: h("div", { className: "dpi-actions dpi-actions-tight" },
+						h("button", { className: "dpi-btn dpi-btn-sm", disabled: busy !== null, onClick: () => setAsking(true) }, "接受风险并授权这个精确版本"),
+						h("span", { className: "dpi-muted" }, "推荐先「换一个匹配当前 DSH 的版本」；这条是硬用的最后手段"))
+			);
+		}
+
 		/* 一个任务的全部细节 */
 		function JobDetail(props) {
 			const job = props.job;
@@ -1025,6 +1083,9 @@ window.__ModuleLoader__.load({
 
 				/* R9：安装脚本待批准 —— 面板上直接给「允许并重试」，别让人自己去翻 yaml */
 				h(BuildApprovalCard, { job, busy, act }),
+
+				/* R10：版本不兼容 —— 面板上直接给「授权精确版本豁免并重试」 */
+				h(CompatExemptCard, { job, busy, act }),
 
 				detected ? h("div", { className: "dpi-meta" },
 					detected.description ? h("div", null, detected.description) : null,
@@ -1913,6 +1974,8 @@ window.__ModuleLoader__.load({
 			SkipReviewButton,
 			/* R9：安装脚本待批准卡（无头渲染要摸得到，否则二次确认态没人验） */
 			BuildApprovalCard,
+			/* R10：版本不兼容卡（同上） */
+			CompatExemptCard,
 			/* R6.1：自检快捷键（无头渲染与自测也要能摸到这几个） */
 			runSelfCheck,
 			bindHotkey,

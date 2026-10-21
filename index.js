@@ -271,6 +271,11 @@ export async function apply(ctx) {
 						   但复核在 Installer 里做（对着 profile 现存的 pending 列表）。 */
 						result = await installer.approveBuilds(id, Array.isArray(body.names) ? body.names : []);
 					}
+					else if (action === "exempt-version") {
+						/* R10：给「版本不兼容」开精确版本豁免并重试。目标由服务端从预检结论里取
+						   （客户端只能点同意，不能自带包名/版本 —— 名额不放宽，判据只在一处）。 */
+						result = await installer.exemptVersion(id);
+					}
 					else if (action === "repair") {
 						const report = await installer.doctor({ apply: true });
 						return json(res, 200, { ok: true, report, state: await installer.snapshotState() });

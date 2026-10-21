@@ -121,7 +121,7 @@
 > **构建标记格式**（`0.1.0 · YYYY-MM-DD HH:MM`，且 `/health` 不许写死）/ 客户端设置与热键入口 /
 > `settings.json` 归一化后逐字不变 / 等待确认任务的 staging 现场还在 / README 与交接文件里的
 > 断言数是否等于 `EXPECTED_ASSERTIONS`。**不碰宿主、不 spawn、不写盘**，只打印
-> 「接着跑 host_selfcheck（328）+ render-check（50）」。
+> 「接着跑 host_selfcheck（364）+ render-check（62）」。
 > 三层分工至此固定：**audit = 自洽，host_selfcheck = 行为，render-check = 界面**。
 > 线上实测：构建标签 `0.1.0 · 2026-10-20 19:45`、客户端 `r6.0`、`GET/POST /settings` 正常
 > （非法值当场夹取回默认）、`clientReport` 里有 360×658 的窄屏实例。
@@ -151,8 +151,28 @@
 >    现在：save **串行** + 每次唯一 tmp 名 + rename 对瞬时错误（ENOENT/EPERM/EACCES/EBUSY）重试；
 >    `settings.json` 同样处理。实测证据：修前那条重试任务报 ENOENT，修后同一条重试报出真实原因
 >    （「认不出这是压缩包」）。
-> 6. 自检 269 → **328**（+59：分诊 10 / 文案与拒绝码 14 / 批准闭环 20 / 落盘竞态 3 / 接线与暴露面 12），
->    无头渲染 42 → **50**（+8：批准卡两态），自洽 28 → **39**。
+> 6. 自检 269 → **364**（+95：分诊 10 / 文案与拒绝码 14 / 批准闭环 20 / 落盘竞态 3 / 豁免与兼容 36 / 接线与暴露面 12），
+>    无头渲染 42 → **62**（+20：批准卡两态 + 兼容卡三态），自洽 28 → **52**。
+>
+> **R10（2026-10-22 01:45）「版本不兼容」从死路变成一条说得清的路**（宿主侧 + 面板）：
+> 1. **面板不认宿主已有的豁免 → 死循环**（真 bug）：判定兼容性时没把 profile 的
+>    `compatibility.json` 传进 `evaluatePluginCompatibility`，于是「已经授权过的版本」
+>    回来装还是被红牌挡住，而卡片给的下一步是「先退出 DSH 再跑 CLI」。现在：读记录
+>    （`lib/exemptions.js`，宿主接口优先、文件兜底）+ 认证传参，授权过的版本按
+>    「不兼容但已豁免」继续装。
+> 2. **体检误报**（真 bug，本机实测）：`install_hub_doctor` 把 **3 个已豁免**的插件报成
+>    「会被跳过」—— 而那三只当时工具全都好用。现在：体检也带豁免判定，分成
+>    「真会被跳过（error）」与「已豁免（info，只知情）」，外加「豁免对当前 DSH 已失效」的
+>    warn（升级后常见）。
+> 3. **面板里直接授权**：对「装到一半被版本判据挡住」的任务给一张卡 —— 点名 `包@精确版本` + 当前
+>    DSH + 不满足的范围，二次确认（写明可能崩溃/损坏数据、只对这一个版本生效、写进
+>    `compatibility.json`）→ 走宿主 `setVersionExemption(...)` → **回读确认** → 开新任务重试。
+>    目标由服务端从预检结论推出，客户端不能自带包名/版本（不能用来预先放宽一个兼容的包）；
+>    五个工具都不暴露它。
+> 4. **降级判定对齐宿主**（真 bug）：版本侦测不到时，本地 semver 用严格预发布规则会把
+>    **17 个**插件判成不兼容（宿主真值 3 个）。现在两条修正：`evaluateCompat` 接受调用方显式
+>    传入的运行版本；本地判定改用宿主的宽容口径（`includePrerelease`）。修完实测与宿主**完全一致**：
+>    `incompatible=0 / exempted=3`。
 
 | 项目 | 值 |
 |---|---|
@@ -282,18 +302,19 @@ dsh-tools 钉子是否过期、最近一次崩溃日志），可一键修其中�
 ```bash
 # ① 自洽体检（最快，不碰宿主、不重启；换会话先跑这条）
 node DSH-Plugin/dsh-plugin-installer/dev/audit.mjs
-#   39 项：默认档冻结快照 / 5 个工具的 output 契约 / 构建标记形如「0.1.0 · 2026-10-22 01:15」/
-#   契约扫描与 profile 体检是否真的接着线 / 失败分诊与批准闭环是否接线 / 「批准」没暴露给模型 /
-#   客户端设置与热键入口 / settings.json 归一化后不变 / 等待确认任务的 staging 现场 /
-#   README 与交接文件里的断言数是否等于 EXPECTED_ASSERTIONS（改测试就同步它）
+#   52 项：默认档冻结快照 / 5 个工具的 output 契约 / 构建标记形如「0.1.0 · 2026-10-22 01:15」/
+#   契约扫描与 profile 体检是否真的接着线 / 失败分诊与批准闭环是否接线 / 版本豁免是否三处一起接 /
+#   「批准」与「授权」都没暴露给模型 / 客户端设置与热键入口 / settings.json 归一化后不变 /
+#   等待确认任务的 staging 现场 / README 与交接文件里的断言数是否等于 EXPECTED_ASSERTIONS（改测试就同步它）
 
-# ② 328 项确定性自检（解包围栏 / 识别短路 / 扫描与密度 / 快照回滚 / 重打包 / prune 保鲜 / 地雷 /
+# ② 364 项确定性自检（解包围栏 / 识别短路 / 扫描与密度 / 快照回滚 / 重打包 / prune 保鲜 / 地雷 /
 #   契约扫描 / profile 体检与修复 / 已装版本对照 / 设置归一化与审核三档 / 红点与跳过审核门禁 /
-#   热键 / 7z 往返与围栏 / 搜索缓存 / 工具契约 / pnpm 失败分诊 / allowBuilds 解析 / 批准重装）
+#   热键 / 7z 往返与围栏 / 搜索缓存 / 工具契约 / pnpm 失败分诊 / allowBuilds 解析 / 批准重装 /
+#   版本豁免读写与回读确认 / 兼容降级口径）
 host_selfcheck({ plugin: "dsh-plugin-installer" })
 
-# ③ 无头渲染自检（微型 React 真的渲染一遍；50 项：诊断卡 / 预检卡 / 审查卡 / 设置面板 /
-#   跳过审核按钮 / 安装脚本批准卡（默认态 + 二次确认态））
+# ③ 无头渲染自检（微型 React 真的渲染一遍；62 项：诊断卡 / 预检卡 / 审查卡 / 设置面板 /
+#   跳过审核按钮 / 安装脚本批准卡（默认态 + 二次确认态）/ 版本不兼容卡（三态 + 旧豁免失效））
 node DSH-Plugin/dsh-plugin-installer/dev/render-check.cjs
 
 # 环境体检：只读 → 修（幂等：挪 dsh-tools、从 node_modules 重打包补回 .tgz）
@@ -345,7 +366,7 @@ DSH 每次启动换随机端口（`dsh-desktop-host` 里写死 `--port 0`），�
 
 | 场景 | 结果 |
 |---|---|
-| 确定性自检 | **328/328 通过**（`dev/hosttest.mjs`，含 zip/tar 构造、穿越与软链接拒绝、比例炸弹、5 种识别分支、快照还原、重打包往返、prune 引用保护、地雷处置、契约扫描、profile 体检与修复、设置归一化、审核三档、热键、pnpm 失败分诊、allowBuilds 解析、批准重装与三道闸、落盘串行）；另 **50 项**无头渲染 + **39 项**自洽体检 |
+| 确定性自检 | **364/364 通过**（`dev/hosttest.mjs`，含 zip/tar 构造、穿越与软链接拒绝、比例炸弹、5 种识别分支、快照还原、重打包往返、prune 引用保护、地雷处置、契约扫描、profile 体检与修复、设置归一化、审核三档、热键、pnpm 失败分诊、allowBuilds 解析、批准重装与三道闸、落盘串行、版本豁免读写与回读确认、兼容降级口径）；另 **62 项**无头渲染 + **52 项**自洽体检 |
 | Skill 端到端（本机目录） | 1.8s 完成：识别 `dpi-selftest` → 预检通过 → 快照（插件 57/行 233/技能 54）→ 落位 → 诊断 ok（`skills: 58`）；技能目录清单**当场出现**该技能 |
 | 同一任务回滚 | 技能目录被删除、profile 三件套「未变化」、技能目录清单里它消失 |
 | GitHub 端到端 | `github.com/octocat/Hello-World`：API 983ms → 下载 504ms → 解包 4ms → 识别为「未识别」→ 预检**阻断**并红点；耗时与原因都写在面板上 |
@@ -397,9 +418,9 @@ lib/profilehealth.js     R8：profile 层体检（bundles 对账 / 契约 / pnpm
 lib/purpose.js           用途推断 + 用途↔能力对账（ok / warn / error / unknown）
 lib/installfailure.js    R9：pnpm 失败 10 类分诊 + 管理拒绝码 11 条 + allowBuilds（待批准脚本）读写
 lib/tools.js             五个宿主工具定义（含 output 契约）
-dev/hosttest.mjs         328 项确定性自检（宿主进程跑）
-dev/render-check.cjs     50 项无头渲染自检（诊断卡 / 预检卡 / 审查卡 / 设置面板 / 跳过审核 / 批准卡）
-dev/audit.mjs            39 项自洽体检（不碰宿主；换会话先跑这个）
+dev/hosttest.mjs         364 项确定性自检（宿主进程跑）
+dev/render-check.cjs     62 项无头渲染自检（诊断卡 / 预检卡 / 审查卡 / 设置面板 / 跳过审核 / 批准卡 / 兼容卡）
+dev/audit.mjs            52 项自洽体检（不碰宿主；换会话先跑这个）
 dev/quarantine-dshtools.mjs  手动兜底：把埋下的 dsh-tools 挪进备份（薄壳，复用 lib/landmine.js）
 dev/restore-vendor-tarball.mjs 手动兜底：把断掉的 file: 依赖补回来（薄壳，复用 lib/repair.js）
 dev/fix-tailscale-serve.ps1  管理员脚本：找到当前 GUI 端口并重指 tailscale serve

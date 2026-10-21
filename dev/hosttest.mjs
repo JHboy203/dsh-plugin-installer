@@ -43,6 +43,9 @@ import {
 	pendingBuildFinding
 } from "../lib/installfailure.js";
 import { judgePurpose } from "../lib/purpose.js";
+import * as mExemptions from "../lib/exemptions.js";
+import * as mCompat from "../lib/compat.js";
+import { exemptionKey, parseExemptionKey, lookupExemption, summarizeExemptions, exemptionTarget } from "../lib/exemptions.js";
 import { buildInstallerTools } from "../lib/tools.js";
 import { clearSourceCaches, judgeTrust, memoizeTtl, normalizePopularity, searchAll, shapeGithub, shapeHub, shapeNpm, trustLine } from "../lib/sources.js";
 import { walkTree } from "../lib/detect.js";
@@ -946,6 +949,7 @@ async function main() {
 		log: async () => {},
 		save: async () => {},
 		submit: async () => ({ ok: true, job: { id: "j2" } }),
+		missingLocalInput: async () => null,
 		root: root
 	}, over || {});
 	const approveEmpty = await Installer.prototype.approveBuilds.call(approveThis(), "j1", []);
@@ -956,6 +960,158 @@ async function main() {
 	const approveStale = await Installer.prototype.approveBuilds.call(approveThis(), "j1", ["definitely-not-a-pending-package"]);
 	eq("批准: 名字不在 pending 名单里就拒（不给自己放宽权限）", approveStale.ok, false);
 	ok("批准: 拒绝时给下一步（看现状 / 检查 profile）", /重新诊断|profile/.test(approveStale.message), approveStale.message);
+
+	/* R10：版本豁免。三件事必须钉住：
+	   ① 目标只能从**预检结论**推出来（客户端不能自带包名/版本 → 不能预先放宽一个兼容的包）；
+	   ② 已豁免 / 不兼容但无 requirements / 判据不是 mismatch 时，都不许开；
+	   ③ 授权走宿主接口并**回读确认**，确认不到就不许说成功。 */
+	eq("豁免: 作用域包切出 key", exemptionKey("@anweat/dsh-browser", "0.2.1"), "@anweat/dsh-browser@0.2.1");
+	eq("豁免: 切回包名与版本", parseExemptionKey("@anweat/dsh-browser@0.2.1").name, "@anweat/dsh-browser");
+	eq("豁免: 版本取最后一个 @ 之后", parseExemptionKey("billion-context-dsh@0.2.27").version, "0.2.27");
+	eq("豁免: 当前版本命中即已授权", lookupExemption({ "x@1.0.0": ["0.2.1-rc.2"] }, "x", "1.0.0", "0.2.1-rc.2").granted, true);
+	eq("豁免: 只对别的版本生效时不算授权", lookupExemption({ "x@1.0.0": ["0.2.1-rc.1"] }, "x", "1.0.0", "0.2.1-rc.2").granted, false);
+	eq("豁免: 「只对旧版本生效」要能单独认出来", lookupExemption({ "x@1.0.0": ["0.2.1-rc.1"] }, "x", "1.0.0", "0.2.1-rc.2").forOtherRuntimes, true);
+	const exSummary = summarizeExemptions({ "a@1.0.0": ["0.2.1-rc.2"], "b@2.0.0": ["0.2.1-rc.1"] }, "0.2.1-rc.2");
+	eq("豁免: 汇总能数出失效记录", [exSummary.total, exSummary.stale.length], [2, 1]);
+	eq("豁免: 失效记录点名旧版本", exSummary.stale[0].key, "b@2.0.0");
+	eq("豁免: 判据为 ok 时不给目标（不许预先放宽）", exemptionTarget({ verdict: "ok" }), null);
+	eq("豁免: 已豁免时不再给目标", exemptionTarget({ verdict: "mismatch", exempted: true, name: "x", version: "1.0.0", runtimeVersion: "0.2.1-rc.2", requirements: { a: "1" } }), null);
+	ok("豁免: mismatch + requirements 才给精确目标", (() => {
+		const t = exemptionTarget({ verdict: "mismatch", exempted: false, name: "x", version: "1.0.0", runtimeVersion: "0.2.1-rc.2", requirements: { "@deepseek-ai/dsh": ">=0.3.0" } });
+		return t && t.packageVersion === "x@1.0.0" && t.runtimeVersion === "0.2.1-rc.2";
+	})());
+
+	/* readExemptions：没有 compatibility.json 也必须是「正常为空」，不是错误 */
+	const emptyProfile = dir("empty-profile");
+	await mkdir(emptyProfile, { recursive: true });
+	const emptyEx = await mExemptions.readExemptions({ profileDir: emptyProfile });
+	eq("豁免: 没有记录文件时 ok 且为空", [emptyEx.ok, Object.keys(emptyEx.exemptions).length, Boolean(emptyEx.missing)], [true, 0, true]);
+
+	/* 宿主写入 → 我们回读确认（用假 pm 改一个真文件，验「确认不到就不许说成功」） */
+	const grantDir = dir("grant-profile");
+	await mkdir(grantDir, { recursive: true });
+	const compatFile = join(grantDir, "compatibility.json");
+	const grantPm = {
+		listVersionExemptions: async () => ({ exemptions: JSON.parse(await readFile(compatFile, "utf8").catch(() => "{}")), warnings: [] }),
+		setVersionExemption: async (pkgVer, runtime) => {
+			const current = JSON.parse(await readFile(compatFile, "utf8").catch(() => "{}"));
+			current[pkgVer] = [...new Set([...(current[pkgVer] || []), runtime])];
+			await writeFile(compatFile, JSON.stringify(current, null, 2), "utf8");
+		}
+	};
+	const grantTarget = { packageVersion: "x@1.0.0", name: "x", version: "1.0.0", runtimeVersion: "0.2.1-rc.2", requirements: { "@deepseek-ai/dsh": ">=0.3.0" } };
+	const noConsent = await mExemptions.grantExemption({ pluginManager: grantPm, target: grantTarget, acceptRisk: false });
+	eq("豁免: 没有明确接受风险就不授权", noConsent.ok, false);
+	ok("豁免: 拒绝时说清「宿主也会拒绝」", /宿主/.test(noConsent.message), noConsent.message);
+	const noPm = await mExemptions.grantExemption({ pluginManager: null, target: grantTarget, acceptRisk: true });
+	eq("豁免: 宿主没有接口时不假装成功", noPm.ok, false);
+	ok("豁免: 没有接口时给出 CLI 兜底", /allow-version/.test(noPm.message), noPm.message);
+	const grantedOk = await mExemptions.grantExemption({ pluginManager: grantPm, target: grantTarget, acceptRisk: true });
+	eq("豁免: 授权成功", grantedOk.ok, true);
+	eq("豁免: 授权后回读确认到了（不是只看宿主返回码）", grantedOk.verified, true);
+	const afterGrant = await mExemptions.readExemptions({ profileDir: grantDir });
+	eq("豁免: 记录真的落在 compatibility.json", afterGrant.exemptions["x@1.0.0"], ["0.2.1-rc.2"]);
+	const lyingPm = { setVersionExemption: async () => {}, listVersionExemptions: async () => ({ exemptions: {}, warnings: [] }) };
+	const lied = await mExemptions.grantExemption({ pluginManager: lyingPm, target: grantTarget, acceptRisk: true });
+	eq("豁免: 宿主返回成功但回读不到 → 不认", lied.verified, false);
+
+	/* 预检侧的豁免接线：已授权的版本不能再被判「不兼容」；判据要看当前运行版本 */
+	const strictCase = { name: "pkg-pre", version: "9.9.9", engines: { dsh: ">=0.2.0-0 <0.3.0" } };
+	const strictNoEx = await mCompat.evaluateCompat(strictCase, { runtimeVersion: "0.2.1-rc.2", exemptions: {} });
+	eq("兼容: 宽松口径下预发布版本算满足", strictNoEx.ok, true);
+	/* 真不满足 + 记录在手 → 必须报「不兼容但已豁免」（官方评估器与本地兜底都要认） */
+	const exemptCase = { name: "pkg-pre", version: "9.9.9", engines: { dsh: ">=0.3.0" } };
+	const strictEx = await mCompat.evaluateCompat(exemptCase, { runtimeVersion: "0.2.1-rc.2", exemptions: { "pkg-pre@9.9.9": ["0.2.1-rc.2"] } });
+	eq("兼容: 命中豁免时判「不兼容但已豁免」（否则面板会与宿主对着干）", [strictEx.ok, strictEx.exempted], [false, true]);
+	const strictMiss = await mCompat.evaluateCompat(exemptCase, { runtimeVersion: "0.2.1-rc.2", exemptions: {} });
+	eq("兼容: 真不满足时仍然判不兼容", strictMiss.ok, false);
+
+	/* pipeline.exemptVersion 的三道闸：没任务 / 判据不是 mismatch / 已豁免 */
+	const exemptThis = (over) => Object.assign({
+		_running: null,
+		jobById: () => ({ id: "j1", status: "failed", input: { raw: "x", kind: "name" }, precheck: { compat: { verdict: "ok" } }, install: {} }),
+		log: async () => {},
+		save: async () => {},
+		submit: async () => ({ ok: true, job: { id: "j9" } }),
+		missingLocalInput: async () => null,
+		ctx: { pluginManager: grantPm }
+	}, over || {});
+	const exemptNoJob = await Installer.prototype.exemptVersion.call(exemptThis({ jobById: () => null }), "nope");
+	eq("豁免动作: 没有这个任务", exemptNoJob.ok, false);
+	const exemptWrong = await Installer.prototype.exemptVersion.call(exemptThis(), "j1");
+	eq("豁免动作: 不是卡在版本兼容上就拒", exemptWrong.ok, false);
+	ok("豁免动作: 拒绝时说明当前判据", /判据|版本兼容/.test(exemptWrong.message), exemptWrong.message);
+	const exemptAlready = await Installer.prototype.exemptVersion.call(
+		exemptThis({ jobById: () => ({ id: "j1", status: "failed", input: { raw: "x", kind: "name" }, precheck: { compat: { verdict: "exempted", exempted: true } }, install: {} }) }),
+		"j1");
+	eq("豁免动作: 已豁免就只让你重试", exemptAlready.ok, false);
+	ok("豁免动作: 已豁免时说「直接重试」", /重试/.test(exemptAlready.message), exemptAlready.message);
+
+	/* 正路：真写 compatibility.json → 回读确认 → 开新任务重试（新任务带 fromJob 留痕） */
+	const happyDir = dir("exempt-happy");
+	await mkdir(happyDir, { recursive: true });
+	const happyFile = join(happyDir, "compatibility.json");
+	const happyPm = {
+		listVersionExemptions: async () => ({ exemptions: JSON.parse(await readFile(happyFile, "utf8").catch(() => "{}")), warnings: [] }),
+		setVersionExemption: async (pkgVer, runtime) => {
+			const current = JSON.parse(await readFile(happyFile, "utf8").catch(() => "{}"));
+			current[pkgVer] = [...new Set([...(current[pkgVer] || []), runtime])];
+			await writeFile(happyFile, JSON.stringify(current, null, 2), "utf8");
+		}
+	};
+	let submitted = null;
+	const happyThis = exemptThis({
+		ctx: { pluginManager: happyPm },
+		jobById: () => ({
+			id: "j8",
+			status: "failed",
+			input: { raw: "some-plugin", kind: "name" },
+			notes: [],
+			install: {},
+			precheck: {
+				compat: {
+					verdict: "mismatch",
+					exempted: false,
+					name: "@anweat/dsh-browser",
+					version: "0.2.1",
+					runtimeVersion: "0.2.1-rc.2",
+					requirements: { "@deepseek-ai/dsh-tools": ">=0.2.0-rc.2 <0.2.1-0" }
+				}
+			}
+		}),
+		submit: async (raw, opts) => {
+			submitted = { raw, opts };
+			return { ok: true, job: { id: "j9" } };
+		}
+	});
+	/* 这个用例里的任务对象是每次 jobById 新建的 —— 为了断言「笔记写在任务上」，
+	   改用一次性对象（与真实流程一致：同一个 job 实例）。 */
+	const happyJob = {
+		id: "j8",
+		status: "failed",
+		input: { raw: "some-plugin", kind: "name" },
+		notes: [],
+		install: {},
+		precheck: {
+			compat: {
+				verdict: "mismatch",
+				exempted: false,
+				name: "@anweat/dsh-browser",
+				version: "0.2.1",
+				runtimeVersion: "0.2.1-rc.2",
+				requirements: { "@deepseek-ai/dsh-tools": ">=0.2.0-rc.2 <0.2.1-0" }
+			}
+		}
+	};
+	const happy = await Installer.prototype.exemptVersion.call(Object.assign({}, happyThis, { jobById: () => happyJob }), "j8");
+	eq("豁免动作: 授权后返回 ok", happy.ok, true);
+	eq("豁免动作: 授权记录带着精确版本", happy.granted && happy.granted.packageVersion, "@anweat/dsh-browser@0.2.1");
+	eq("豁免动作: 回读确认过", happy.verified, true);
+	eq("豁免动作: 目标写进任务（面板据此显示已授权）", happyJob.install.versionExemption.packageVersion, "@anweat/dsh-browser@0.2.1");
+	ok("豁免动作: 任务笔记留痕", (happyJob.notes || []).some((n) => /精确版本豁免/.test(n)), JSON.stringify(happyJob.notes));
+	ok("豁免动作: 新任务从旧任务来（fromJob 留痕）", submitted && submitted.opts && submitted.opts.fromJob === "j8", JSON.stringify(submitted && submitted.opts));
+	eq("豁免动作: 新任务重试用原输入", submitted && submitted.raw, "some-plugin");
+	eq("豁免动作: 记录真的写进 compatibility.json", JSON.parse(await readFile(happyFile, "utf8"))["@anweat/dsh-browser@0.2.1"], ["0.2.1-rc.2"]);
 
 	/* R9 实测撞出来的真 bug：save() 用固定 `state.json.tmp`，并发两次就 ENOENT，
 	   而那条错误会被当成「安装失败」记在任务上。现在要求：并发调用串行 + tmp 名唯一。 */
@@ -1036,7 +1192,7 @@ async function main() {
 	const hotkeyPipelineSrc = await readFile(join(pluginRoot, "lib", "pipeline.js"), "utf8");
 	ok("hotkey: 宿主 doctor(apply) 也有自己的并发闸", hotkeyPipelineSrc.includes("apply && this._running"));
 	ok("hotkey: 两条路都会把 busy 翻译成人话", clientSrc.includes('report.busy') && clientSrc.includes("先别动环境"));
-	ok("client: build 号已随本轮改动提到 r9", /BUILD\s*=\s*"r9\./.test(clientSrc), clientSrc.match(/BUILD\s*=\s*"[^"]+"/));
+	ok("client: build 号已随本轮改动提到 r10（每改一次 client.js 提一位）", /BUILD\s*=\s*"r(?:9|1\d)\./.test(clientSrc), clientSrc.match(/BUILD\s*=\s*"[^"]+"/));
 
 	/* ⑫ 7z / rar：外包给系统 bsdtar，解完再按**实际落盘**的东西复核围栏。
 	   注意：这一组要 spawn 子进程，只有宿主进程里跑得动（沙箱里 spawn 会 EPERM）。 */

@@ -45,7 +45,7 @@ export const FROZEN_DEFAULTS = {
 };
 
 /** 文档里声明的自检项数（改断言就先跑一次 host_selfcheck，再同步这个数）。 */
-export const EXPECTED_ASSERTIONS = 328;
+export const EXPECTED_ASSERTIONS = 364;
 
 /** 期望注册的宿主工具（漏一个 = 模型看不见一项能力）。 */
 const EXPECTED_TOOLS = [
@@ -143,6 +143,24 @@ async function main() {
 	ok("面板有批准卡 + 二次确认", clientSrc.includes("BuildApprovalCard") && clientSrc.includes("我确认允许"));
 	ok("错误块渲染大白话与处置步骤", clientSrc.includes("job.error.plain") && clientSrc.includes("job.error.fix"));
 
+	/* ⑤d R10：版本豁免必须**三处一起接**，少一处就回到「装了被挡、授权了还挡」的死循环 ——
+	   ① 读记录的模块存在；② 判定时真的把 exemptions 传进评估器；③ 面板能授权、模型不能。 */
+	const exemptionsSrc = await readText("lib\\exemptions.js");
+	const profileSrc = (await readText("lib\\profilehealth.js")) || "";
+	ok("豁免模块存在（R10）", Boolean(exemptionsSrc) && /export function exemptionTarget/.test(exemptionsSrc));
+	ok("豁免：记录文件名与宿主一致", /EXEMPTIONS_FILENAME = "compatibility\.json"/.test(exemptionsSrc || ""));
+	ok("豁免：授权走宿主接口（不是自己写文件）", /setVersionExemption/.test(exemptionsSrc) && /acceptRisk/.test(exemptionsSrc));
+	ok("豁免：授权后回读确认", /verified/.test(exemptionsSrc));
+	ok("预检把已有豁免传给评估器（否则授权了也白授权）", /evaluateCompat\(manifest, \{ exemptions: ex\.exemptions/.test(precheckSrc));
+	ok("体检把已有豁免传给评估器（否则已豁免的会被误报「会被跳过」）", /evaluateCompat\(manifest, \{ exemptions: ex\.exemptions/.test(profileSrc));
+	ok("判定用显式运行版本（宿主外侦测不到版本时不许把所有插件的判成不兼容）", /options\.runtimeVersion \|\|/.test(await readText("lib\\compat.js")));
+	ok("pipeline 有「授权并重试」动作", /async exemptVersion/.test(pipelineSrc));
+	ok("授权目标只能从预检结论推出（客户端不能自带包名/版本）", /exemptionTarget\(compat\)/.test(pipelineSrc));
+	ok("index 暴露 exempt-version 动作", /exempt-version/.test(indexSrc2));
+	ok("授权动作不暴露给模型（风险只能人接受）", !/exempt-version/.test(toolsSrc) && !/exemptVersion/.test(toolsSrc));
+	ok("面板有版本不兼容卡 + 二次确认", clientSrc.includes("CompatExemptCard") && clientSrc.includes("我确认风险"));
+	ok("体检会报告「已豁免但声明不兼容」的知情条目", /bundle-incompatible-exempted/.test(profileSrc));
+
 	/* ⑥ 数据目录：设置文件是否与运行时会一致（手改过就会出现差异） */
 	const settingsFile = join(dataDir(), "settings.json");
 	let rawSettings = null;
@@ -207,7 +225,7 @@ async function main() {
 	console.log("");
 	console.log("接下来（这两项这里不做，各有专门入口）：");
 	console.log("  1) host_selfcheck({plugin:\"dsh-plugin-installer\"})   —— 行为自检，" + EXPECTED_ASSERTIONS + " 项，必须 0 FAIL");
-	console.log("  2) node dev/render-check.cjs                          —— 界面无头渲染，42 项");
+	console.log("  2) node dev/render-check.cjs                          —— 界面无头渲染，62 项");
 	if (failures.length === 0) console.log("\nSUMMARY audit passed");
 	process.exitCode = failures.length === 0 ? 0 : 1;
 }
