@@ -126,7 +126,7 @@
 > 线上实测：构建标签 `0.1.0 · 2026-10-20 19:45`、客户端 `r6.0`、`GET/POST /settings` 正常
 > （非法值当场夹取回默认）、`clientReport` 里有 360×658 的窄屏实例。
 >
-> **R9（2026-10-22 01:15）「装不上」时说清为什么、并给出真能走的一步**（宿主侧，重启生效）：
+> **R9（2026-10-22 01:15）「装不上」时说清为什么、并给出真能走的一步**（宿主侧；实测被运行中的宿主重新 apply，未重启即生效，但别把它当保证）：
 > 1. **失败分诊**（新 `lib/installfailure.js`）：把宿主自己的两条判据搬到面板 ——
 >    ① pnpm 失败的 10 类（`build-blocked` / `not-found` / `no-matching-version` / `disk-full` /
 >    `permission` / `integrity` / `network` / `timeout` / `pnpm-missing` / `unknown`，次序与正则
