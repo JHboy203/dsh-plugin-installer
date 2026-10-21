@@ -45,7 +45,7 @@ export const FROZEN_DEFAULTS = {
 };
 
 /** 文档里声明的自检项数（改断言就先跑一次 host_selfcheck，再同步这个数）。 */
-export const EXPECTED_ASSERTIONS = 364;
+export const EXPECTED_ASSERTIONS = 372;
 
 /** 期望注册的宿主工具（漏一个 = 模型看不见一项能力）。 */
 const EXPECTED_TOOLS = [

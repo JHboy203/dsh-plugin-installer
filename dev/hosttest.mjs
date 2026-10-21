@@ -461,6 +461,30 @@ async function main() {
 	const blocked = await precheck({ detected: hostile, scan: cleanScan, scripts: [], source: { type: "local", name: "x", version: "1.0.0" } });
 	eq("precheck: 版本不匹配 → 阻断", blocked.blocked, true);
 	ok("precheck: 给了放行命令", blocked.fixes.some((f) => f.command && f.command.includes("allow-version")), blocked.fixes);
+	ok("precheck: 面板授权排在 CLI 前面（别一上来就让人退出 DSH）", (() => {
+		const action = blocked.fixes.findIndex((f) => f.action === "exempt-version");
+		const cli = blocked.fixes.findIndex((f) => f.command && f.command.includes("allow-version"));
+		return action >= 0 && cli > action;
+	})(), blocked.fixes.map((f) => f.label));
+
+	/* R10 回归：**已授权的版本不能再被挡**。这两条是这一轮的 bug 本体 ——
+	   以前预检不读 compatibility.json，于是「授权了回来还是被挡」，而卡片又把人指向要先退出 DSH 的 CLI。 */
+	const exemptProfile = dir("precheck-exempt-profile");
+	await mkdir(exemptProfile, { recursive: true });
+	const exemptBefore = await precheck({ detected: hostile, scan: cleanScan, scripts: [], source: { type: "local", name: "x", version: "1.0.0" }, profileDir: exemptProfile });
+	eq("precheck: 没有豁免记录时仍然阻断", exemptBefore.blocked, true);
+	eq("precheck: 没记录时给出可授权目标", Boolean(exemptBefore.compat && exemptBefore.compat.name && exemptBefore.compat.version), true);
+	await writeFile(join(exemptProfile, "compatibility.json"), JSON.stringify({ "x@1.0.0": [exemptBefore.compat.runtimeVersion] }, null, 2), "utf8");
+	const exemptAfter = await precheck({ detected: hostile, scan: cleanScan, scripts: [], source: { type: "local", name: "x", version: "1.0.0" }, profileDir: exemptProfile });
+	eq("precheck: 已授权就不再阻断（真 bug 的回归）", exemptAfter.blocked, false);
+	eq("precheck: 判据标成 exempted", exemptAfter.compat.verdict, "exempted");
+	ok("precheck: 说明豁免记录从哪来", exemptAfter.reasons.some((r) => /豁免/.test(r.text)) && /compatibility\.json|pluginManager/.test(exemptAfter.reasons.find((r) => /豁免/.test(r.text)).detail), JSON.stringify(exemptAfter.reasons.filter((r) => /豁免/.test(r.text))));
+	const staleProfile = dir("precheck-stale-profile");
+	await mkdir(staleProfile, { recursive: true });
+	await writeFile(join(staleProfile, "compatibility.json"), JSON.stringify({ "x@1.0.0": ["0.2.1-rc.1"] }, null, 2), "utf8");
+	const stalePre = await precheck({ detected: hostile, scan: cleanScan, scripts: [], source: { type: "local", name: "x", version: "1.0.0" }, profileDir: staleProfile });
+	eq("precheck: 只对旧 DSH 生效的豁免不算数", stalePre.blocked, true);
+	ok("precheck: 旧豁免要说清「重新授权一次即可」", stalePre.reasons.some((r) => /重新授权/.test(r.detail || "")), JSON.stringify(stalePre.reasons));
 
 	const fine = await detectKind(bundleDir);
 	const okPre = await precheck({ detected: fine, scan: cleanScan, scripts: [], source: { type: "local" } });
