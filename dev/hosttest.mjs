@@ -9,7 +9,7 @@
  * 覆盖：semver / 输入分类 / ZIP·TAR·tar.gz 解包与围栏 / 识别短路顺序 /
  *       静态扫描与脱敏 / 快照与回滚 / 预检阻断 / 审查材料裁剪。
  */
-import { mkdtemp, mkdir, readFile, readdir, rm, utimes, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gzipSync, deflateRawSync } from "node:zlib";
@@ -23,6 +23,7 @@ import { detectKind } from "../lib/detect.js";
 import { parseSkillFrontmatter, yamlFrontmatterIssue } from "../lib/detect.js";
 import {
 	buildSkillView,
+	planSkillPark,
 	readSkillsOnDisk,
 	skillBackupInfo,
 	skillFindings,
@@ -1285,6 +1286,77 @@ async function main() {
 		mCodestamp.describeFreshness({ fresh: false, loaded: "a", disk: { digest: "b", files: 30, newestFile: "lib/x.js" }, at: "2026-10-22T04:51:44.000Z", appliedAt: "2026-10-22T05:10:00.000Z", appliedAfterLoad: true, needsApply: false }));
 	const staleState = await mCodestamp.freshness();
 	eq("codestamp: freshness 回 needsApply 布尔", typeof staleState.needsApply, "boolean");
+
+	/* R15：指纹拆「宿主 / 客户端」两栏 —— 只改客户端**不许**再报「需要重启」（R14 连踩两次的假告警） */
+	ok("codestamp: 指纹拆两栏（宿主 hostFiles + 客户端 digest）",
+		typeof codeState.disk.hostFiles === "number" && codeState.disk.hostFiles >= 20 && codeState.client && typeof codeState.client.digest === "string",
+		codeState.disk);
+	ok("codestamp: 客户端只占 1 个文件（不混进宿主那 31 个）", codeState.disk.files === codeState.disk.hostFiles + 1, codeState.disk);
+	eq("codestamp: 本进程里客户端与磁盘一致", codeState.client.changed, false);
+	ok("codestamp: 一致那句写明「宿主 N 个文件」", /宿主 \d+ 个文件/.test(mCodestamp.describeFreshness(codeState)), mCodestamp.describeFreshness(codeState));
+	const clientOnly = mCodestamp.describeFreshness({
+		fresh: true, loaded: "a", disk: { digest: "b", files: 32, hostFiles: 31, newestFile: "lib/x.js" },
+		client: { changed: true }, at: "2026-10-22T11:00:00.000Z"
+	});
+	ok("codestamp: 只改客户端时不报「需要重新 apply」", !/需要重新 apply/.test(clientOnly), clientOnly);
+	ok("codestamp: 只改客户端时不喊人重启", !/重启 DSH/.test(clientOnly), clientOnly);
+	ok("codestamp: 只改客户端时说明「宿主会自动重载」", /自动重载/.test(clientOnly), clientOnly);
+	ok("codestamp: 宿主变了才喊重新 apply（回归）",
+		/还没被 apply/.test(mCodestamp.describeFreshness({ fresh: false, loaded: "a", disk: { digest: "b", files: 32, hostFiles: 31, newestFile: "lib/x.js" }, client: { changed: true }, at: "2026-10-22T04:51:44.000Z", appliedAt: "2026-10-22T04:51:54.000Z", appliedAfterLoad: true, needsApply: true })),
+		mCodestamp.describeFreshness({ fresh: false, loaded: "a", disk: { digest: "b", files: 32, hostFiles: 31, newestFile: "lib/x.js" }, client: { changed: true }, at: "2026-10-22T04:51:44.000Z", appliedAt: "2026-10-22T04:51:54.000Z", appliedAfterLoad: true, needsApply: true }));
+
+	/* R15：备份目录「移出技能根」—— 判据是纯函数，越权一次就够毁掉信任 */
+	const parkRoot = dir("park-root");
+	await mkdir(join(parkRoot, "grill.bak-1"), { recursive: true });
+	const parkOk = planSkillPark({ roots: [parkRoot], dir: "grill.bak-1", stamp: "20261022-120000", parkedRoot: dir("parked") });
+	eq("skill park: 备份目录可以移", parkOk.ok, true);
+	ok("skill park: 源路径在技能根下", parkOk.ok && parkOk.from.startsWith(parkRoot), parkOk.from);
+	ok("skill park: 目标落在 parked/<时间戳>/<名字>", parkOk.ok && /parked[\\/]20261022-120000[\\/]grill\.bak-1$/.test(parkOk.to), parkOk.to);
+	const parkCases = [
+		["../evil", "不许带路径"],
+		["a/b", "不许带路径"],
+		["C:\\x", "不许带路径"],
+		["..", "不许带路径"],
+		["", "没说移哪个"],
+		["normal-skill", "不是备份形态"]
+	];
+	for (const [badDir, expect] of parkCases) {
+		const bad = planSkillPark({ roots: [parkRoot], dir: badDir, stamp: "s", parkedRoot: dir("parked2") });
+		ok("skill park: 拒绝 " + (badDir || "(空)"), bad.ok === false && String(bad.reason).includes(expect), bad);
+	}
+	eq("skill park: 没指定落点也不许动", planSkillPark({ roots: [parkRoot], dir: "grill.bak-1" }).ok, false);
+	/* 规划层只管「路径合法且形态是备份」；**存在性**在执行时判（这样纯函数不需要碰磁盘）。
+	   所以 missing.bak 能规划成功，但真去移动时会被 stat 拦住 —— 两条都要有断言。 */
+	eq("skill park: 规划层不碰磁盘（missing.bak 也能规划）",
+		planSkillPark({ roots: [parkRoot], dir: "missing.bak", stamp: "s", parkedRoot: dir("parked3") }).ok, true);
+	const parkInstaller = new Installer({ ctx: {}, options: {} });
+	const missingPark = await parkInstaller.parkSkillBackup("missing.bak");
+	ok("skill park: 真执行时找不到目录就拒绝（不会凭空造一个）",
+		missingPark.ok === false && /找不到这个目录/.test(String(missingPark.reason)), missingPark);
+
+	/* 真的移一次（在临时目录里，不碰真实技能根）：目录要从原处消失、出现在落点、再移一次应报「找不到」 */
+	const moveRoot = dir("park-move-root");
+	await mkdir(join(moveRoot, "grill.bak-9"), { recursive: true });
+	await writeFile(join(moveRoot, "grill.bak-9", "SKILL.md"), "---\nname: grill\ndescription: 旧副本\n---\n", "utf8");
+	const moved = await parkInstaller.parkSkillBackup("grill.bak-9", { roots: [moveRoot], parkedRoot: dir("park-move-parked") });
+	ok("skill park: 移完回 ok 且带落点", moved.ok === true && /grill\.bak-9$/.test(String(moved.to)), moved);
+	let movedGone = false;
+	try {
+		await stat(join(moveRoot, "grill.bak-9"));
+	} catch {
+		movedGone = true;
+	}
+	eq("skill park: 原处已经没有这个目录", movedGone, true);
+	let movedThere = false;
+	try {
+		movedThere = (await stat(moved.to)).isDirectory();
+	} catch {
+		movedThere = false;
+	}
+	eq("skill park: 落点真的出现了这个目录（内容跟着走）", movedThere, true);
+	eq("skill park: 内容没变（移动不是重建）", await readFile(join(moved.to, "SKILL.md"), "utf8"), "---\nname: grill\ndescription: 旧副本\n---\n");
+	const again = await parkInstaller.parkSkillBackup("grill.bak-9", { roots: [moveRoot], parkedRoot: dir("park-move-parked") });
+	ok("skill park: 再移一次会如实说找不到（幂等）", again.ok === false && /找不到这个目录/.test(String(again.reason)), again);
 
 	/* R9 实测撞出来的真 bug：save() 用固定 `state.json.tmp`，并发两次就 ENOENT，
 	   而那条错误会被当成「安装失败」记在任务上。现在要求：并发调用串行 + tmp 名唯一。 */

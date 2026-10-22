@@ -126,7 +126,7 @@
 > **构建标记格式**（`0.1.0 · YYYY-MM-DD HH:MM`，且 `/health` 不许写死）/ 客户端设置与热键入口 /
 > `settings.json` 归一化后逐字不变 / 等待确认任务的 staging 现场还在 / README 与交接文件里的
 > 断言数是否等于 `EXPECTED_ASSERTIONS`。**不碰宿主、不 spawn、不写盘**，只打印
-> 「接着跑 host_selfcheck（570）+ render-check（101）」。自洽检查现已 **84 项**。
+> 「接着跑 host_selfcheck（595）+ render-check（105）」。自洽检查现已 **94 项**。
 > 三层分工至此固定：**audit = 自洽，host_selfcheck = 行为，render-check = 界面**。
 > 线上实测：构建标签 `0.1.0 · 2026-10-20 19:45`、客户端 `r6.0`、`GET/POST /settings` 正常
 > （非法值当场夹取回默认）、`clientReport` 里有 360×658 的窄屏实例。
@@ -302,6 +302,23 @@
 > 磁盘扫描 5、对账计数与标签 21、结论分级 5、盲区闸门 4、接线 10），render **80 → 101**（+21），
 > audit **69 → 84**（+15）。
 
+> **R15（2026-10-22 19:0x）把两条判据改对，并把「报了却动不了」变成「一次点选」**：
+>
+> 1. **「运行中的代码」不再把客户端算进宿主指纹**。旧实现把 `index.js + client.js + lib/*.js`
+>    哈希成一枚，而 `client.js` 是宿主**自动热重载**的 —— 于是「只改了客户端」也会让状态工具报
+>    「这一版还没被 apply / 要重启」，一句会指挥人做无用功的假告警（R14 会话里连踩两次）。
+>    现在 `sourceDigests()` 分**宿主**（`index.js` + `lib/*.js`）与**客户端**（`client.js`）两栏：
+>    宿主变 → 真需要重新 apply；只有客户端变 → 明确说「宿主会自动重载，看面板 BUILD 号，别为这个重启」。
+>    旧进程（`LOADED` 只有合并指纹）自动退回旧口径 —— **宁可暂时保持旧行为，也不编假结论**。
+> 2. **技能备份终于有「移出」入口**：`.bak-*` 目录与正式那份同名，宿主只会用其中一份。面板以前只能
+>    报「4 组重名」，现在每个备份行有「移出技能根…」→ 二次确认（写明「不删除、随时能搬回」）→
+>    `POST action:park-skill-backup` → 移到 `<plugin>/data/parked-skills/<时间戳>/` 并立即回传新视图。
+>    判据是纯函数 `planSkillPark()`：只接受技能根**下一层**的名字、必须是备份形态、拼完再 resolve 一次防逃逸；
+>    存在性在执行时用 `stat` 判。**这个动作不暴露给模型**（与「批准」「授权」同类：动文件只能人按）。
+>
+> 断言：hosttest **570 → 595**（+25：指纹两栏 8、备份处置 17，含一次真实的「移完再移」），render **101 → 105**（+4：移出入口 + 确认态 3），
+> audit **84 → 94**（+10）。
+
 | 项目 | 值 |
 |---|---|
 | 包名 | `dsh-plugin-installer` |
@@ -419,7 +436,7 @@ dsh-tools 钉子是否过期、最近一次崩溃日志），可一键修其中�
 | GET | `/plugin-installer/inventory` | **已装清单**（本地读 profile，30 秒缓存；四类来源分开标）+ 最近一次检查更新的结果 |
 | GET | `/plugin-installer/skills` | **已装 Skill**（R14）：磁盘技能目录 × 宿主 `ctx.skills.list()` 对账 —— 宿主没认 / 重名 / 备份残留 / 不会自动调用；30 秒缓存，`?fresh=1` 绕过缓存 |
 | GET | `/plugin-installer/activation` | **激活视图**（R13）：逐行 `enabled`/`fiberPhase` + 缺 inject 明细 + 一句话结论；`?inject=0` 跳过源码扫描（快） |
-| POST | `/plugin-installer/action` | `{action,id}`：`confirm`/`skip-review`/`cancel`/`ack`/`rollback`/`review`/`rediagnose`/`check-updates`/`approve-builds`/`exempt-version`/`repair`/`fix-landmine`/`integrations` |
+| POST | `/plugin-installer/action` | `{action,id}`：`confirm`/`skip-review`/`cancel`/`ack`/`rollback`/`review`/`rediagnose`/`check-updates`/`approve-builds`/`exempt-version`/`repair`/`fix-landmine`/`integrations`/`park-skill-backup`（把备份目录移到 `data/parked-skills/`，不删除；只认技能根下一层的 `.bak*`，**不暴露给模型**） |
 | POST | `/plugin-installer/upload` | 原始字节 + `x-file-name`，落到 staging 后立即提交 |
 | POST | `/plugin-installer/ai` | `{message}` → 搜索 → 推荐（结构化） |
 | GET | `/plugin-installer/ai-status` | AI 通道可用性与当前默认模型 |
@@ -435,7 +452,7 @@ dsh-tools 钉子是否过期、最近一次崩溃日志），可一键修其中�
 ```bash
 # ① 自洽体检（最快，不碰宿主、不重启；换会话先跑这条）
 node DSH-Plugin/dsh-plugin-installer/dev/audit.mjs
-#   84 项：默认档冻结快照 / 5 个工具的 output 契约 / 构建标记形如「0.1.0 · 2026-10-22 02:40」/
+#   94 项：默认档冻结快照 / 5 个工具的 output 契约 / 构建标记形如「0.1.0 · 2026-10-22 02:40」/
 #   契约扫描与 profile 体检是否真的接着线 / 失败分诊与批准闭环是否接线 / 版本豁免是否三处一起接 /
 #   staging 是否保住「等确认」的现场 / 状态工具的「环境注意」行 / 「批准」与「授权」都没暴露给模型 /
 #   已装清单四类来源是否分开判 / 宿主自带包是否被排除在升级外 / check-updates 是否只挂在动作上（不在轮询里）/
@@ -444,7 +461,7 @@ node DSH-Plugin/dsh-plugin-installer/dev/audit.mjs
 #   客户端设置与热键入口 / settings.json 归一化后不变 / 等待确认任务的 staging 现场 /
 #   README 与交接文件里的断言数是否等于 EXPECTED_ASSERTIONS（改测试就同步它）
 
-# ② 570 项确定性自检（解包围栏 / 识别短路 / 扫描与密度 / 快照回滚 / 重打包 / prune 保鲜 / 地雷 /
+# ② 595 项确定性自检（解包围栏 / 识别短路 / 扫描与密度 / 快照回滚 / 重打包 / prune 保鲜 / 地雷 /
 #   契约扫描 / profile 体检与修复 / 已装版本对照 / 已装清单判据 / registry 最新版比对（打桩 fetch）/
 #   设置归一化与审核三档 / 红点与跳过审核门禁 / 热键 / 7z 往返与围栏 / 搜索缓存 / 工具契约 /
 #   pnpm 失败分诊 / allowBuilds 解析 / 批准重装 / 版本豁免读写与回读确认 / 兼容降级口径 /
@@ -452,7 +469,7 @@ node DSH-Plugin/dsh-plugin-installer/dev/audit.mjs
 #   技能备份识别 / 磁盘×宿主对账计数与结论分级）
 host_selfcheck({ plugin: "dsh-plugin-installer" })
 
-# ③ 无头渲染自检（微型 React 真的渲染一遍；101 项：诊断卡 / 预检卡 / 审查卡 / 设置面板 /
+# ③ 无头渲染自检（微型 React 真的渲染一遍；105 项：诊断卡 / 预检卡 / 审查卡 / 设置面板 /
 #   跳过审核按钮 / 安装脚本批准卡（默认态 + 二次确认态）/ 版本不兼容卡（三态 + 旧豁免失效）/
 #   已装清单（折叠态 / 展开态 / 可升级按钮 / 读不到 / 空 profile）/
 #   已装 Skill（折叠态 / 展开态 / 三种标签 / 读不到 / 空根 / 对账不了））
@@ -507,7 +524,7 @@ DSH 每次启动换随机端口（`dsh-desktop-host` 里写死 `--port 0`），�
 
 | 场景 | 结果 |
 |---|---|
-| 确定性自检 | **570/570 通过**（`dev/hosttest.mjs`，含 zip/tar 构造、穿越与软链接拒绝、比例炸弹、5 种识别分支、快照还原、重打包往返、prune 引用保护、地雷处置、契约扫描、profile 体检与修复、设置归一化、审核三档、热键、pnpm 失败分诊、allowBuilds 解析、批准重装与三道闸、落盘串行、版本豁免读写与回读确认、兼容降级口径、预检「已授权不再阻断」回归、staging 生命周期、环境注意、运行中代码指纹、已装清单四类来源、registry 比对与缓存、npm: 前缀、**inject 六种写法与边界、激活失败分诊、fiberPhase 判据、SKILL.md 三种 frontmatter 形态、YAML 硬错误判据、技能备份识别与磁盘×宿主对账**）；另 **101 项**无头渲染 + **84 项**自洽体检 |
+| 确定性自检 | **595/595 通过**（`dev/hosttest.mjs`，含 zip/tar 构造、穿越与软链接拒绝、比例炸弹、5 种识别分支、快照还原、重打包往返、prune 引用保护、地雷处置、契约扫描、profile 体检与修复、设置归一化、审核三档、热键、pnpm 失败分诊、allowBuilds 解析、批准重装与三道闸、落盘串行、版本豁免读写与回读确认、兼容降级口径、预检「已授权不再阻断」回归、staging 生命周期、环境注意、运行中代码指纹、已装清单四类来源、registry 比对与缓存、npm: 前缀、**inject 六种写法与边界、激活失败分诊、fiberPhase 判据、SKILL.md 三种 frontmatter 形态、YAML 硬错误判据、技能备份识别与磁盘×宿主对账、指纹两栏（宿主/客户端）、备份处置的越权拒绝与真实搬运**）；另 **105 项**无头渲染 + **94 项**自洽体检 |
 | 已装 Skill（R14 实测，本机） | 技能根 `.dsh/skills` 下 **59 个目录 = 55 个技能 + 4 个备份残留**；上线第一分钟抓出 **3 个 frontmatter 不是合法 YAML** 的技能（`github-private-backup` / `win-desktop-automation` / `windows-disk-reclaim`，PyYAML 复核：`mapping values are not allowed here`）→ 宿主读不出 name、整条跳过；用 `.tools/fix-skill-frontmatter.py --apply`（写前备份、写后 PyYAML 复核）改成块标量后，宿主重扫即认到 —— **`hostVisible` 55/55、`yamlBroken` 0、`notVisible` 0**；`domain-modeling` / `grill-me` / `grill-with-docs` / `grilling` 各有一份 `.bak-mp20261017-1350` 同名备份（尚未清）；11 个技能的 description 是 `>` 折叠块，旧解析把它们读成「>」 |
 | 激活失败的真实样本（R13 实测） | `dsh-imgops` 两次任务：①宿主返回 `application:"failed" / stage:"enable" / diagnostic:"1 entry did not activate … cannot get property \"tools\" without inject"`（pnpm exit 0、包已落地）→ 新分诊判 `activation-failed`，标题点名缺 `tools`，处置给出 `export const inject = ['tools']`；② `already-installed` → 判 noop + 照常诊断。同机 4 个健康插件（本插件 / dsh-screenshot / dsh-diag / dsh-ops）静态扫描**零误报**（canvas 的 `ctx.fillRect` 不计入） |
 | 重装静默无效（R13 第二个 bug） | 修好 `dsh-imgops` 并升到 0.1.1 重新提交，宿主仍回 `already-installed`（实测 `changed:false`、`elapsedMs:11`、pnpm 没跑）—— 判据是依赖行的 spec 字符串，不含版本文件名就永远是同一个 spec。修法：`pkg-<名字>-<版本>.tgz` + 只收「没人引用的旧包」 |
@@ -569,9 +586,9 @@ lib/activation.js        R13：激活判据唯一来源（enabled+fiberPhase≠a
 lib/skills.js            R14：已装 Skill —— 磁盘扫技能根 × 宿主 ctx.skills.list() 对账（没被认/重名/备份/不会自动调用）
 dev/verify-r13.mjs       R13：端到端验收器（运行中代码 / 提交 / ⑧ 回执 / ⑨ 诊断 / 体检），逐条 PASS/FAIL
 lib/tools.js             五个宿主工具定义（含 output 契约）
-dev/hosttest.mjs         570 项确定性自检（宿主进程跑）
-dev/render-check.cjs     101 项无头渲染自检（诊断卡 / 预检卡 / 审查卡 / 设置面板 / 跳过审核 / 批准卡 / 兼容卡 / **已装清单 / 已装 Skill**）
-dev/audit.mjs            84 项自洽体检（不碰宿主；换会话先跑这个）
+dev/hosttest.mjs         595 项确定性自检（宿主进程跑）
+dev/render-check.cjs     105 项无头渲染自检（诊断卡 / 预检卡 / 审查卡 / 设置面板 / 跳过审核 / 批准卡 / 兼容卡 / **已装清单 / 已装 Skill（含移出确认态）**）
+dev/audit.mjs            94 项自洽体检（不碰宿主；换会话先跑这个）
 dev/probe-inject.mjs     手动探针：拿本机真实插件验 inject 扫描会不会误报（R13）
 dev/quarantine-dshtools.mjs  手动兜底：把埋下的 dsh-tools 挪进备份（薄壳，复用 lib/landmine.js）
 dev/restore-vendor-tarball.mjs 手动兜底：把断掉的 file: 依赖补回来（薄壳，复用 lib/repair.js）

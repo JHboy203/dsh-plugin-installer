@@ -175,7 +175,7 @@ function textOf(node, acc) {
  * 正常不执行，所以**数源码不等于数断言**（实测 103 处、只跑 80 条）。真正的判据只能是
  * 「这次实际跑了几条」，所以由脚本自己报总数、并由自己比对。
  */
-const EXPECTED_TOTAL = 101;
+const EXPECTED_TOTAL = 105;
 
 let failed = 0;
 let passed = 0;
@@ -727,6 +727,7 @@ if (typeof t.Skills === "function") {
 		skillExpanded = textOf(t.Skills({})).join(" | ");
 		check("已装 Skill：展开后列出目录", skillExpanded.includes("alpha.bak-1"), skillExpanded.slice(0, 200));
 		check("已装 Skill：备份行标「备份残留」", skillExpanded.includes("备份残留"));
+		check("已装 Skill：备份行有「移出技能根…」入口（R15）", skillExpanded.includes("移出技能根…"), skillExpanded.slice(0, 300));
 		check("已装 Skill：YAML 写坏的行被点名并给改法", skillExpanded.includes("frontmatter 写坏了") && skillExpanded.includes("改法："), skillExpanded.slice(0, 400));
 		check("已装 Skill：宿主没认的行被点名", skillExpanded.includes("beta") && skillExpanded.includes("宿主没认"));
 		check("已装 Skill：不会自动调用单独标出", skillExpanded.includes("不会自动调用"));
@@ -736,6 +737,20 @@ if (typeof t.Skills === "function") {
 		check("已装 Skill：展开后能收起", skillExpanded.includes("收起"));
 	} catch (e) {
 		check("已装 Skill：展开态渲染不抛异常", false, String((e && e.message) || e));
+	}
+
+	/* ②b 二次确认态（hook 3 = 待确认的备份目录名）：动手之前必须说清「移到哪、不删除」 */
+	resetHooks();
+	hooks[2] = true;
+	hooks[3] = "alpha.bak-1";
+	let skillConfirm = "";
+	try {
+		skillConfirm = textOf(t.Skills({})).join(" | ");
+		check("已装 Skill：移出前有二次确认", skillConfirm.includes("我确认移出"), skillConfirm.slice(0, 400));
+		check("已装 Skill：确认时说清「不删除、能搬回」与落点", skillConfirm.includes("不删除") && skillConfirm.includes("parked-skills"), skillConfirm.slice(0, 400));
+		check("已装 Skill：确认态可取消", skillConfirm.includes("取消"));
+	} catch (e) {
+		check("已装 Skill：确认态渲染不抛异常", false, String((e && e.message) || e));
 	}
 
 	/* ③ 读不到 / 空 / 宿主对账不了 三种兜底 */

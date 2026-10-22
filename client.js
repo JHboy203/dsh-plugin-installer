@@ -23,7 +23,7 @@ window.__ModuleLoader__.load({
 		/* 客户端 build 号（R5.1）：改 client.js 就提一位。
 		   client 会热重载、但没人保证「当前页面跑的是哪一版」—— 这个号随 client-state
 		   一起上报，宿主 /health 的 clientReport.build 就是答案（宿主侧另有 mtime 标签）。 */
-		const BUILD = "r14.2";
+		const BUILD = "r15.0";
 
 		/* ── 迷你 store（模块级，面板关着时图标也在用）──────────────────── */
 
@@ -1507,6 +1507,24 @@ window.__ModuleLoader__.load({
 			const s = useStore();
 			const view = s.local.skills || null;
 			const [open, setOpen] = useState(false);
+			/* 待确认「移出」的备份目录名（R15）。两段式是刻意的：动文件前先说清后果。 */
+			const [parking, setParking] = useState(null);
+			const park = (dir) => {
+				setLocal({ skillsBusy: true });
+				api("/action", { method: "POST", body: JSON.stringify({ action: "park-skill-backup", dir }) })
+					.then((r) => {
+						if (r && r.state) setStore({ data: r.state });
+						if (!r || r.ok === false) {
+							toast((r && r.error) || "移不动");
+							return;
+						}
+						if (r.skills) setLocal({ skills: r.skills });
+						setParking(null);
+						toast("已移出技能根：" + dir);
+					})
+					.catch((e) => toast("移不动：" + String((e && e.message) || e)))
+					.finally(() => setLocal({ skillsBusy: false }));
+			};
 			const load = (force) => {
 				setLocal({ skillsBusy: true });
 				api("/skills" + (force ? "?fresh=1" : ""))
@@ -1581,6 +1599,20 @@ window.__ModuleLoader__.load({
 							h("div", { className: "dpi-skill-desc" }, row.description || (row.reasons && row.reasons[0]) || "（没有描述：模型不会自动挑它）"),
 							row.yamlIssue
 								? h("div", { className: "dpi-detail" }, "改法：" + row.yamlIssue.fix)
+								: null,
+							/* R15：备份目录给一个「移出」入口（两段式）。移动不删除，落在 data/parked-skills。 */
+							row.backup
+								? parking === row.dir
+									? h("div", { className: "dpi-actions dpi-actions-tight" },
+										h("span", { className: "dpi-muted" }, "移到 data/parked-skills/（不删除，随时能搬回）"),
+										h("button", {
+											className: "dpi-btn dpi-btn-sm dpi-btn-primary",
+											disabled: Boolean(s.local.skillsBusy),
+											onClick: () => park(row.dir)
+										}, "我确认移出"),
+										h("button", { className: "dpi-btn dpi-btn-sm", onClick: () => setParking(null) }, "取消"))
+									: h("div", { className: "dpi-actions dpi-actions-tight" },
+										h("button", { className: "dpi-btn dpi-btn-sm", onClick: () => setParking(row.dir) }, "移出技能根…"))
 								: null,
 							h("div", { className: "dpi-detail" },
 								row.dir + (row.bytes ? " · " + Math.max(1, Math.round(row.bytes / 1024)) + " KB" : "") +

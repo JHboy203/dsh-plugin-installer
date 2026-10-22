@@ -14,7 +14,7 @@
  *   GET  /plugin-installer/skills       已装 Skill（本地读 + 宿主技能清单对账；重名 / 备份 / 没被认）
  *   POST /plugin-installer/action       confirm / skip-review / cancel / ack / rollback / review /
  *                                       check-updates / rediagnose / approve-builds / exempt-version /
- *                                       repair / fix-landmine / integrations
+ *                                       repair / fix-landmine / integrations / park-skill-backup
  *   POST /plugin-installer/upload       拖进来的文件（原始字节，x-file-name 带头）
  *   POST /plugin-installer/ai           面板 AI：搜索 → 推荐 → 安装请求
  *   GET  /plugin-installer/ai-status    AI 通道是否可用
@@ -360,6 +360,18 @@ export async function apply(ctx) {
 					else if (action === "fix-landmine") {
 						const swept = await installer.sweepLandmine("manual");
 						return json(res, 200, { ok: true, landmine: swept, state: await installer.snapshotState() });
+					}
+					else if (action === "park-skill-backup") {
+						/* R15：把技能根里的备份目录移到 data/parked-skills（移动，不删除，可搬回）。
+						   只处理 `.bak-*` 形态、只接受技能根下一层名字（判据在 planSkillPark）；
+						   **不暴露给模型** —— 与「批准」「授权」同类，动文件的事只能人按。 */
+						if (typeof installer.parkSkillBackup !== "function") {
+							return json(res, 503, { ok: false, error: "宿主还没重启：技能备份处置是新代码（lib/pipeline.js 不热重载）" });
+						}
+						const parked = await installer.parkSkillBackup(String(body.dir || ""));
+						return json(res, 200, parked.ok
+							? { ok: true, parked, skills: parked.skills || null, state: await installer.snapshotState() }
+							: { ok: false, error: parked.reason || "移不动", parked });
 					} else if (action === "integrations") {
 						const eco = await installer.integrations(true);
 						return json(res, 200, { ok: true, integrations: eco, state: await installer.snapshotState() });

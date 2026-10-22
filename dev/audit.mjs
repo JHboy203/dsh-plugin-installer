@@ -45,10 +45,10 @@ export const FROZEN_DEFAULTS = {
 };
 
 /** 文档里声明的自检项数（改断言就先跑一次 host_selfcheck，再同步这个数）。 */
-export const EXPECTED_ASSERTIONS = 570;
+export const EXPECTED_ASSERTIONS = 595;
 
 /** 界面自检项数（dev/render-check.cjs）。同样是「文档对表」的一半。 */
-const EXPECTED_RENDER_ASSERTIONS = 101;
+const EXPECTED_RENDER_ASSERTIONS = 105;
 
 /** 期望注册的宿主工具（漏一个 = 模型看不见一项能力）。 */
 const EXPECTED_TOOLS = [
@@ -221,6 +221,21 @@ async function main() {
 	ok("已装 Skill：状态工具有「Skill：」一行", /· Skill：/.test(toolsSrc) && /skillsLine/.test(toolsSrc));
 	ok("已装 Skill：面板把卡片接进 Panel", /h\(Skills\)/.test(clientSrc) && /\bSkills,/.test(clientSrc));
 	ok("已装 Skill：面板标出备份 / 宿主没认 / 不会自动调用", clientSrc.includes("备份残留") && clientSrc.includes("宿主没认") && clientSrc.includes("不会自动调用"));
+
+	/* ⑤h R15：两件「把判据改对」的事 ——
+	   ①「运行中的代码」把 client.js 也算进宿主指纹，只改客户端就喊需要重启（R14 连踩两次）；
+	   ② 备份目录只能报不能处置。前者必须拆两栏，后者必须是「移动、不删除、只认备份形态、模型拿不到」。 */
+	const codestampSrcR15 = (await readText("lib/codestamp.js")) || "";
+	ok("运行中的代码：指纹拆宿主 / 客户端两栏（R15）", /export async function sourceDigests/.test(codestampSrcR15) && /client: disk \? \{ digest: disk\.client, changed:/.test(codestampSrcR15));
+	ok("运行中的代码：只改客户端时说「自动重载」而不是「需要重启」", /自动重载/.test(codestampSrcR15) && /别为这个重启/.test(codestampSrcR15));
+	ok("运行中的代码：旧进程没有分栏时退回合并口径（不编假结论）", /const split = Boolean\(LOADED\.host && LOADED\.client\)/.test(codestampSrcR15));
+	ok("运行中的代码：needsApply 只看宿主那半", /newest: host\.newest/.test(codestampSrcR15) && /newestFile: host\.newestFile/.test(codestampSrcR15));
+	ok("技能备份处置：规划是纯函数（可单测、不碰磁盘）", /export function planSkillPark/.test(skillsSrc || ""));
+	ok("技能备份处置：只接受技能根下一层 + 备份形态", /只接受技能根下一层的目录名/.test(skillsSrc || "") && /不是备份形态/.test(skillsSrc || ""));
+	ok("技能备份处置：pipeline 移动不删除", /async parkSkillBackup\(/.test(pipelineSrc) && /renameWithRetry\(planned\.from, planned\.to\)/.test(pipelineSrc) && /parked-skills/.test(pipelineSrc));
+	ok("技能备份处置：index 暴露 park-skill-backup", /park-skill-backup/.test(indexSrc2));
+	ok("技能备份处置：不暴露给模型（动文件只能人按）", !/park-skill-backup/.test(toolsSrc) && !/parkSkillBackup/.test(toolsSrc));
+	ok("技能备份处置：面板两段式确认、写明不删除", clientSrc.includes("移出技能根…") && clientSrc.includes("我确认移出") && clientSrc.includes("不删除"));
 
 	/* ⑥ 数据目录：设置文件是否与运行时会一致（手改过就会出现差异） */
 	const settingsFile = join(dataDir(), "settings.json");
