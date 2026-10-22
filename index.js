@@ -10,14 +10,30 @@
  *   POST /plugin-installer/search       确定性搜索候选
  *   GET  /plugin-installer/settings     个性化设置（提醒 / 审核档位 / 轮询 / 搜索源…）
  *   POST /plugin-installer/settings     改设置（补丁，逐项合并并落盘）
- *   POST /plugin-installer/action       confirm / skip-review / cancel / ack / rollback / review / …
+ *   GET  /plugin-installer/inventory    已装清单（本地读，不联网）；附带 30 分钟内最近一次检查更新的结果
+ *   GET  /plugin-installer/skills       已装 Skill（本地读 + 宿主技能清单对账；重名 / 备份 / 没被认）
+ *   POST /plugin-installer/action       confirm / skip-review / cancel / ack / rollback / review /
+ *                                       check-updates / rediagnose / approve-builds / exempt-version /
+ *                                       repair / fix-landmine / integrations
  *   POST /plugin-installer/upload       拖进来的文件（原始字节，x-file-name 带头）
  *   POST /plugin-installer/ai           面板 AI：搜索 → 推荐 → 安装请求
  *   GET  /plugin-installer/ai-status    AI 通道是否可用
+ *   GET  /plugin-installer/doctor       环境体检（只读；修复走 action:"repair"）
+ *   POST /plugin-installer/client-state  客户端自报（版本/几何/打开状态，只存内存）
  *   GET  /plugin-installer/health       自检
  *   GET  /plugin-installer/debug/inventory  只读：插件清单原始结构（支持时用）
  *
  * ⚠️ 失败关闭：任何一个工具注册失败都只记录，不影响面板本身（也不会拖垮插件树）。
+ *
+ * R13（2026-10-22 13:0x）：装上了 ≠ 起来了 —— 预检/诊断接 `lib/inject.js`（服务声明契约），
+ * 安装回执里的 `application:"failed"` 也走分诊（激活失败 / already-installed），
+ * vendor 包名带版本（否则同 spec 重装静默无效）。入口文件的这行注释同时用来触发热 re-apply。
+ *
+ * R14（2026-10-22 14:0x）：补齐「Skill」那一半 —— `GET /skills` 把磁盘技能目录与宿主
+ * `ctx.skills.list()` 对账（宿主没认 / 重名 / 备份残留 / 不会自动调用），并修掉 frontmatter
+ * `>` / `|` 块标量被读成指示符的解析 bug。**注意 `skills` 不在 inject 里**，必须走
+ * `ctx.get("skills")`（`lib/pipeline.js` 的 `hostSkillList`）—— 只写 `ctx.skills` 会永远
+ * 得到 undefined，从而得出「本机没有技能服务」这种假结论。
  */
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -26,7 +42,7 @@ import { buildInstallerTools } from "./lib/tools.js";
 import { createReviewer, runPanelAi } from "./lib/ai.js";
 import { checkDshToolsShadow } from "./lib/landmine.js";
 import { buildStamp, dataDir, hostVersions, profileDir, skillRoots } from "./lib/hostinfo.js";
-import { freshness, describeFreshness } from "./lib/codestamp.js";
+import { freshness, describeFreshness, recordApply } from "./lib/codestamp.js";
 import { DEFAULTS as DEFAULT_SETTINGS, REVIEW_LEVELS, CHOICES as SETTING_CHOICES } from "./lib/settings.js";
 
 const PREFIX = "/plugin-installer";
@@ -173,6 +189,11 @@ function makeFaces(ctx) {
 }
 
 export async function apply(ctx) {
+	/* R12.1：宿主是**逐文件**换新的（改了哪个就重新 import 哪个），所以 codestamp.js
+	   自己的 `LOADED` 时刻会一直停在最早那次。apply() 每次（重新）apply 都会跑 ——
+	   把「最后一次 apply」记下来，'运行中的代码' 那一行才能区分
+	   「改完没人管（该重启）」与「宿主已经重新 apply 过（看行为，别盲目重启）」。 */
+	recordApply();
 	const faces = makeFaces(ctx);
 	const installer = await new Installer({
 		ctx: faces,
@@ -213,7 +234,16 @@ export async function apply(ctx) {
 						   这是唯一能回答「现在跑的是哪一版」的东西。 */
 						build: build ? build.label : null,
 						buildDetail: build,
-						code: code ? { fresh: code.fresh, at: code.at, loaded: code.loaded && code.loaded.digest, disk: code.disk && code.disk.digest, newestFile: code.disk && code.disk.newestFile, line: describeFreshness(code) } : null,
+						code: code ? {
+							fresh: code.fresh,
+							at: code.at,
+							appliedAt: code.appliedAt,
+							appliedAfterLoad: code.appliedAfterLoad,
+							loaded: code.loaded && code.loaded.digest,
+							disk: code.disk && code.disk.digest,
+							newestFile: code.disk && code.disk.newestFile,
+							line: describeFreshness(code)
+						} : null,
 						versions,
 						profileDir: profileDir(),
 						skillRoots: skillRoots(),
@@ -246,6 +276,39 @@ export async function apply(ctx) {
 					return json(res, 200, { ok: true, report });
 				}
 
+				/* R12：已装清单。**纯本地读**（30 秒缓存），不联网 —— 面板打开就敢拉。
+				   最近一次「检查更新」的结果（30 分钟内）会一并并进来，刷新面板不丢。
+				   ⚠️ lib/* 不热重载：只换 index.js 时这里可能还没有新方法，如实回一句「要重启」。 */
+				if (path === "/inventory" && method === "GET") {
+					if (typeof installer.inventoryView !== "function") {
+						return json(res, 503, { ok: false, error: "宿主还没重启：已装清单是新代码（lib/pipeline.js 不热重载）" });
+					}
+					const inventory = await installer.inventoryView();
+					return json(res, 200, { ok: true, inventory });
+				}
+
+				/* R14：已装 Skill —— 磁盘上的技能目录 + 宿主 `ctx.skills.list()` 的对账结果。
+				   只读、30 秒缓存、不联网；「宿主没认 / 重名 / 备份残留」都在这一份里。 */
+				if (path === "/skills" && method === "GET") {
+					if (typeof installer.skills !== "function") {
+						return json(res, 503, { ok: false, error: "宿主还没重启：技能清单是新代码（lib/pipeline.js 不热重载）" });
+					}
+					const skills = await installer.skills(url && url.searchParams && url.searchParams.get("fresh") === "1");
+					return json(res, 200, { ok: true, skills });
+				}
+
+				/* R13：激活视图 —— 「我装的东西现在都在跑吗」。
+				   GET /plugin-installer/activation[?inject=0]（inject=0 时不扫源码，很快）。
+				   事实来自 listPlugins() 的 enabled/fiberPhase，静态侧由 lib/inject.js 解释「为什么起不来」。 */
+				if (path === "/activation" && method === "GET") {
+					if (typeof installer.activation !== "function") {
+						return json(res, 503, { ok: false, error: "宿主还没重启：激活视图是新代码（lib/pipeline.js 不热重载）" });
+					}
+					const withInject = !(url && url.searchParams && url.searchParams.get("inject") === "0");
+					const view = await installer.activation({ inject: withInject });
+					return json(res, 200, { ok: true, activation: view });
+				}
+
 				if (path === "/submit" && method === "POST") {
 					const body = await readJsonBody(req);
 					const input = String(body.input || body.raw || "").trim();
@@ -271,6 +334,15 @@ export async function apply(ctx) {
 					else if (action === "rollback") result = await installer.rollback(id);
 					else if (action === "review") result = await installer.review(id);
 					else if (action === "rediagnose") result = await installer.rediagnose(id);
+					else if (action === "check-updates") {
+						/* R12：联网比对 registry 最新版。只在人点「检查更新」时走这条 ——
+						   绑到 /state 轮询上等于每 2.5 秒打一轮 npm。 */
+						if (typeof installer.checkUpdates !== "function") {
+							return json(res, 503, { ok: false, error: "宿主还没重启：检查更新是新代码（lib/pipeline.js 不热重载）" });
+						}
+						const updates = await installer.checkUpdates();
+						return json(res, 200, { ok: true, inventory: updates, state: await installer.snapshotState() });
+					}
 					else if (action === "approve-builds") {
 						/* R9：批准「待决定的安装脚本」并重试。名单由面板从任务里带上来，
 						   但复核在 Installer 里做（对着 profile 现存的 pending 列表）。 */

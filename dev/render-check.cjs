@@ -167,10 +167,23 @@ function textOf(node, acc) {
 	return out;
 }
 
+/**
+ * 断言条数的**预期值**。改断言就必须同步这里 —— 以及 audit.mjs 的
+ * EXPECTED_RENDER_ASSERTIONS 和两份文档里的数字。
+ *
+ * 为什么需要它：源码里 `check(` 出现 100 多次，但一部分在 `else` / `catch` 兜底分支里
+ * 正常不执行，所以**数源码不等于数断言**（实测 103 处、只跑 80 条）。真正的判据只能是
+ * 「这次实际跑了几条」，所以由脚本自己报总数、并由自己比对。
+ */
+const EXPECTED_TOTAL = 101;
+
 let failed = 0;
+let passed = 0;
 function check(name, condition, extra) {
-	if (condition) console.log("PASS " + name);
-	else {
+	if (condition) {
+		passed += 1;
+		console.log("PASS " + name);
+	} else {
 		failed += 1;
 		console.log("FAIL " + name + (extra ? "  " + JSON.stringify(extra) : ""));
 	}
@@ -565,5 +578,196 @@ if (typeof t.CompatExemptCard === "function") {
 	check("__test 暴露了 CompatExemptCard", false);
 }
 
+/* R12：已装清单 —— 折叠态只说规模、展开态才逐条列；「能不能升级」必须在这一层就说清来源 */
+if (typeof t.Inventory === "function") {
+	const savedLocal = t.store.local;
+	const invFixture = {
+		ok: true,
+		counts: { total: 3, bundle: 2, byKind: { npm: 2, link: 1 }, checkable: 1, hostScoped: 0, missing: 1 },
+		problems: [{ name: "dsh-missing", code: "declared-not-installed" }],
+		summary: { checked: 2, outdated: 1, current: 1, ahead: 0, failed: 0, deprecated: 0, cached: 0, at: "2026-10-22T02:00:00.000Z" },
+		updatesAt: "2026-10-22T02:00:00.000Z",
+		items: [
+			{
+				name: "dsh-ffmpeg", spec: "^0.5.0", kind: "npm", kindLabel: "npm",
+				why: "来自 npm registry，可以比对最新版", checkable: true, bundle: true,
+				installed: true, localVersion: "0.5.0",
+				update: { relation: "outdated", localVersion: "0.5.0", latestVersion: "0.6.0", error: null, deprecated: null }
+			},
+			{
+				name: "dsh-local", spec: "link:D:/x/dsh-local", kind: "link", kindLabel: "本机目录",
+				why: "link: 指向本机源码目录 —— 改了就生效，没有「新版本」这回事", checkable: false,
+				bundle: false, installed: true, localVersion: "0.1.0", update: null
+			},
+			{
+				name: "dsh-missing", spec: "^0.2.0", kind: "npm", kindLabel: "npm",
+				why: "来自 npm registry，可以比对最新版", checkable: true, bundle: false,
+				installed: false, localVersion: null, update: null
+			}
+		]
+	};
+
+	/* ① 折叠态（默认）：只说规模，不把 44 行铺开 */
+	t.store.local = { inventory: invFixture };
+	resetHooks();
+	let collapsed = "";
+	try {
+		collapsed = textOf(t.Inventory({})).join(" | ");
+		check("已装清单：标题是「已装插件」", collapsed.includes("已装插件"), collapsed.slice(0, 80));
+		check("已装清单：折叠态报规模", collapsed.includes("3 个依赖") && collapsed.includes("2 个在 bundle 行里"), collapsed.slice(0, 120));
+		check("已装清单：折叠态不铺开逐条", !collapsed.includes("dsh-ffmpeg"));
+		check("已装清单：有「检查更新」入口", collapsed.includes("检查更新"));
+		check("已装清单：有「展开」入口", collapsed.includes("展开"));
+		check("已装清单：折叠态提示「声明了但没落地」", collapsed.includes("声明了但没落地"), collapsed.slice(0, 200));
+		check("已装清单：检查过就说可升级几个", collapsed.includes("可升级 1 个"), collapsed.slice(0, 200));
+	} catch (e) {
+		check("已装清单：折叠态渲染不抛异常", false, String((e && e.message) || e));
+	}
+
+	/* ② 展开态：hook 2 = 展开开关（hook 0/1 是 useStore 的 reducer/effect） */
+	resetHooks();
+	hooks[2] = true;
+	let expanded = "";
+	try {
+		expanded = textOf(t.Inventory({})).join(" | ");
+		check("已装清单：展开后列出包名与版本", expanded.includes("dsh-ffmpeg") && expanded.includes("v0.5.0"), expanded.slice(0, 200));
+		check("已装清单：可升级行给出目标版本", expanded.includes("可升级 → 0.6.0"));
+		check("已装清单：可升级行有「升级到」按钮", expanded.includes("升级到 0.6.0"));
+		check("已装清单：标出来源（本机目录）", expanded.includes("本机目录"));
+		check("已装清单：不比对的行说清为什么", expanded.includes("改了就生效"), expanded.slice(0, 300));
+		check("已装清单：没落地的行被点名", expanded.includes("声明了但没落地") && expanded.includes("dsh-missing"));
+		check("已装清单：收起入口", expanded.includes("收起"));
+	} catch (e) {
+		check("已装清单：展开态渲染不抛异常", false, String((e && e.message) || e));
+	}
+
+	/* ③ 没检查过 / 读不到 / 空 profile 三种兜底态 */
+	t.store.local = { inventory: { ...invFixture, summary: null, updatesAt: null } };
+	resetHooks();
+	const noSummary = textOf(t.Inventory({})).join(" | ");
+	check("已装清单：没检查过时说明「还没比对过最新版」", noSummary.includes("还没比对过最新版"), noSummary.slice(0, 200));
+	check("已装清单：说明哪些来源不参与比对", noSummary.includes("不参与"), noSummary.slice(0, 240));
+
+	t.store.local = { inventory: { ok: false, error: "宿主还没重启：已装清单是新代码" } };
+	resetHooks();
+	const errored = textOf(t.Inventory({})).join(" | ");
+	check("已装清单：读不到时把原因说出来", errored.includes("读不到：宿主还没重启"), errored.slice(0, 160));
+	check("已装清单：读不到时有「重试」", errored.includes("重试"));
+
+	t.store.local = { inventory: { ok: true, counts: { total: 0, bundle: 0, byKind: {}, checkable: 0, hostScoped: 0, missing: 0 }, items: [], problems: [] } };
+	resetHooks();
+	hooks[2] = true;
+	const empty = textOf(t.Inventory({})).join(" | ");
+	check("已装清单：空 profile 有兜底文案", empty.includes("没有依赖声明"), empty.slice(0, 160));
+
+	t.store.local = savedLocal;
+} else {
+	check("__test 暴露了 Inventory", false);
+}
+
+/* R14：已装 Skill —— 折叠态报规模、展开态逐条；「宿主没认 / 备份 / 不会自动调用」三种标签
+   必须真的渲染出来，否则这一整块就是「数据算了但没人看得见」。 */
+if (typeof t.Skills === "function") {
+	const savedSkillsLocal = t.store.local;
+	const skillItem = (over) => Object.assign({
+		hasFile: true, valid: true, hostVisible: true, backup: false, modelInvocable: true,
+		bytes: 1024, reasons: [], duplicate: false, sourceLabel: "用户级（.$DSH/skills）"
+	}, over);
+	const skillsFixture = {
+		ok: true,
+		at: "2026-10-22T05:00:00.000Z",
+		roots: ["D:/x/.dsh/skills"],
+		counts: {
+			roots: 1, dirs: 5, skills: 4, valid: 3, backups: 1, hostTotal: 3, hostVisible: 1,
+			notVisible: 1, yamlBroken: 1, invalid: 1, duplicates: 1, duplicateDirs: 2, modelInvisible: 1, hostOnly: 0, byPanel: 1
+		},
+		summary: "4 个技能 · 宿主认 3 个 · 1 个没被认 · 1 个 frontmatter 写坏了（宿主读不了） · 1 个备份残留 · 1 组重名 · 1 个不会自动调用",
+		notes: [],
+		items: [
+			skillItem({ dir: "beta", name: "beta", hostVisible: false, modelInvocable: null, description: "宿主没认的技能" }),
+			skillItem({ dir: "gamma", name: null, hasFile: false, valid: false, hostVisible: false, modelInvocable: null,
+				description: null, bytes: 0, sourceLabel: null, reasons: ["目录里没有 SKILL.md（宿主不会把它当成技能）"] }),
+			skillItem({ dir: "theta", name: "theta", hostVisible: false, modelInvocable: null, description: "写坏的描述",
+				yamlIssue: { code: "colon-space", key: "description", line: 3, message: "`description` 的值里有「冒号 + 空格」", fix: "改成块标量（`description: >`）" } }),
+			skillItem({ dir: "alpha.bak-1", name: "alpha", backup: true, backupOf: "alpha", duplicate: true,
+				description: "旧副本", bytes: 2048 }),
+			skillItem({ dir: "delta", name: "delta", modelInvocable: false, sourceLabel: "自定义根", description: "折叠描述" })
+		],
+		host: { available: true, total: 3, complete: true, error: null },
+		duplicates: [{ name: "alpha", dirs: ["alpha", "alpha.bak-1"], backups: ["alpha.bak-1"] }],
+		notVisible: [{ dir: "beta", name: "beta" }],
+		yamlBroken: [{ dir: "theta", code: "colon-space", message: "`description` 的值里有「冒号 + 空格」", fix: "改成块标量（`description: >`）" }],
+		invalid: [{ dir: "gamma", reasons: ["目录里没有 SKILL.md（宿主不会把它当成技能）"] }],
+		modelInvisible: [{ dir: "delta", name: "delta" }],
+		hostOnly: []
+	};
+
+	/* ① 折叠态 */
+	t.store.local = { skills: skillsFixture };
+	resetHooks();
+	let skillCollapsed = "";
+	try {
+		skillCollapsed = textOf(t.Skills({})).join(" | ");
+		check("已装 Skill：标题是「已装 Skill」", skillCollapsed.includes("已装 Skill"), skillCollapsed.slice(0, 80));
+		check("已装 Skill：折叠态报「几个技能 / 宿主认几个」", skillCollapsed.includes("4 个技能") && skillCollapsed.includes("宿主认 3 个"), skillCollapsed.slice(0, 160));
+		check("已装 Skill：摘要说清没被认 / YAML 写坏 / 备份 / 重名", skillCollapsed.includes("1 个没被认") && skillCollapsed.includes("frontmatter 写坏了") && skillCollapsed.includes("1 个备份残留") && skillCollapsed.includes("1 组重名"), skillCollapsed.slice(0, 280));
+		check("已装 Skill：没被认时给红色告警行", skillCollapsed.includes("个技能宿主没认"), skillCollapsed.slice(0, 260));
+		check("已装 Skill：YAML 写坏时给另一条红色告警（查不出根因就没法修）", skillCollapsed.includes("不是合法 YAML"), skillCollapsed.slice(0, 300));
+		check("已装 Skill：折叠态不铺开逐条", !skillCollapsed.includes("旧副本"));
+		check("已装 Skill：有「刷新」与「展开」入口", skillCollapsed.includes("刷新") && skillCollapsed.includes("展开"));
+	} catch (e) {
+		check("已装 Skill：折叠态渲染不抛异常", false, String((e && e.message) || e));
+	}
+
+	/* ② 展开态（hook 2 = 展开开关） */
+	resetHooks();
+	hooks[2] = true;
+	let skillExpanded = "";
+	try {
+		skillExpanded = textOf(t.Skills({})).join(" | ");
+		check("已装 Skill：展开后列出目录", skillExpanded.includes("alpha.bak-1"), skillExpanded.slice(0, 200));
+		check("已装 Skill：备份行标「备份残留」", skillExpanded.includes("备份残留"));
+		check("已装 Skill：YAML 写坏的行被点名并给改法", skillExpanded.includes("frontmatter 写坏了") && skillExpanded.includes("改法："), skillExpanded.slice(0, 400));
+		check("已装 Skill：宿主没认的行被点名", skillExpanded.includes("beta") && skillExpanded.includes("宿主没认"));
+		check("已装 Skill：不会自动调用单独标出", skillExpanded.includes("不会自动调用"));
+		check("已装 Skill：缺 SKILL.md 的行说清原因", skillExpanded.includes("没有 SKILL.md"));
+		check("已装 Skill：描述真的渲染出来（不是只给名字）", skillExpanded.includes("折叠描述") && skillExpanded.includes("宿主没认的技能"));
+		check("已装 Skill：来源翻成人话", skillExpanded.includes("用户级"));
+		check("已装 Skill：展开后能收起", skillExpanded.includes("收起"));
+	} catch (e) {
+		check("已装 Skill：展开态渲染不抛异常", false, String((e && e.message) || e));
+	}
+
+	/* ③ 读不到 / 空 / 宿主对账不了 三种兜底 */
+	t.store.local = { skills: { ok: false, error: "宿主还没重启：技能清单是新代码" } };
+	resetHooks();
+	const skillErr = textOf(t.Skills({})).join(" | ");
+	check("已装 Skill：读不到时把原因说出来", skillErr.includes("读不到：宿主还没重启"), skillErr.slice(0, 160));
+	check("已装 Skill：读不到时有「重试」", skillErr.includes("重试"));
+
+	t.store.local = { skills: { ...skillsFixture, counts: { roots: 1, dirs: 0, skills: 0, valid: 0, backups: 0, hostTotal: 0, hostVisible: 0, notVisible: 0, invalid: 0, duplicates: 0, duplicateDirs: 0, modelInvisible: 0, hostOnly: 0, byPanel: 0 }, items: [], duplicates: [], notVisible: [], invalid: [], modelInvisible: [], summary: "0 个技能 · 宿主认 0 个" } };
+	resetHooks();
+	hooks[2] = true;
+	const skillEmpty = textOf(t.Skills({})).join(" | ");
+	check("已装 Skill：空技能根有兜底文案", skillEmpty.includes("还没有技能"), skillEmpty.slice(0, 200));
+
+	t.store.local = { skills: { ...skillsFixture, host: { available: false, total: null, complete: null, error: "no-service" }, notes: ["这台宿主的 Skill 服务不可用，没法对账「宿主认了哪些」"], summary: "3 个技能 · 宿主清单读不到", counts: { ...skillsFixture.counts, notVisible: 0, hostTotal: null, hostVisible: 0 } } };
+	resetHooks();
+	const skillBlind = textOf(t.Skills({})).join(" | ");
+	check("已装 Skill：对账不了时如实说（不当成「全都没被认」）", skillBlind.includes("Skill 服务不可用"), skillBlind.slice(0, 260));
+	check("已装 Skill：对账不了时标题不写「宿主认 N 个」", skillBlind.includes("宿主认 ?"), skillBlind.slice(0, 120));
+
+	t.store.local = savedSkillsLocal;
+} else {
+	check("__test 暴露了 Skills", false);
+}
+
+/* 条数自对表：断言被删/被加都会在这里当场红（数源码不可靠，见 EXPECTED_TOTAL 的注释） */
+if (passed !== EXPECTED_TOTAL) {
+	failed += 1;
+	console.log("FAIL 断言条数变了：实际跑 " + passed + " 条，预期 " + EXPECTED_TOTAL +
+		"（同步这里 + audit.mjs 的 EXPECTED_RENDER_ASSERTIONS + README/交接文件）");
+}
+console.log("TOTAL " + passed + " checks");
 console.log(failed === 0 ? "\nSUMMARY all render checks passed" : "\nSUMMARY " + failed + " failed");
 process.exit(failed === 0 ? 0 : 1);

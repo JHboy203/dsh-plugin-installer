@@ -23,7 +23,7 @@ window.__ModuleLoader__.load({
 		/* 客户端 build 号（R5.1）：改 client.js 就提一位。
 		   client 会热重载、但没人保证「当前页面跑的是哪一版」—— 这个号随 client-state
 		   一起上报，宿主 /health 的 clientReport.build 就是答案（宿主侧另有 mtime 标签）。 */
-		const BUILD = "r10.0";
+		const BUILD = "r14.2";
 
 		/* ── 迷你 store（模块级，面板关着时图标也在用）──────────────────── */
 
@@ -1302,6 +1302,10 @@ window.__ModuleLoader__.load({
 						h("div", { className: "dpi-reco", key: "reco" + i },
 							h("div", { className: "dpi-reco-head" },
 								h("b", null, item.name),
+								/* R12：已经装过的包要当场说出来 —— 否则「安装这个」看起来永远像第一次装 */
+								item.installedKnown
+									? h("span", { className: "dpi-tag dpi-tag-kind", title: "本机已装这个包" }, "已装" + (item.installed ? " v" + item.installed : ""))
+									: null,
 								item.stars ? h("span", { className: "dpi-tag" }, "★" + item.stars) : null,
 								item.downloads ? h("span", { className: "dpi-tag" }, "⬇" + item.downloads + "/周") : null,
 								item.installs ? h("span", { className: "dpi-tag", title: "商店统计的确认安装次数（比 stars 更接近真实使用量）" }, "装过 " + item.installs) : null,
@@ -1358,6 +1362,236 @@ window.__ModuleLoader__.load({
 			);
 		}
 
+		/* ── 已装清单 + 检查更新（R12）────────────────────────────────────
+		 * 面板以前只会**装**：想升级一个已装插件，得自己记得名字、再搜一次、再提交一次；
+		 * 「哪些落后了」这个问题从来没被回答过。这块补的就是这个视角。
+		 *
+		 * 数据：GET /inventory（宿主**本地读** profile，30 秒缓存，不联网）；
+		 * 点「检查更新」才走 POST action:check-updates（registry 结果另有 30 分钟 TTL）。
+		 * 判据在 lib/inventory.js + lib/updates.js —— link: / file: / git 这三类**不参与**比对，
+		 * 它们没有「registry 上的新版本」，硬比会产出假的「落后」。 */
+		function Inventory() {
+			const s = useStore();
+			const inv = s.local.inventory || null;
+			const [open, setOpen] = useState(false);
+			const busy = s.local.invBusy;
+			const load = () => {
+				api("/inventory")
+					.then((r) => {
+						if (!r || r.ok === false) {
+							setLocal({ inventory: { ok: false, error: (r && r.error) || "读不到已装清单" } });
+							return;
+						}
+						setLocal({ inventory: r.inventory });
+					})
+					.catch((e) => setLocal({ inventory: { ok: false, error: String((e && e.message) || e) } }));
+			};
+			useEffect(() => {
+				if (!s.local.inventory && !s.local.invBusy) load();
+			}, []);
+			const checkUpdates = () => {
+				setLocal({ invBusy: true });
+				api("/action", { method: "POST", body: JSON.stringify({ action: "check-updates" }) })
+					.then((r) => {
+						if (r && r.state) setStore({ data: r.state });
+						if (!r || r.ok === false) {
+							toast((r && r.error) || "检查更新失败");
+							return;
+						}
+						if (r.inventory) setLocal({ inventory: r.inventory });
+						const sum = r.inventory && r.inventory.summary;
+						if (!sum) toast("检查完成");
+						else if (sum.outdated > 0) toast("发现 " + sum.outdated + " 个可升级");
+						else toast("都是最新的（比对 " + sum.checked + " 个，查不到 " + sum.failed + " 个）");
+					})
+					.catch((e) => toast("检查更新失败：" + String((e && e.message) || e)))
+					.finally(() => setLocal({ invBusy: false }));
+			};
+			const counts = (inv && inv.counts) || null;
+			const summary = (inv && inv.summary) || null;
+			const items = (inv && inv.items) || [];
+			const problems = (inv && inv.problems) || [];
+			const outdated = items.filter((item) => item.update && item.update.relation === "outdated");
+			const rank = (item) => {
+				if (item.update && item.update.relation === "outdated") return 0;
+				if (!item.installed) return 1;
+				if (item.update && item.update.error) return 2;
+				return 3;
+			};
+			const sorted = items.slice().sort((a, b) => rank(a) - rank(b) || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+			const headline = inv && inv.ok === false
+				? "读不到：" + (inv.error || inv.note || "未知原因")
+				: counts
+					? counts.total + " 个依赖 · " + counts.bundle + " 个在 bundle 行里"
+					: "读取中…";
+			return h(
+				"div",
+				{ className: "dpi-card dpi-inventory" },
+				h("div", { className: "dpi-card-head" },
+					h("strong", null, "已装插件"),
+					h("span", { className: "dpi-muted" }, headline),
+					h("button", {
+						className: "dpi-btn dpi-btn-sm",
+						style: { marginLeft: "auto" },
+						disabled: busy,
+						title: "联网比对 npm registry 上每个包的最新版（30 分钟内同结果走缓存）",
+						onClick: checkUpdates
+					}, busy ? "检查中…" : "检查更新"),
+					h("button", { className: "dpi-btn dpi-btn-sm", disabled: !counts, onClick: () => setOpen(!open) },
+						open ? "收起" : "展开")),
+				summary
+					? h("div", { className: "dpi-muted" },
+						"更新：" + (summary.outdated > 0 ? "可升级 " + summary.outdated + " 个" : "都是最新的") +
+						"（比对 " + summary.checked + " · 最新 " + summary.current +
+						(summary.ahead ? " · 比 registry 新 " + summary.ahead : "") +
+						(summary.failed ? " · 查不到 " + summary.failed : "") + "）" +
+						(inv && inv.updatesAt ? " · " + ago(inv.updatesAt) : ""))
+					: h("div", { className: "dpi-muted" },
+						inv && inv.ok === false
+							? ""
+							: "还没比对过最新版。点「检查更新」才联网（只查 npm 来源的包；本机目录 / 本面板装的 .tgz / Git 来源不参与）。"),
+				problems.length > 0 && !open
+					? h("div", { className: "dpi-muted" }, "· " + problems.length + " 个依赖「声明了但没落地」（展开看，或用环境体检细查）")
+					: null,
+				inv && inv.ok === false
+					? h("div", { className: "dpi-actions dpi-actions-tight" },
+						h("button", { className: "dpi-btn dpi-btn-sm", onClick: load }, "重试"))
+					: null,
+				open && sorted.length > 0
+					? h("ul", { className: "dpi-list dpi-list-info dpi-inv-list" }, sorted.slice(0, 80).map((item) =>
+						h("li", { key: "inv" + item.name },
+							h("div", { className: "dpi-reco-head" },
+								h("b", null, item.name),
+								h("span", { className: "dpi-muted" }, "v" + (item.localVersion || "?")),
+								h("span", { className: "dpi-tag", title: item.why }, item.kindLabel),
+								item.bundle ? h("span", { className: "dpi-tag dpi-tag-kind" }, "bundle 行") : null,
+								item.update && item.update.relation === "outdated"
+									? h("span", { className: "dpi-pill dpi-pill-warn" }, "可升级 → " + item.update.latestVersion)
+									: null,
+								item.update && item.update.relation === "current"
+									? h("span", { className: "dpi-pill dpi-pill-ok" }, "最新")
+									: null,
+								item.update && item.update.relation === "ahead"
+									? h("span", { className: "dpi-pill dpi-pill-idle", title: "本机版本比 registry 上的 latest 还新（本地开发/预发布常见）" }, "比 registry 新")
+									: null,
+								item.update && item.update.error
+									? h("span", { className: "dpi-tag dpi-tag-medium", title: item.update.error }, "查不到最新版")
+									: null,
+								item.update && item.update.deprecated
+									? h("span", { className: "dpi-tag dpi-tag-high", title: item.update.deprecated }, "已弃用")
+									: null,
+								!item.installed ? h("span", { className: "dpi-tag dpi-tag-high" }, "声明了但没落地") : null),
+							item.update && item.update.relation === "outdated"
+								? h("div", { className: "dpi-actions dpi-actions-tight" },
+									h("button", {
+										className: "dpi-btn dpi-btn-primary dpi-btn-sm",
+										onClick: () => submitInput("npm:" + (item.registryName || item.name) + "@" + item.update.latestVersion)
+									}, "升级到 " + item.update.latestVersion))
+								: null,
+							h("div", { className: "dpi-detail" }, item.spec + (item.checkable ? "" : " · " + item.why)))))
+					: null,
+				open && sorted.length === 0
+					? h("div", { className: "dpi-muted" }, "这个 profile 里没有依赖声明（或还没装上任何东西）。")
+					: null
+			);
+		}
+
+		/* ── 已装 Skill（R14）────────────────────────────────────────────
+		 * 面板标题写着「插件 / Skill 安装」，但过去只回答插件那一半：装了哪些技能、
+		 * 宿主认不认、名字有没有撞车，全都没有入口。而「装了却从不被自动调用」的根因
+		 * 恰恰是这些 —— 看不见就只能靠猜。
+		 *
+		 * 数据：GET /skills（宿主本地读技能根 + ctx.skills.list() 对账，30 秒缓存，不联网）。
+		 * 判据在 lib/skills.js：磁盘有而宿主没认 / 同名 / 备份残留 / modelInvocable=false。 */
+		function Skills() {
+			const s = useStore();
+			const view = s.local.skills || null;
+			const [open, setOpen] = useState(false);
+			const load = (force) => {
+				setLocal({ skillsBusy: true });
+				api("/skills" + (force ? "?fresh=1" : ""))
+					.then((r) => {
+						if (!r || r.ok === false) {
+							setLocal({ skills: { ok: false, error: (r && r.error) || "读不到技能清单" } });
+							return;
+						}
+						setLocal({ skills: r.skills });
+					})
+					.catch((e) => setLocal({ skills: { ok: false, error: String((e && e.message) || e) } }))
+					.finally(() => setLocal({ skillsBusy: false }));
+			};
+			useEffect(() => {
+				if (!s.local.skills && !s.local.skillsBusy) load();
+			}, []);
+			const counts = (view && view.counts) || null;
+			const items = (view && view.items) || [];
+			const summary = (view && view.summary) || "";
+			const hostKnown = Boolean(view && view.host && view.host.available);
+			const headline = view && view.ok === false
+				? "读不到：" + (view.error || view.note || "未知原因")
+				: counts
+					? counts.skills + " 个技能 · 宿主认 " + (hostKnown ? counts.hostTotal + " 个" : "?")
+					: "读取中…";
+			/* 摘要那一行与状态工具/体检共用同一句话，但标题已经说了规模 ——
+			   这里把开头那一段剥掉，否则卡上会出现两遍「55 个技能 · 宿主认 64 个」。 */
+			const detail = summary.replace(/^\d+ 个技能(?: · (?:宿主认 \d+ 个|宿主清单读不到))?/, "").replace(/^ · /, "");
+			const tag = (cls, text, title) => h("span", { className: "dpi-tag " + cls, title: title || null }, text);
+			return h("div", { className: "dpi-card dpi-skills" },
+				h("div", { className: "dpi-card-head" },
+					h("strong", null, "已装 Skill"),
+					h("span", { className: "dpi-muted" }, headline),
+					h("button", {
+						className: "dpi-btn dpi-btn-sm",
+						style: { marginLeft: "auto" },
+						disabled: Boolean(s.local.skillsBusy),
+						title: "重扫技能根并重新对账（宿主会自己重扫目录；不重启也能看到新增的技能）",
+						onClick: () => load(true)
+					}, s.local.skillsBusy ? "刷新中…" : "刷新"),
+					h("button", { className: "dpi-btn dpi-btn-sm", disabled: !counts, onClick: () => setOpen(!open) }, open ? "收起" : "展开")),
+				detail ? h("div", { className: "dpi-muted" }, detail) : null,
+				view && view.notes && view.notes.length > 0
+					? h("div", { className: "dpi-muted" }, view.notes.join(" · "))
+					: null,
+				counts && counts.yamlBroken > 0
+					? h("div", { className: "dpi-muted", style: { color: "var(--dsw-alias-state-error-primary)" } },
+						"⚠ " + counts.yamlBroken + " 个技能的 frontmatter 不是合法 YAML —— 宿主读不出 name，整条被跳过（展开看改法）")
+					: null,
+				counts && counts.notVisible > 0
+					? h("div", { className: "dpi-muted", style: { color: "var(--dsw-alias-state-error-primary)" } },
+						"⚠ " + counts.notVisible + " 个技能宿主没认 —— 文件在，但用不上（展开看是哪些）")
+					: null,
+				view && view.ok === false
+					? h("div", { className: "dpi-actions dpi-actions-tight" },
+						h("button", { className: "dpi-btn dpi-btn-sm", onClick: () => load(true) }, "重试"))
+					: null,
+				open && items.length > 0
+					? h("ul", { className: "dpi-list dpi-list-info" }, items.slice(0, 120).map((row) =>
+						h("li", { key: "sk" + row.dir },
+							h("div", { className: "dpi-reco-head" },
+								h("b", null, row.name || row.dir),
+								row.backup ? tag("dpi-tag-medium", "备份残留", "覆盖安装时留下的旧副本；它的 frontmatter 名字与正式那份相同") : null,
+								row.yamlIssue ? tag("dpi-tag-high", "frontmatter 写坏了", row.yamlIssue.message) : null,
+								!row.hasFile ? tag("dpi-tag-high", "没有 SKILL.md", (row.reasons || []).join("；")) : null,
+								row.hasFile && !row.valid ? tag("dpi-tag-high", "frontmatter 不完整", (row.reasons || []).join("；")) : null,
+								row.hasFile && row.valid && hostKnown && !row.hostVisible && !row.yamlIssue ? tag("dpi-tag-high", "宿主没认", "磁盘上有，但宿主技能清单里没有它") : null,
+								row.hostVisible && row.modelInvocable === false ? tag("dpi-tag-medium", "不会自动调用", "宿主把它标成 modelInvocable=false；最常见的原因是 SKILL.md 里写了 disable-model-invocation: true") : null,
+								/* 备份行不标来源：宿主认的是同名的那份正式技能，不是这个目录 —— 标上去会误导 */
+								row.sourceLabel && !row.backup ? tag("dpi-tag", row.sourceLabel) : null,
+								row.installedByPanel ? tag("dpi-tag-kind", "本面板装的") : null),
+							h("div", { className: "dpi-skill-desc" }, row.description || (row.reasons && row.reasons[0]) || "（没有描述：模型不会自动挑它）"),
+							row.yamlIssue
+								? h("div", { className: "dpi-detail" }, "改法：" + row.yamlIssue.fix)
+								: null,
+							h("div", { className: "dpi-detail" },
+								row.dir + (row.bytes ? " · " + Math.max(1, Math.round(row.bytes / 1024)) + " KB" : "") +
+								(row.duplicate ? " · 与另一份同名" : "")))))
+					: null,
+				open && items.length === 0
+					? h("div", { className: "dpi-muted" }, "技能根里还没有技能（或者宿主扫不到这个目录）。")
+					: null
+			);
+		}
+
 		function DoctorBox() {
 			const s = useStore();
 			const [open, setOpen] = useState(false);
@@ -1394,7 +1628,9 @@ window.__ModuleLoader__.load({
 				{ className: "dpi-card dpi-doctor" },
 				h("div", { className: "dpi-card-head" },
 					h("strong", null, "环境体检"),
-					h("span", { className: "dpi-muted" }, "dsh-tools 覆盖 / 悬空 file: 依赖 / trustPolicy / git"),
+					/* R8 起 doctor 覆盖四层：安装环境 + profile 层 + 工具注册契约 + 崩溃日志。
+					   文案别再只写前三项 —— 「算了但没用」的第一种是**说了但没说全**。 */
+					h("span", { className: "dpi-muted" }, "dsh-tools 覆盖 / 悬空 file: 依赖 / bundles 对账 / 工具契约 / 崩溃日志"),
 					h("span", {
 						className: "dpi-muted",
 						title: "任意页面按这个组合键 = 自检 + 自动修复（设置里可改 / 可关）",
@@ -1718,6 +1954,10 @@ window.__ModuleLoader__.load({
 
 				h(AiBox),
 				h(History),
+				/* R12：已装清单排在「历史」之后、「环境体检」之前 —— 先看装了什么，再看有没有坏 */
+				h(Inventory),
+				/* R14：Skill 那一半紧跟其后 —— 插件与技能是两条不同的判据（版本 vs 宿主认不认） */
+				h(Skills),
 				h(DoctorBox),
 
 				h("footer", { className: "dpi-footer" },
@@ -1870,6 +2110,20 @@ window.__ModuleLoader__.load({
   border-top:1px solid var(--dsw-alias-border-l1);font-size:11px;color:var(--dsw-alias-label-secondary);word-break:break-all}
 .dpi-toast{margin-top:6px;color:var(--dsw-alias-brand-primary)}
 
+/* ── 已装清单（R12）────────────────────────────────────────────────── */
+/* 一行里塞了名字 + 版本 + 来源 + 若干徽章，窄屏（360px）必须能折行，否则会被裁掉。 */
+.dpi-inventory .dpi-reco-head{flex-wrap:wrap;min-width:0}
+.dpi-inventory .dpi-reco-head b{min-width:0;overflow:hidden;text-overflow:ellipsis;max-width:100%}
+/* R14：已装 Skill —— 55 条挤在一张卡里，标签必须能换行，描述最多两行 */
+.dpi-skills .dpi-reco-head{flex-wrap:wrap;min-width:0;gap:6px}
+.dpi-skills .dpi-reco-head b{min-width:0;overflow:hidden;text-overflow:ellipsis;max-width:100%}
+.dpi-skill-desc{color:var(--dsw-alias-label-secondary);font-size:12px;line-height:1.5;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;word-break:break-word}
+.dpi-inv-list li{gap:4px}
+/* R14：两张大清单展开后会有 44 / 59 行（本机实测 4494px 高）—— 卡片自己滚，
+   别把下面的体检卡和页脚顶出视口；首行永远是「有问题」的那几条（排序保证）。 */
+.dpi-inventory .dpi-list,.dpi-skills .dpi-list{max-height:480px;overflow:auto;padding-right:4px}
+
 /* ── 设置（R6）───────────────────────────────────────────────────── */
 .dpi-overlay{position:fixed;inset:0;z-index:60;background:rgba(0,0,0,.42);
   display:flex;align-items:flex-start;justify-content:center;padding:48px 16px;overflow:auto}
@@ -1976,6 +2230,10 @@ window.__ModuleLoader__.load({
 			BuildApprovalCard,
 			/* R10：版本不兼容卡（同上） */
 			CompatExemptCard,
+			/* R12：已装清单 + 检查更新（无头渲染要能验折叠/可升级行/空态） */
+			Inventory,
+			/* R14：已装 Skill（无头渲染要能验：折叠/展开、备份标签、宿主没认、读不到兜底） */
+			Skills,
 			/* R6.1：自检快捷键（无头渲染与自测也要能摸到这几个） */
 			runSelfCheck,
 			bindHotkey,

@@ -11,7 +11,7 @@
  *
  * 它**不**做这两件事（各自有更好的入口）：
  *   · 跑 hosttest（需要在宿主相关的 node 里跑，用 host_selfcheck）—— 这里只打印那条命令；
- *   · 渲染诊断卡 / 设置面板（42 项）—— 由 dev/render-check.cjs 负责，这里只提示。
+ *   · 渲染诊断卡 / 设置面板 / 已装清单（80 项）—— 由 dev/render-check.cjs 负责，这里只对数。
  * 所以：audit 管「自洽」，host_selfcheck 管「行为」，render-check 管「界面」。
  *
  * 设计约束：
@@ -45,7 +45,10 @@ export const FROZEN_DEFAULTS = {
 };
 
 /** 文档里声明的自检项数（改断言就先跑一次 host_selfcheck，再同步这个数）。 */
-export const EXPECTED_ASSERTIONS = 383;
+export const EXPECTED_ASSERTIONS = 570;
+
+/** 界面自检项数（dev/render-check.cjs）。同样是「文档对表」的一半。 */
+const EXPECTED_RENDER_ASSERTIONS = 101;
 
 /** 期望注册的宿主工具（漏一个 = 模型看不见一项能力）。 */
 const EXPECTED_TOOLS = [
@@ -75,6 +78,14 @@ async function readText(rel) {
 	} catch {
 		return null;
 	}
+}
+
+/** 数 `dev/render-check.cjs` 里**声明的**断言条数（脚本自己会比对实际跑了几条）。 */
+async function declaredRenderAssertions() {
+	const text = await readText(join("dev", "render-check.cjs"));
+	if (!text) return -1;
+	const m = /const EXPECTED_TOTAL = (\d+)/.exec(text);
+	return m ? Number(m[1]) : -1;
 }
 
 async function main() {
@@ -171,6 +182,46 @@ async function main() {
 	ok("codestamp 模块存在（R11）", Boolean(codestampSrc) && /export async function freshness/.test(codestampSrc));
 	ok("健康检查回传「运行中 vs 磁盘」", /freshness\(\)/.test(indexSrc2) && /describeFreshness/.test((await readText("lib\\tools.js")) || ""));
 
+	/* ⑤f R12：已装清单 + 检查更新。四个入口必须一起接上，缺一个就是「面板上有按钮但没用」；
+	   另外两条判据（宿主自带不参与升级 / 三类本地来源不参与比对）是这块最容易写错的地方。 */
+	const invSrc = await readText("lib\\inventory.js");
+	const updSrc = await readText("lib\\updates.js");
+	ok("已装清单模块存在（R12）", Boolean(invSrc) && /export async function readInventory/.test(invSrc));
+	ok("已装清单：四类来源分开判（link / file / git / npm）", /function classifyDepSpec/.test(invSrc || "") && /"tarball"/.test(invSrc || "") && /"git"/.test(invSrc || ""));
+	ok("已装清单：宿主自带的包不许从 npm 升级", /HOST_SCOPE/.test(invSrc || "") && /@deepseek-ai/.test(invSrc || ""));
+	ok("更新比对模块存在（R12）", Boolean(updSrc) && /export async function checkUpdates/.test(updSrc));
+	ok("更新比对：失败逐条隔离（不许一坏全空）", /catch \(e\)/.test(updSrc || "") && /relation: "unknown"/.test(updSrc || ""));
+	ok("更新比对：有 TTL 缓存（不重复打 registry）", /memoizeTtl/.test(updSrc || ""));
+	ok("check-updates 只在动作里跑（不挂在 /state 轮询上）", /check-updates/.test(indexSrc2) && !/checkUpdates\(|inventory\(/.test(((pipelineSrc.match(/async snapshotState[\s\S]{0,900}/) || [""])[0])));
+	ok("面板真的把已装清单接进 Panel", /h\(Inventory\)/.test(clientSrc) && /"\/inventory"/.test(clientSrc));
+	eq("界面自检项数与文档一致", await declaredRenderAssertions(), EXPECTED_RENDER_ASSERTIONS);
+
+	/* R12.1：指纹只在 codestamp.js 加载时算一次，而宿主是**逐文件**换新的 ——
+	   所以必须记下「最后一次 apply」，否则这一行会在新代码已经跑起来之后还喊「需要重启」。 */
+	ok("codestamp：apply 会记录时刻（R12.1）", /recordApply\(\)/.test(indexSrc2) && /export function recordApply/.test(await readText("lib\\codestamp.js") || ""));
+	ok("codestamp：健康检查回传 appliedAt / appliedAfterLoad", /appliedAfterLoad/.test(indexSrc2) && /appliedAfterLoad/.test(await readText("lib\\codestamp.js") || ""));
+	ok("codestamp：已 re-apply 时不再说「需要重启」", /别为这个盲目重启/.test(await readText("lib\\codestamp.js") || ""));
+
+	/* ⑤g R14：已装 Skill —— 面板标题一直写着「插件 / Skill 安装」，但过去只有插件那一半。
+	   这一块最危险的假结论是「读不到宿主清单 → 把每个技能都标成没被认」，所以判据要钉住。 */
+	const skillsSrc = await readText("lib/skills.js");
+	const detectSrc = await readText("lib/detect.js");
+	ok("已装 Skill 模块存在（R14）", Boolean(skillsSrc) && /export async function readSkillsOnDisk/.test(skillsSrc) && /export function buildSkillView/.test(skillsSrc));
+	ok("已装 Skill：备份目录被单独认出（不许算成两个技能重名）", /BACKUP_RE/.test(skillsSrc || "") && /export function skillBackupInfo/.test(skillsSrc || ""));
+	ok("已装 Skill：读不到宿主清单时不算「没被认」", /const notVisible = hostKnown[\s\S]{0,80}real\.filter/.test(skillsSrc || ""));
+	ok("已装 Skill：每条结论都带大白话与处置步骤", /plain:/.test(skillsSrc || "") && /fix:/.test(skillsSrc || ""));
+	ok("frontmatter 支持 `>` / `|` 块标量（R14 修掉的读错）", /export function parseFrontmatterFields/.test(detectSrc || "") && /indicator\[1\] === ">"/.test(detectSrc || ""));
+	ok("frontmatter 的 YAML 硬错误判据存在（R14：冒号+空格 / 空格+#）", /export function yamlFrontmatterIssue/.test(detectSrc || "") && /colon-space/.test(detectSrc || "") && /hash-comment/.test(detectSrc || ""));
+	ok("已装 Skill 把「YAML 写坏」与「宿主没认」分开", /yamlBroken/.test(skillsSrc || "") && /yamlIssue/.test(skillsSrc || ""));
+	ok("已装 Skill：YAML 写坏的结论把具体改法递给人", /skill-yaml-invalid/.test(skillsSrc || "") && /first \? first\.fix :/.test(skillsSrc || ""));
+	ok("已装 Skill：宿主清单走可选访问器 ctx.get(\"skills\")", /ctx\.get\("skills"\)/.test(pipelineSrc));
+	ok("已装 Skill：pipeline 提供 skills() 并缓存", /async skills\(force = false\)/.test(pipelineSrc) && /_skillsAt/.test(pipelineSrc));
+	ok("已装 Skill：体检并入技能结论", /skillFindings\(/.test(pipelineSrc));
+	ok("已装 Skill：index 暴露 GET /skills（刷新可绕过缓存）", /path === "\/skills"/.test(indexSrc2) && /fresh/.test(indexSrc2));
+	ok("已装 Skill：状态工具有「Skill：」一行", /· Skill：/.test(toolsSrc) && /skillsLine/.test(toolsSrc));
+	ok("已装 Skill：面板把卡片接进 Panel", /h\(Skills\)/.test(clientSrc) && /\bSkills,/.test(clientSrc));
+	ok("已装 Skill：面板标出备份 / 宿主没认 / 不会自动调用", clientSrc.includes("备份残留") && clientSrc.includes("宿主没认") && clientSrc.includes("不会自动调用"));
+
 	/* ⑥ 数据目录：设置文件是否与运行时会一致（手改过就会出现差异） */
 	const settingsFile = join(dataDir(), "settings.json");
 	let rawSettings = null;
@@ -235,7 +286,7 @@ async function main() {
 	console.log("");
 	console.log("接下来（这两项这里不做，各有专门入口）：");
 	console.log("  1) host_selfcheck({plugin:\"dsh-plugin-installer\"})   —— 行为自检，" + EXPECTED_ASSERTIONS + " 项，必须 0 FAIL");
-	console.log("  2) node dev/render-check.cjs                          —— 界面无头渲染，62 项");
+	console.log("  2) node dev/render-check.cjs                          —— 界面无头渲染，" + EXPECTED_RENDER_ASSERTIONS + " 项");
 	if (failures.length === 0) console.log("\nSUMMARY audit passed");
 	process.exitCode = failures.length === 0 ? 0 : 1;
 }

@@ -20,6 +20,15 @@ import { satisfiesVersion } from "../lib/semver.js";
 import { classifyInput } from "../lib/urls.js";
 import { DEFAULT_LIMITS, extractToDir, findBsdtar, sniffFormat } from "../lib/formats.js";
 import { detectKind } from "../lib/detect.js";
+import { parseSkillFrontmatter, yamlFrontmatterIssue } from "../lib/detect.js";
+import {
+	buildSkillView,
+	readSkillsOnDisk,
+	skillBackupInfo,
+	skillFindings,
+	skillSourceLabel,
+	summarizeSkills
+} from "../lib/skills.js";
 import { scanTree, redact, detectPromptInjection } from "../lib/scan.js";
 import { precheck } from "../lib/precheck.js";
 import { createSnapshot, restoreProfileFiles, backupSkillInSnapshot, readSnapshotMeta, restoreSkill } from "../lib/snapshot.js";
@@ -28,12 +37,24 @@ import { estimateReviewTokens, reviewWorthIt } from "../lib/ai.js";
 import { packPluginTarball } from "../lib/pack.js";
 import { stagingRefsFromManifest, stagingKeepNames, Installer } from "../lib/pipeline.js";
 import { buildStamp } from "../lib/hostinfo.js";
+import { normalizeNpmSpec } from "../lib/download.js";
+import {
+	annotateInstalled,
+	classifyDepSpec,
+	installedIndex,
+	npmAliasTarget,
+	readInventory,
+	summarizeInventory
+} from "../lib/inventory.js";
+import { checkUpdates, clearUpdateCache, clockText as mClockText, mergeUpdates, registryUrl, relationOf, summarizeUpdates } from "../lib/updates.js";
 import { DEFAULTS as SETTING_DEFAULTS, describeSettings, loadSettings, mergeSettings, normalizeSettings, saveSettings } from "../lib/settings.js";
 import { checkDshToolsShadow, quarantineDshTools, removeDanglingLink } from "../lib/landmine.js";
 import { fileDepsOf, findDanglingFileDeps, inspectEnvironment } from "../lib/repair.js";
 import { scanToolContract, describeContractScan } from "../lib/contract.js";
 import { inspectProfile, repairProfile } from "../lib/profilehealth.js";
 import { diagnose, installPlugin } from "../lib/install.js";
+import { injectFixLine, scanInject, servicesFromHostError } from "../lib/inject.js";
+import { activationFindings, scanActivation, summarizeActivation } from "../lib/activation.js";
 import {
 	UNDECIDED_BUILD,
 	classifyPnpmFailure,
@@ -46,6 +67,7 @@ import { judgePurpose } from "../lib/purpose.js";
 import * as mExemptions from "../lib/exemptions.js";
 import * as mCompat from "../lib/compat.js";
 import * as mCodestamp from "../lib/codestamp.js";
+import * as mHealth from "../lib/profilehealth.js";
 import { exemptionKey, parseExemptionKey, lookupExemption, summarizeExemptions, exemptionTarget } from "../lib/exemptions.js";
 import { buildInstallerTools } from "../lib/tools.js";
 import { clearSourceCaches, judgeTrust, memoizeTtl, normalizePopularity, searchAll, shapeGithub, shapeHub, shapeNpm, trustLine } from "../lib/sources.js";
@@ -674,6 +696,56 @@ async function main() {
 	ok("doctor: 每条发现都带 plain", (env.findings || []).every((f) => typeof f.plain === "string" && f.plain.length > 4));
 	ok("doctor: 每条发现都带 fix 步骤", (env.findings || []).every((f) => Array.isArray(f.fix) && f.fix.length >= 1));
 
+	/* R13：体检要能回答「装了怎么没反应」—— 两条同源判据：缺 inject / 行开着但没激活 */
+	const healthProfile = dir("health-profile");
+	await mkdir(join(healthProfile, "node_modules", "dsh-dead"), { recursive: true });
+	await writeFile(join(healthProfile, "package.json"), JSON.stringify({
+		dependencies: { "dsh-dead": "file:D:/x/pkg-dsh-dead-0.1.0.tgz" },
+		dsh: { profile: { bundles: ["dsh-dead"] } }
+	}), "utf8");
+	await writeFile(join(healthProfile, "node_modules", "dsh-dead", "package.json"), JSON.stringify({ name: "dsh-dead", version: "0.1.0", dsh: { bundle: {} } }), "utf8");
+	await writeFile(join(healthProfile, "node_modules", "dsh-dead", "index.js"), "export function apply(ctx){ctx.tools.register({name:'x',parameters:{},execute(){}})}\n", "utf8");
+	const health = await inspectProfile({
+		profileDir: healthProfile,
+		plugins: [
+			{ entryId: "include:dead", moduleName: "dsh-dead", enabled: true, fiberPhase: null },
+			{ entryId: "include:live", moduleName: "dsh-live", enabled: true, fiberPhase: "active" }
+		]
+	});
+	const codes = (health.findings || []).map((f) => f.code);
+	ok("doctor: 报「服务没声明 inject」", codes.includes("inject-contract"), codes);
+	ok("doctor: 报「行开着但没激活」", codes.includes("plugin-inactive"), codes);
+	const inactiveFinding = (health.findings || []).find((f) => f.code === "plugin-inactive");
+	ok("doctor: 没激活那条点名到插件", /dsh-dead/.test(inactiveFinding && inactiveFinding.title), inactiveFinding && inactiveFinding.title);
+	eq("doctor: 只列没激活的（active 的不算）", (health.info.inactive || []).map((p) => p.moduleName), ["dsh-dead"]);
+	ok("doctor: 一句话摘要带上这两项", /没激活/.test(mHealth.summarizeHealth(health.info)) && /inject/.test(mHealth.summarizeHealth(health.info)), mHealth.summarizeHealth(health.info));
+
+	/* R13：激活视图（`lib/activation.js`）——三个地方共用的那套判据。
+	   只在 row 侧判：enabled 且 fiberPhase 不是 active = 名单勾着但没拉起来（含 include: 前缀的行）。 */
+	const actPlugins = [
+		{ entryId: "include:dead", moduleName: "dsh-dead", enabled: true, fiberPhase: null },
+		{ entryId: "include:live", moduleName: "dsh-live", enabled: true, fiberPhase: "active" },
+		{ entryId: "include:off", moduleName: "dsh-off", enabled: false, fiberPhase: null }
+	];
+	const act = await scanActivation({ bundles: ["dsh-dead", "dsh-live", "dsh-off", "@deepseek-ai/dsh-base"], plugins: actPlugins, inject: false });
+	eq("activation: 只点名「开着但没起来」的那一个", act.inactive.map((p) => p.name), ["dsh-dead"]);
+	eq("activation: 用户自己关掉的不算故障", act.inactive.some((p) => /off/.test(p.name)), false);
+	eq("activation: 行数统计", [act.active, act.total], [1, 3]);
+	ok("activation: 一句话说清（含没激活的）", /1 行没激活/.test(summarizeActivation(act)) && /在跑/.test(summarizeActivation(act)), summarizeActivation(act));
+	const actFindings = activationFindings(act);
+	eq("activation: 出 plugin-inactive 那条", actFindings.map((f) => f.code), ["plugin-inactive"]);
+	ok("activation: finding 带大白话与三步处置", Boolean(actFindings[0].plain) && actFindings[0].fix.length >= 2);
+	const actNoPm = await scanActivation({ plugins: null, inject: false });
+	ok("activation: 拿不到 listPlugins 时降级成一句话", /查不了/.test(summarizeActivation(actNoPm)), summarizeActivation(actNoPm));
+
+	/* 接线：面板能按需问「都在跑吗」，状态工具有一行 */
+	const indexSrcAct = await readFile(join(pluginRoot, "index.js"), "utf8");
+	const toolsSrcAct = await readFile(join(pluginRoot, "lib", "tools.js"), "utf8");
+	const pipeSrcAct = await readFile(join(pluginRoot, "lib", "pipeline.js"), "utf8");
+	ok("activation: index 暴露 GET /activation", /path === "\/activation"/.test(indexSrcAct) && /installer\.activation\(/.test(indexSrcAct));
+	ok("activation: pipeline 有 activation/activationLine", /async activation\(/.test(pipeSrcAct) && /async activationLine\(/.test(pipeSrcAct));
+	ok("activation: 状态工具有「激活」一行", /· 激活：/.test(toolsSrcAct));
+
 	const clientSrc = await readFile(join(pluginRoot, "client.js"), "utf8");
 	ok("client: 有「大白话解释」开关", clientSrc.includes("大白话解释"));
 	ok("client: 开关存 localStorage", clientSrc.includes("dpi.plain-explain"));
@@ -1189,6 +1261,31 @@ async function main() {
 	ok("codestamp: 一句话能说清「旧、需要重启」", /旧/.test(mCodestamp.describeFreshness(fakeStale)) && /重启/.test(mCodestamp.describeFreshness(fakeStale)), mCodestamp.describeFreshness(fakeStale));
 	eq("codestamp: 读不到源码时也不抛（降级成一句人话）", typeof mCodestamp.describeFreshness(null), "string");
 
+	/* R12.1：宿主是**逐文件**换新的 —— codestamp.js 自己不改就一直报「加载于最早的时刻」。
+	   实测过的最坏情况：新路由已经在回话，这一行还在说「需要重启」，等于判据反过来指挥人做无用功。
+	   所以要把「改完没人管」与「宿主已重新 apply」分开说。 */
+	const applied = mCodestamp.recordApply();
+	ok("codestamp: 记录 re-apply 时刻", applied && Number.isFinite(applied.at), applied);
+	eq("codestamp: 能读回最后 apply", mCodestamp.lastApply().at, applied.at);
+	const appliedState = await mCodestamp.freshness();
+	ok("codestamp: freshness 带上 apply 时刻", typeof appliedState.appliedAt === "string", appliedState);
+	ok("codestamp: apply 晚于加载就被认出来（逐文件换新的典型场景）",
+		mCodestamp.describeFreshness({ fresh: false, loaded: "a", disk: { digest: "b", files: 30, newestFile: "lib/x.js" }, at: "2026-10-21T18:04:20.000Z", appliedAt: "2026-10-21T18:32:00.000Z", appliedAfterLoad: true }).includes("重新 apply"),
+		mCodestamp.describeFreshness({ fresh: false, loaded: "a", disk: { digest: "b", files: 30, newestFile: "lib/x.js" }, at: "2026-10-21T18:04:20.000Z", appliedAt: "2026-10-21T18:32:00.000Z", appliedAfterLoad: true }));
+	ok("codestamp: 已 re-apply 时不许再说「需要重启」（那会指挥人做无用功）",
+		!mCodestamp.describeFreshness({ fresh: false, loaded: "a", disk: { digest: "b", files: 30, newestFile: "lib/x.js" }, at: "2026-10-21T18:04:20.000Z", appliedAt: "2026-10-21T18:32:00.000Z", appliedAfterLoad: true }).includes("需要重新 apply"),
+		mCodestamp.describeFreshness({ fresh: false, loaded: "a", disk: { digest: "b", files: 30, newestFile: "lib/x.js" }, at: "2026-10-21T18:04:20.000Z", appliedAt: "2026-10-21T18:32:00.000Z", appliedAfterLoad: true }));
+	/* R13：R12.1 在这点上判歪了 —— 「apply 过」不等于「apply 的是这一版」。
+	   本机实证：13:03 改 index.js，appliedAt 还停在 12:51:54，那一行却说「入口是新的」。 */
+	ok("codestamp: apply 早于磁盘最后写入 → 说「这一版还没被 apply」",
+		/还没被 apply/.test(mCodestamp.describeFreshness({ fresh: false, loaded: "a", disk: { digest: "b", files: 30, newestFile: "index.js" }, at: "2026-10-22T04:51:44.000Z", appliedAt: "2026-10-22T04:51:54.000Z", appliedAfterLoad: true, needsApply: true })),
+		mCodestamp.describeFreshness({ fresh: false, loaded: "a", disk: { digest: "b", files: 30, newestFile: "index.js" }, at: "2026-10-22T04:51:44.000Z", appliedAt: "2026-10-22T04:51:54.000Z", appliedAfterLoad: true, needsApply: true }));
+	ok("codestamp: apply 晚于磁盘才敢说「入口是新的」",
+		/入口是新的/.test(mCodestamp.describeFreshness({ fresh: false, loaded: "a", disk: { digest: "b", files: 30, newestFile: "lib/x.js" }, at: "2026-10-22T04:51:44.000Z", appliedAt: "2026-10-22T05:10:00.000Z", appliedAfterLoad: true, needsApply: false })),
+		mCodestamp.describeFreshness({ fresh: false, loaded: "a", disk: { digest: "b", files: 30, newestFile: "lib/x.js" }, at: "2026-10-22T04:51:44.000Z", appliedAt: "2026-10-22T05:10:00.000Z", appliedAfterLoad: true, needsApply: false }));
+	const staleState = await mCodestamp.freshness();
+	eq("codestamp: freshness 回 needsApply 布尔", typeof staleState.needsApply, "boolean");
+
 	/* R9 实测撞出来的真 bug：save() 用固定 `state.json.tmp`，并发两次就 ENOENT，
 	   而那条错误会被当成「安装失败」记在任务上。现在要求：并发调用串行 + tmp 名唯一。 */
 	let activeSaves = 0;
@@ -1421,6 +1518,403 @@ async function main() {
 	ok("client: 有批准卡与二次确认", clientSrc.includes("BuildApprovalCard") && clientSrc.includes("我确认允许"));
 	ok("client: 错误块渲染大白话与处置步骤", clientSrc.includes("job.error.plain") && clientSrc.includes("job.error.fix"));
 	ok("tools: 批准动作不暴露给模型（信任决定只能人在面板按）", !/approve-builds/.test(await readFile(join(pluginRoot, "lib", "tools.js"), "utf8")));
+
+	/* ⑳ R13：「装上了 ≠ 起来了」。
+	   三个实证换来的判据（2026-10-21 dsh-imgops 的两条任务 + 本节之前的面板自检）：
+	     · `application:"failed"` 是**正常返回**，旧代码只给了一句「package manager 报告安装失败」；
+	     · 真凶是 `cannot get property "tools" without inject`（插件入口漏声明 inject）；
+	     · `already-installed` 不是故障，是「已经装过、这次没改动」。
+	   所以断言落在：三类回执各自分诊对不对、诊断能不能看见「行勾着但 fiberPhase 不是 active」。 */
+
+	/* ① 静态扫服务声明：四种合法写法都不报，漏声明一定报 */
+	const injCases = [
+		["数组", "export function apply(ctx){ctx.tools.register(1)}", "export const inject = ['tools']", 0],
+		["对象 required/optional", "export function apply(ctx){ctx.tools.register(1); ctx.skills.list()}", "export const inject = { required: ['tools'], optional: ['skills'] }", 0],
+		["客户端对象字段", "function apply(ctx){ctx.slots.register({}, ()=>1)}", 'const exports = { apply, inject: ["slots"] }', 0],
+		["漏声明", "export function apply(ctx){ctx.webServer.register({}, ()=>1)}", "", 1],
+		["函数体外的同名 ctx 不算", "export function apply(ctx){ctx.tools.register(1)}\nfunction paint(ctx){ctx.fillRect(1,2,3,4)}", "export const inject = ['tools']", 0],
+		["注释与界面文案里的 ctx.X 不算", "export function apply(ctx){ctx.tools.register(1)}\n// 注册为 ctx.web Provider，另见 ctx.interval 的说明\nconst hint = '注册为 ctx.web Provider'", "export const inject = ['tools']", 0],
+		["注释里的示例不能当声明", "export function apply(ctx){ctx.tools.register(1)}", "// export const inject = ['tools']", 1]
+	];
+	for (const [label, src, decl, expect] of injCases) {
+		const injDir = dir("inject-" + label.replace(/[^a-z]/gi, "").slice(0, 8));
+		await mkdir(injDir, { recursive: true });
+		await writeFile(join(injDir, "index.js"), src + "\n" + decl + "\n", "utf8");
+		const scan = await scanInject(injDir, { maxFiles: 30 });
+		eq("inject: " + label + "（违规数）", scan.violations.length, expect);
+	}
+	const injBad = dir("inject-bad");
+	await mkdir(injBad, { recursive: true });
+	await writeFile(join(injBad, "index.js"), "export function apply(ctx){ctx.tools.register(1)}\n", "utf8");
+	const injScan = await scanInject(injBad, { maxFiles: 30 });
+	eq("inject: 漏声明时报出服务名", injScan.violations.map((v) => v.service), ["tools"]);
+	ok("inject: 报出文件与行号", injScan.violations[0].line === 1 && /index\.js$/.test(injScan.violations[0].file));
+	ok("inject: 修法是一行可直接粘的声明", /export const inject = \['tools'\]/.test(injectFixLine(["tools"], [])));
+	ok("inject: 已有声明时提示追加而不是覆盖", /现有/.test(injectFixLine(["skills"], ["tools"])));
+	eq("inject: 从宿主原话里取出服务名", servicesFromHostError('imgops (dsh-imgops): Error: cannot get property "tools" without inject'), ["tools"]);
+	eq("inject: 宿主原话认不出时返回空", servicesFromHostError("某个别的错"), []);
+
+	/* ② 宿主「不抛异常」的失败也要分诊（activation / already-installed） */
+	const actDiag = 'dsh: warning: 1 entry did not activate\nimgops (dsh-imgops): Error: cannot get property "tools" without inject';
+	const actInstall = await installPlugin({
+		pluginManager: {
+			listBundles: async () => [],
+			installBundle: async () => ({
+				application: "failed",
+				stage: "enable",
+				bundle: "fake-native",
+				version: "1.0.0",
+				enabled: true,
+				error: { code: "operation-error", diagnostic: actDiag }
+			})
+		},
+		detected: { kind: "bundle", payload: { dir: nativeDir, manifest: { name: "fake-native", version: "1.0.0" } } },
+		source: { type: "local", spec: nativeDir },
+		packDir: packDir1
+	});
+	eq("install: application=failed 时 ok=false", actInstall.ok, false);
+	ok("install: 也带出「为什么 + 下一步」（以前这里是 null）", Boolean(actInstall.failure && actInstall.failure.plain && actInstall.failure.fix));
+	eq("install: 认成激活失败而不是 pnpm 失败", actInstall.failure && actInstall.failure.kind, "activation-failed");
+	ok("install: 标题点名 inject", /inject/.test((actInstall.failure && actInstall.failure.title) || ""));
+	ok("install: 处置步骤给出那一行声明", (actInstall.failure.fix || []).some((s) => /export const inject = \['tools'\]/.test(s.text)), JSON.stringify(actInstall.failure.fix));
+	ok("install: 保留宿主原话", /did not activate/.test(String(actInstall.failure.diagnostic || "") + String(actInstall.failure.raw || "")));
+
+	const aiInstall = await installPlugin({
+		pluginManager: {
+			listBundles: async () => [],
+			installBundle: async () => ({ application: "failed", stage: "install", enabled: true, changed: false, error: { code: "already-installed" } })
+		},
+		detected: { kind: "bundle", payload: { dir: nativeDir, manifest: { name: "fake-native", version: "1.0.0" } } },
+		source: { type: "local", spec: nativeDir },
+		packDir: packDir2
+	});
+	eq("install: already-installed 标成 noop", aiInstall.noop, true);
+	eq("install: noop 时仍有分诊文案", aiInstall.failure && aiInstall.failure.noop, true);
+	ok("install: noop 的标题说「已经在依赖里」", /已经在/.test((aiInstall.failure && aiInstall.failure.title) || ""), (aiInstall.failure || {}).title);
+
+	/* ②b 同一份 vendor 包换了内容也判已装 —— 所以文件名必须带版本（R13 第二个真 bug） */
+	const vendDir = dir("vendor");
+	await mkdir(vendDir, { recursive: true });
+	await writeFile(join(vendDir, "pkg-fake-native.tgz"), "old", "utf8");
+	await writeFile(join(vendDir, "pkg-fake-native-0.9.0.tgz"), "older", "utf8");
+	const vendProfile = dir("vendor-profile");
+	await mkdir(vendProfile, { recursive: true });
+	/* profile 还指着 0.9.0 → 那个必须留着；没有依赖指着 pkg-fake-native.tgz → 该收掉 */
+	await writeFile(join(vendProfile, "package.json"), JSON.stringify({ dependencies: { "other-old": "file:" + join(vendDir, "pkg-fake-native-0.9.0.tgz") } }), "utf8");
+	const okPm = { listBundles: async () => [], installBundle: async () => ({ application: "applied", bundle: "fake-native", version: "1.0.0" }) };
+	const vendInstall = await installPlugin({
+		pluginManager: okPm,
+		detected: { kind: "bundle", payload: { dir: nativeDir, manifest: { name: "fake-native", version: "1.0.0" } } },
+		source: { type: "local", spec: nativeDir },
+		packDir: vendDir,
+		profileDirOverride: vendProfile
+	});
+	ok("install: vendor 包名带版本（否则重装会静默无效）", /pkg-fake-native-1\.0\.0\.tgz$/.test(String(vendInstall.spec)), vendInstall.spec);
+	eq("install: 没人引用的旧 tgz 被收掉", (vendInstall.packed && vendInstall.packed.swept) || [], ["pkg-fake-native.tgz"]);
+	eq("install: profile 还指着的旧包必须留着", (await readdir(vendDir)).includes("pkg-fake-native-0.9.0.tgz"), true);
+	eq("install: 新包本身留着", (await readdir(vendDir)).includes("pkg-fake-native-1.0.0.tgz"), true);
+
+	/* ③ 诊断能看见「行勾着，但没激活」—— 这是过去报「一切正常」的那条路 */
+	const rowsBundle = { name: "dsh-x", availability: "ok", enabled: true, rows: [{ rowId: "xrow", entryId: "include:xrow" }] };
+	const deadRow = await diagnose({
+		pluginManager: {
+			listBundles: async () => [rowsBundle],
+			listPlugins: async () => [{ entryId: "include:xrow", moduleName: "dsh-x", enabled: true, fiberPhase: null }]
+		},
+		skills: null,
+		job: { detected: { kind: "bundle", payload: { manifest: { name: "dsh-x" } } }, install: { bundleName: "dsh-x", result: { error: { diagnostic: actDiag } } } }
+	});
+	eq("diag: 行没激活时结论是 error", deadRow.verdict, "error");
+	ok("diag: 说清了「装上了但没激活」", (deadRow.findings || []).some((f) => /没激活/.test(f.title)), JSON.stringify((deadRow.findings || []).map((f) => f.title)));
+	ok("diag: 该发现带大白话与处置", (deadRow.findings || []).filter((f) => /没激活/.test(f.title)).every((f) => f.plain && Array.isArray(f.fix) && f.fix.length >= 2));
+	const liveRow = await diagnose({
+		pluginManager: {
+			listBundles: async () => [rowsBundle],
+			listPlugins: async () => [{ entryId: "include:xrow", moduleName: "dsh-x", enabled: true, fiberPhase: "active" }]
+		},
+		skills: null,
+		job: { detected: { kind: "bundle", payload: { manifest: { name: "dsh-x" } } }, install: { bundleName: "dsh-x" } }
+	});
+	eq("diag: fiberPhase=active 时不误报", liveRow.verdict, "ok");
+	const offRow = await diagnose({
+		pluginManager: {
+			listBundles: async () => [rowsBundle],
+			listPlugins: async () => [{ entryId: "include:xrow", moduleName: "dsh-x", enabled: false, fiberPhase: null }]
+		},
+		skills: null,
+		job: { detected: { kind: "bundle", payload: { manifest: { name: "dsh-x" } } }, install: { bundleName: "dsh-x" } }
+	});
+	ok("diag: 没勾选时不报「没激活」（那是另一条 finding）", !(offRow.findings || []).some((f) => /没激活/.test(f.title)));
+
+	/* ④ 接线：预检要把服务声明扫描跑起来（装之前就拦住），pipeline 要把 noop 收成 done */
+	const injPkgDir = dir("inject-pkg");
+	await mkdir(injPkgDir, { recursive: true });
+	await writeFile(join(injPkgDir, "package.json"), JSON.stringify({ name: "dsh-broken-inject", version: "0.1.0", dsh: { bundle: { patch: "cordis.patch.yml" } } }), "utf8");
+	await writeFile(join(injPkgDir, "cordis.patch.yml"), "- insert:\n    - id: bi\n      name: dsh-broken-inject\n", "utf8");
+	await writeFile(join(injPkgDir, "index.js"), "export function apply(ctx){ctx.tools.register({})}\n", "utf8");
+	const injDetected = await detectKind(injPkgDir);
+	const injPre = await precheck({ detected: injDetected, scan: cleanScan, scripts: [], source: { type: "local" }, profileDir: exemptProfile });
+	ok("precheck: 漏 inject 时给出「服务声明契约」提醒", (injPre.reasons || []).some((r) => /服务声明/.test(r.text)), JSON.stringify((injPre.reasons || []).map((r) => r.text)));
+	eq("precheck: 扫描结果随预检返回", (injPre.inject && injPre.inject.violations || []).map((v) => v.service), ["tools"]);
+	const pipelineSrcR13 = await readFile(join(pluginRoot, "lib", "pipeline.js"), "utf8");
+	ok("pipeline: already-installed 收成 ok + 备注", /noop/.test(pipelineSrcR13) && /already-installed/.test(pipelineSrcR13));
+	ok("pipeline: 不再把它当 install-failed 抛", /result\.ok \|\| noop/.test(pipelineSrcR13));
+
+	/* ⑳ R12：已装清单 + 检查更新 —— 「我装了哪些、哪些能升级」
+	   这一块的价值全在**判据**上：四类来源（npm / link / file / git）各自「有没有新版本」不同，
+	   判断错一类就会产出真实的误导（把本机目录说成「落后」，或建议从 npm 装 @deepseek-ai/*）。 */
+	eq("inventory: link: 是本机目录，不参与比对", classifyDepSpec("link:D:/x/dsh-a", "dsh-a").kind, "link");
+	eq("inventory: link: 不可比对", classifyDepSpec("link:D:/x/dsh-a", "dsh-a").checkable, false);
+	eq("inventory: file: 是本面板装的 .tgz", classifyDepSpec("file:D:/x/vendor/pkg.tgz", "dsh-b").kind, "tarball");
+	eq("inventory: file: 不可比对", classifyDepSpec("file:D:/x/vendor/pkg.tgz", "dsh-b").checkable, false);
+	eq("inventory: github: 归到 Git（版本不在 registry 上）", classifyDepSpec("github:o/r", "dsh-c").kind, "git");
+	eq("inventory: npm 范围可比对", classifyDepSpec("^1.2.0", "dsh-d").checkable, true);
+	eq("inventory: npm 范围的 registry 名 = 依赖名", classifyDepSpec("^1.2.0", "dsh-d").registryName, "dsh-d");
+	const alias = classifyDepSpec("npm:real-pkg@^2.0.0", "dsh-alias");
+	eq("inventory: npm: 别名指向真包名（不是依赖名）", alias.registryName, "real-pkg");
+	eq("inventory: npm: 别名带上范围", alias.range, "^2.0.0");
+	eq("inventory: @scope/name 不会被 @ 切坏", npmAliasTarget("@scope/name@^1.0.0").name, "@scope/name");
+	eq("inventory: 没有版本的别名落到 latest", npmAliasTarget("npm:dsh-x").range, "latest");
+	ok("inventory: 空清单不说「读不到」（那是另一回事）", summarizeInventory({ total: 0 }).includes("0 个依赖"), summarizeInventory({ total: 0 }));
+	eq("inventory: 没写 version 的声明不猜", classifyDepSpec("", "dsh-e").kind, "unknown");
+
+	const invDir = dir("inventory");
+	const invDeps = {
+		"dsh-npm": "^1.0.0",
+		"dsh-link": "link:D:/x/dsh-link",
+		"dsh-tgz": "file:D:/x/data/vendor/pkg.tgz",
+		"dsh-git": "github:o/r",
+		"dsh-missing": "^0.2.0",
+		"@deepseek-ai/dsh-tools": "0.2.1",
+		"dsh-alias": "npm:real-pkg@^2.0.0"
+	};
+	await mkdir(invDir, { recursive: true });
+	await writeFile(join(invDir, "package.json"), JSON.stringify({
+		name: "desktop",
+		dependencies: invDeps,
+		dsh: { profile: { bundles: ["dsh-npm", "dsh-link", "@deepseek-ai/dsh-tools"] } }
+	}), "utf8");
+	const invVersions = {
+		"dsh-npm": "1.0.0",
+		"dsh-link": "0.1.0",
+		"dsh-tgz": "0.3.0",
+		"dsh-git": "1.2.3",
+		"@deepseek-ai/dsh-tools": "0.2.1",
+		"dsh-alias": "2.1.0"
+	};
+	for (const [name, version] of Object.entries(invVersions)) {
+		const pkgDir = join(invDir, "node_modules", name);
+		await mkdir(pkgDir, { recursive: true });
+		await writeFile(join(pkgDir, "package.json"), JSON.stringify({ name, version }), "utf8");
+	}
+	const inv = await readInventory({ profileDir: invDir });
+	eq("inventory: 读得到 profile", inv.ok, true);
+	eq("inventory: 依赖条数", inv.counts.total, 7);
+	eq("inventory: 按形态计数（npm 4 含宿主自带 / link 1 / tgz 1 / git 1）", [inv.counts.byKind.npm, inv.counts.byKind.link, inv.counts.byKind.tarball, inv.counts.byKind.git], [4, 1, 1, 1]);
+	eq("inventory: 可比对的是「npm 且已落地」两个", inv.counts.checkable, 2);
+	eq("inventory: 宿主自带的包标出来", inv.counts.hostScoped, 1);
+	eq("inventory: @deepseek-ai/* 不许从 npm 升级", inv.items.find((i) => i.name === "@deepseek-ai/dsh-tools").checkable, false);
+	eq("inventory: bundle 行标记", inv.items.find((i) => i.name === "dsh-npm").bundle, true);
+	eq("inventory: 不在 bundle 里的不冒充", inv.items.find((i) => i.name === "dsh-missing").bundle, false);
+	eq("inventory: 读到本机版本", inv.items.find((i) => i.name === "dsh-link").localVersion, "0.1.0");
+	eq("inventory: 声明了但没落地的被单列", inv.problems.length, 1);
+	eq("inventory: 没落地的是 dsh-missing", inv.problems[0] && inv.problems[0].name, "dsh-missing");
+	ok("inventory: 摘要用同一套口径", /7 个依赖/.test(summarizeInventory(inv.counts)) && /本机目录 1/.test(summarizeInventory(inv.counts)), summarizeInventory(inv.counts));
+	const noProfile = await readInventory({ profileDir: null });
+	eq("inventory: 认不出 profile 时如实说（不乱读）", noProfile.ok, false);
+	eq("inventory: 原因写成 no-profile", noProfile.reason, "no-profile");
+	const noPkg = await readInventory({ profileDir: dir("empty-profile") });
+	eq("inventory: 没有 package.json 也不抛", noPkg.reason, "no-profile-package");
+
+	/* 搜索卡片上的「已装」标记：只按包名精确匹配，大小写不敏感 */
+	const annotated = annotateInstalled(
+		[{ name: "dsh-npm" }, { name: "DSH-LINK" }, { name: "dsh-never-installed" }],
+		inv
+	);
+	eq("inventory: 已装的搜索命中带版本", annotated[0].installed, "1.0.0");
+	eq("inventory: 已装标记大小写不敏感", annotated[1].installedKnown, true);
+	eq("inventory: 没装的不会被误标", annotated[2].installedKnown, false);
+	ok("inventory: 名字→版本索引只有已装的", installedIndex(inv).size === 6, installedIndex(inv).size);
+
+	/* 更新比对：判据（纯函数）+ 接线（打桩 fetch，不联网） */
+	eq("updates: 本地旧 → 可升级", relationOf("0.4.7", "0.4.8"), "outdated");
+	eq("updates: 同版本 → 最新", relationOf("3.27.1", "3.27.1"), "current");
+	eq("updates: 本机更新 → 不是「落后」", relationOf("9.9.9", "0.1.0"), "ahead");
+	eq("updates: 解析不了就 unknown（不猜）", relationOf("1.0.0", "not-a-version"), "unknown");
+	eq("updates: 预发布也能比", relationOf("0.2.1-rc.2", "0.2.1"), "outdated");
+	ok("updates: scope 包名编码后仍是合法 URL", registryUrl("@liustack/modlens") === "https://registry.npmjs.org/%40liustack/modlens/latest", registryUrl("@liustack/modlens"));
+
+	const realFetchR12 = globalThis.fetch;
+	const hits = [];
+	globalThis.fetch = async (url) => {
+		hits.push(String(url));
+		if (String(url).includes("dsh-missing")) return { status: 404, ok: false, json: async () => ({}) };
+		if (String(url).includes("boom-pkg")) throw new Error("ECONNRESET");
+		return { status: 200, ok: true, json: async () => ({ version: "9.9.9", deprecated: "旧包" }) };
+	};
+	let updateResult = null;
+	let cachedResult = null;
+	try {
+		clearUpdateCache();
+		updateResult = await checkUpdates(inv.items.concat([
+			{ name: "boom-pkg", registryName: "boom-pkg", localVersion: "1.0.0", checkable: true, installed: true }
+		]), { concurrency: 2 });
+		cachedResult = await checkUpdates(inv.items, { concurrency: 2 });
+	} finally {
+		globalThis.fetch = realFetchR12;
+	}
+	eq("updates: 只对「可比对且已落地」的包发请求", updateResult.summary.checked, 3);
+	eq("updates: 两个可升级", updateResult.summary.outdated, 2);
+	eq("updates: 一个失败被逐条隔离（不影响其它）", updateResult.summary.failed, 1);
+	ok("updates: 失败条目带原因", /ECONNRESET/.test(String(updateResult.items.find((u) => u.name === "boom-pkg").error || "")));
+	eq("updates: 本机目录 / .tgz / git 不参与（skipped 记账）", updateResult.skipped.notCheckable, 4);
+	eq("updates: 没落地的不发请求", updateResult.skipped.notInstalled, 1);
+	eq("updates: 弃用标记原样带回", updateResult.items.find((u) => u.name === "dsh-npm").deprecated, "旧包");
+	ok("updates: 可升级的排在前面", updateResult.items[0].relation === "outdated", updateResult.items.map((u) => u.name + ":" + u.relation));
+	ok("updates: 第二次走缓存（不重复打 registry）", cachedResult.summary.cached >= 2, cachedResult.summary);
+	ok("updates: 摘要一句话能读懂", /可升级 2/.test(summarizeUpdates(updateResult.summary)), summarizeUpdates(updateResult.summary));
+	/* 时区坑：toISOString 是 UTC，本机 UTC+8 —— slice(11,16) 会把 02:36 显示成 18:36 */
+	const localClock = mClockText("2026-10-21T18:36:24.501Z");
+	eq("updates: 检查时刻按本地时区显示（不是 UTC 切片）", localClock, String(new Date("2026-10-21T18:36:24.501Z").getHours()).padStart(2, "0") + ":" + String(new Date("2026-10-21T18:36:24.501Z").getMinutes()).padStart(2, "0"));
+	ok("updates: 时刻非法时不抛", mClockText("x") === "" && mClockText(null) === "");
+	const mergedItems = mergeUpdates(inv.items, updateResult);
+	eq("updates: 并回清单后 update 就在那一行上", mergedItems.find((i) => i.name === "dsh-npm").update.relation, "outdated");
+	eq("updates: 没比对的条目 update 为 null", mergedItems.find((i) => i.name === "dsh-link").update, null);
+
+	/* npm: 前缀（R12 修的输入 bug）：前缀是输入简写，不能进包名 */
+	eq("input: npm: 前缀不进 spec", classifyInput("npm:dsh-ffmpeg@0.5.1").spec, "dsh-ffmpeg@0.5.1");
+	eq("input: 裸包名仍然走搜索", classifyInput("dsh-ffmpeg").kind, "name");
+	eq("download: 解析前剥掉 npm: 前缀", normalizeNpmSpec("npm:@scope/x@^1.0.0"), "@scope/x@^1.0.0");
+	eq("download: 没有前缀时原样返回", normalizeNpmSpec(" dsh-x "), "dsh-x");
+
+	/* 接线（静态）：三个入口都得真的接上，别又变成「算了但没用」 */
+	const pipelineSrcR12 = await readFile(join(pluginRoot, "lib", "pipeline.js"), "utf8");
+	const indexSrcR12 = await readFile(join(pluginRoot, "index.js"), "utf8");
+	const toolsSrcR12 = await readFile(join(pluginRoot, "lib", "tools.js"), "utf8");
+	const clientSrcR12 = await readFile(join(pluginRoot, "client.js"), "utf8");
+	ok("inventory: pipeline 提供清单与检查更新", /async inventory\(/.test(pipelineSrcR12) && /async checkUpdates\(/.test(pipelineSrcR12));
+	ok("inventory: 搜索结果接了「已装」标记", /annotateInstalled\(/.test(pipelineSrcR12));
+	ok("inventory: index 暴露 GET /inventory", indexSrcR12.includes('path === "/inventory"'));
+	ok("inventory: index 暴露 check-updates 动作", /check-updates/.test(indexSrcR12));
+	ok("inventory: 状态工具带「已装」一行", /已装：/.test(toolsSrcR12) && /inventoryView/.test(toolsSrcR12));
+	ok("inventory: 状态工具有 updates 开关（默认不联网）", /updates: \{ type: "boolean"/.test(toolsSrcR12));
+	ok("inventory: 面板组件真的接进 Panel", /h\(Inventory\)/.test(clientSrcR12));
+	ok("inventory: 面板有「检查更新」与「升级到」", clientSrcR12.includes("检查更新") && clientSrcR12.includes("升级到 "));
+	ok("inventory: 面板显示来源与「不比对最新版」的理由", clientSrcR12.includes("item.kindLabel") && clientSrcR12.includes("item.why"));
+
+	/* ㉑ R14：已装 Skill —— 磁盘 × 宿主清单对账。
+	   这一块的假结论只有两种，都必须钉住：
+	     · 把「备份目录同名」说成「两个技能重名」→ 得认出 .bak；
+	     · 读不到宿主清单时把每个技能都标成「没被认」→ 必须区分「对账不了」与「没被认」。 */
+	const fmPlain = parseSkillFrontmatter("---\nname: alpha\ndescription: 一句话描述\n---\n\n正文");
+	eq("skill: 单行 frontmatter 读出 name", fmPlain.name, "alpha");
+	eq("skill: 单行 frontmatter 读出 description", fmPlain.description, "一句话描述");
+	eq("skill: 合法 frontmatter 判为 valid", fmPlain.valid, true);
+	const fmFolded = parseSkillFrontmatter("---\nname: beta\ndescription: >\n  第一行\n  第二行\n\n  新段落\n---\n正文");
+	eq("skill: `>` 折叠块接成一句（R14 修的就是这个）", fmFolded.description, "第一行 第二行\n新段落");
+	eq("skill: 折叠块不再把指示符当描述", fmFolded.description === ">", false);
+	const fmLiteral = parseSkillFrontmatter("---\nname: gamma\ndescription: |\n  第一行\n  第二行\n---\n");
+	eq("skill: `|` 字面块保留换行", fmLiteral.description, "第一行\n第二行");
+	const fmQuoted = parseSkillFrontmatter("---\nname: \"delta\"\ndescription: '带引号的描述'\n---\n");
+	eq("skill: 引号会被剥掉", [fmQuoted.name, fmQuoted.description], ["delta", "带引号的描述"]);
+	const fmBom = parseSkillFrontmatter("\uFEFF---\nname: epsilon\ndescription: 有 BOM\n---\n");
+	eq("skill: 开头 BOM 不影响解析", fmBom.name, "epsilon");
+	eq("skill: 缺 name 判为不合法", parseSkillFrontmatter("---\ndescription: 只有描述\n---\n").valid, false);
+	eq("skill: 大写 name 判为不合法（宿主取名规则）", parseSkillFrontmatter("---\nname: Bad_Name\ndescription: x\n---\n").valid, false);
+	eq("skill: 没有 frontmatter 给出原因", parseSkillFrontmatter("# 只有正文").valid, false);
+
+	eq("skill: 认出 .bak-时间戳 目录", [skillBackupInfo("grilling.bak-mp20261017-1350").backup, skillBackupInfo("grilling.bak-mp20261017-1350").backupOf], [true, "grilling"]);
+	eq("skill: 认出 .bak 目录", skillBackupInfo("tdd.bak").backup, true);
+	eq("skill: 正常目录不算备份", skillBackupInfo("dsh-client-plugin-ops").backup, false);
+	eq("skill: 名字里带 bak 但不是备份后缀", skillBackupInfo("bakery").backup, false);
+	eq("skill: 来源翻成人话", skillSourceLabel("user-dsh").includes("用户级"), true);
+	eq("skill: 未知来源原样透出（不吞）", skillSourceLabel("something-new"), "something-new");
+
+	const skRoot = dir("skills-root");
+	const writeSkill = async (folder, body) => {
+		const target = join(skRoot, folder);
+		await mkdir(target, { recursive: true });
+		await writeFile(join(target, "SKILL.md"), body, "utf8");
+	};
+	await writeSkill("alpha", "---\nname: alpha\ndescription: 正常技能\n---\n");
+	await writeSkill("alpha.bak-1", "---\nname: alpha\ndescription: 旧副本\n---\n");
+	await writeSkill("beta", "---\nname: beta\ndescription: 宿主没认的技能\n---\n");
+	await writeSkill("delta", "---\nname: delta\ndescription: >\n  折叠描述\n---\n");
+	await writeSkill("epsilon", "---\nname: Bad_Name\ndescription: 名字不合规\n---\n");
+	await writeSkill("zeta-yaml", "---\nname: zeta-yaml\ndescription: 描述里有 Triggers: \"x\" 这种冒号空格\n---\n");
+	await mkdir(join(skRoot, "gamma"), { recursive: true });
+	const disk = await readSkillsOnDisk({ roots: [skRoot, dir("missing-root")] });
+	eq("skill: 扫出所有目录（缺 SKILL.md 的也算）", disk.length, 7);
+	eq("skill: 备份目录被标出来", disk.filter((item) => item.backup).map((item) => item.dir), ["alpha.bak-1"]);
+	eq("skill: 折叠块描述在磁盘扫描里也读对", disk.find((item) => item.dir === "delta").description, "折叠描述");
+	eq("skill: 缺 SKILL.md 的目录带上原因", disk.find((item) => item.dir === "gamma").reasons.length > 0, true);
+	eq("skill: 不存在的根不抛、也不编条目", (await readSkillsOnDisk({ roots: [dir("nope")] })).length, 0);
+
+	/* R14：YAML 硬错误 —— 这是「装了但永远用不上」最常见的机械原因。
+	   用真 YAML 解析器（PyYAML）复核过本机三例：`description: 文本（…Triggers: "x"…）` 报
+	   `mapping values are not allowed here`。面板必须把这种与「宿主没认」分开，否则没有修法。 */
+	const yamlBad = "description: 覆盖：A、B。Triggers: \"x\"、\"y\"";
+	ok("skill: 认出「冒号+空格」这种 YAML 硬错误", yamlFrontmatterIssue(yamlBad) && yamlFrontmatterIssue(yamlBad).code === "colon-space", yamlFrontmatterIssue(yamlBad));
+	ok("skill: YAML 错误给出行号与字段", (() => {
+		const issue = yamlFrontmatterIssue("name: a\n" + yamlBad);
+		return issue && issue.key === "description" && issue.line === 2;
+	})(), yamlFrontmatterIssue("name: a\n" + yamlBad));
+	ok("skill: 「空格+#」会被当成注释（第二种硬错误）", yamlFrontmatterIssue("description: 前半 #后半").code === "hash-comment");
+	eq("skill: 加了引号就没有 YAML 错误", yamlFrontmatterIssue('description: "覆盖：A。Triggers: \\"x\\""'), null);
+	eq("skill: 块标量里的冒号合法", yamlFrontmatterIssue("description: >\n  覆盖：A。Triggers: x"), null);
+	eq("skill: 正常的单行描述没有 YAML 错误", yamlFrontmatterIssue("description: 一句话描述"), null);
+	eq("skill: 解析结果带上 yamlIssue", parseSkillFrontmatter("---\nname: a\n" + yamlBad + "\n---\n").yamlIssue.code, "colon-space");
+
+	const hostList = [
+		{ name: "alpha", source: "user-dsh", invocation: { modelInvocable: true, userInvocable: true }, provider: "filesystem" },
+		{ name: "delta", source: "custom", invocation: { modelInvocable: false, userInvocable: true }, provider: "filesystem" },
+		{ name: "zeta", source: "bundled", invocation: { modelInvocable: true, userInvocable: true }, provider: "filesystem" }
+	];
+	const view = buildSkillView({ roots: [skRoot], items: disk, host: hostList, panelInstalled: [{ name: "alpha", jobId: "job-1" }] });
+	eq("skill: 目录数 / 技能数（备份不算技能）", [view.counts.dirs, view.counts.skills, view.counts.backups], [7, 6, 1]);
+	eq("skill: 重名只算一组（备份与正式那份）", view.counts.duplicates, 1);
+	eq("skill: beta 被标成「宿主没认」", view.notVisible.map((item) => item.name), ["beta"]);
+	eq("skill: YAML 写坏的单独计数（不与「宿主没认」混在一起）", view.counts.yamlBroken, 1);
+	eq("skill: YAML 写坏的那条带着改法", (view.yamlBroken[0] || {}).fix ? true : false, true);
+	eq("skill: gamma 缺 SKILL.md 与 epsilon 名字不合规都算不完整", view.counts.invalid, 2);
+	eq("skill: delta 被标成不会自动调用", view.counts.modelInvisible, 1);
+	eq("skill: 宿主侧对上了两个", view.counts.hostVisible, 2);
+	eq("skill: 宿主清单里有、磁盘上没有的单独记（zeta）", view.hostOnly.map((item) => item.name), ["zeta"]);
+	eq("skill: 本面板装过的会标出来", view.items.find((item) => item.dir === "alpha").installedByPanel, true);
+	eq("skill: 备份行也记着自己的名字（用于重名对账）", view.items.find((item) => item.dir === "alpha.bak-1").name, "alpha");
+	ok("skill: 摘要一行说清规模", /6 个技能/.test(view.summary) && /宿主认 3 个/.test(view.summary), view.summary);
+	ok("skill: 摘要带上 YAML 写坏 / 备份与重名", /1 个 frontmatter 写坏了/.test(view.summary) && /1 个备份残留/.test(view.summary) && /1 组重名/.test(view.summary), view.summary);
+	const findingCodes = skillFindings(view).map((item) => item.code);
+	ok("skill: YAML 写坏 = error 级结论（它解释了为什么用不上）", skillFindings(view).some((item) => item.code === "skill-yaml-invalid" && item.severity === "error"), findingCodes);
+	ok("skill: 宿主没认 = error 级结论", skillFindings(view).some((item) => item.code === "skill-not-visible" && item.severity === "error"), findingCodes);
+	ok("skill: 重名 = warn 级结论", skillFindings(view).some((item) => item.code === "skill-duplicate-name" && item.severity === "warn"), findingCodes);
+	ok("skill: 备份残留 = info 级结论（提醒但不吓人）", skillFindings(view).some((item) => item.code === "skill-backup-leftover" && item.severity === "info"), findingCodes);
+	ok("skill: 每条结论都带大白话与处置步骤", skillFindings(view).every((item) => item.plain && Array.isArray(item.fix) && item.fix.length > 0));
+	const blind = buildSkillView({ roots: [skRoot], items: disk, host: null, hostError: "no-service" });
+	eq("skill: 读不到宿主清单时不把技能标成「没被认」", blind.counts.notVisible, 0);
+	eq("skill: 读不到宿主清单时如实说对账不了", blind.host.available, false);
+	ok("skill: 读不到宿主清单时摘要说「宿主清单读不到」", /宿主清单读不到/.test(blind.summary), blind.summary);
+	eq("skill: 读不到宿主清单时不出「宿主没认」结论", skillFindings(blind).some((item) => item.code === "skill-not-visible"), false);
+	const noRoots = buildSkillView({ roots: [], items: [], host: [] });
+	eq("skill: 认不出技能根时 ok=false", noRoots.ok, false);
+	eq("skill: 认不出技能根时摘要直说", noRoots.summary, "认不出技能根目录");
+	ok("skill: summarizeSkills 空计数不崩", typeof summarizeSkills(null) === "string");
+
+	/* 接线（静态）：宿主服务是**可选**的，必须走 ctx.get("skills")，否则永远读到 undefined */
+	const pipelineSrcR14 = await readFile(join(pluginRoot, "lib", "pipeline.js"), "utf8");
+	const indexSrcR14 = await readFile(join(pluginRoot, "index.js"), "utf8");
+	const toolsSrcR14 = await readFile(join(pluginRoot, "lib", "tools.js"), "utf8");
+	const clientSrcR14 = await readFile(join(pluginRoot, "client.js"), "utf8");
+	ok("skill: pipeline 提供 skills()（30 秒缓存）", /async skills\(force = false\)/.test(pipelineSrcR14) && /_skillsAt/.test(pipelineSrcR14));
+	ok("skill: 宿主清单走可选访问器 ctx.get(\"skills\")", /ctx\.get\("skills"\)/.test(pipelineSrcR14));
+	ok("skill: 体检并入技能结论", /skillFindings\(/.test(pipelineSrcR14));
+	ok("skill: index 暴露 GET /skills", indexSrcR14.includes('path === "/skills"'));
+	ok("skill: 刷新会绕过 30 秒缓存", /fresh/.test(indexSrcR14) && /searchParams\.get\("fresh"\)/.test(indexSrcR14));
+	ok("skill: 状态工具有「Skill：」一行", /· Skill：/.test(toolsSrcR14) && /skillsLine/.test(toolsSrcR14));
+	ok("skill: 状态工具点名 frontmatter 写坏的那几个", /frontmatter 写坏/.test(toolsSrcR14) && /yamlBroken/.test(toolsSrcR14));
+	ok("skill: 面板组件真的接进 Panel", /h\(Skills\)/.test(clientSrcR14));
+	ok("skill: 面板列出备份 / 宿主没认 / 不会自动调用", clientSrcR14.includes("备份残留") && clientSrcR14.includes("宿主没认") && clientSrcR14.includes("不会自动调用"));
+	ok("skill: 面板有读不到时的兜底", clientSrcR14.includes("读不到技能清单") && clientSrcR14.includes("重试"));
 
 	await rm(root, { recursive: true, force: true });
 
