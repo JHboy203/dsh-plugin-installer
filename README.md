@@ -286,13 +286,17 @@
 >    「N 组合法性问题」（warn）、「N 个备份残留」（info），每条都带大白话与处置步骤。
 > 5. **线上实测立刻抓到三个「装了却永远用不上」的技能**（这条路自己证明了自己有用）：
 >    `github-private-backup` / `win-desktop-automation` / `windows-disk-reclaim` 在磁盘上 name/description
->    都齐，但宿主清单里没有。用 PyYAML 复核根因 —— **frontmatter 不是合法 YAML**：三者的 description
->    都是未加引号的 plain 标量，里面却有 `Triggers: "…"` 这种「冒号 + 空格」，解析器报
+>    都齐，但宿主清单里没有（55 个技能里只有这 3 个没被认）。用 PyYAML 复核根因 —— **frontmatter 不是合法 YAML**：
+>    三者的 description 都是未加引号的 plain 标量，里面却有 `Triggers: "…"` 这种「冒号 + 空格」，解析器报
 >    `mapping values are not allowed here`，于是宿主读不出 name、整条跳过。
 >    这比「重名」更隐蔽（文件看起来完美），所以加了 `yamlFrontmatterIssue()` 判据（R14 的第二类结论
->    `skill-yaml-invalid`，error 级），把「YAML 写坏」与「宿主没认」**分开计数**并给出逐条改法
->    （改成 `description: >` 块标量，或用引号包住）。本机当前：**55 个技能 · 3 个 frontmatter 写坏 ·
->    4 个备份残留 · 4 组重名 · 18 个不会自动调用（frontmatter 里写了 disable-model-invocation）**。
+>    `skill-yaml-invalid`，error 级），把「YAML 写坏」与「宿主没认」**分开计数**并给出逐条改法。
+>    **三个技能已修好并当场验证**：`.tools/fix-skill-frontmatter.py`（默认预览、`--apply` 才写、写前备份到
+>    `.tools/backups/skills-frontmatter-<stamp>/`、写后 PyYAML 复核）把它们改成 `description: >` 块标量；
+>    宿主自己重扫后，面板计数从「3 个 frontmatter 写坏 · 宿主认 64」变成 **「宿主认 67 · 0 个写坏 · 0 个没被认」**
+>    （55 个磁盘技能全部认到了），技能目录也随即出现在模型的技能清单里。
+>    本机修好后的状态：**55 个技能 · 宿主认 67（含 12 个 bundled/runtime）· 4 个备份残留 · 4 组重名 ·
+>    18 个不会自动调用（frontmatter 里写了 disable-model-invocation）**。
 >
 > 断言：hosttest **506 → 570**（+64：frontmatter 三种块标量/BOM/引号 10、YAML 硬错误判据 7、备份与来源 6、
 > 磁盘扫描 5、对账计数与标签 21、结论分级 5、盲区闸门 4、接线 10），render **80 → 101**（+21），
@@ -504,7 +508,7 @@ DSH 每次启动换随机端口（`dsh-desktop-host` 里写死 `--port 0`），�
 | 场景 | 结果 |
 |---|---|
 | 确定性自检 | **570/570 通过**（`dev/hosttest.mjs`，含 zip/tar 构造、穿越与软链接拒绝、比例炸弹、5 种识别分支、快照还原、重打包往返、prune 引用保护、地雷处置、契约扫描、profile 体检与修复、设置归一化、审核三档、热键、pnpm 失败分诊、allowBuilds 解析、批准重装与三道闸、落盘串行、版本豁免读写与回读确认、兼容降级口径、预检「已授权不再阻断」回归、staging 生命周期、环境注意、运行中代码指纹、已装清单四类来源、registry 比对与缓存、npm: 前缀、**inject 六种写法与边界、激活失败分诊、fiberPhase 判据、SKILL.md 三种 frontmatter 形态、YAML 硬错误判据、技能备份识别与磁盘×宿主对账**）；另 **101 项**无头渲染 + **84 项**自洽体检 |
-| 已装 Skill（R14 实测，本机） | 技能根 `.dsh/skills` 下 **59 个目录 = 55 个技能 + 4 个备份残留**；**3 个技能 frontmatter 不是合法 YAML**（`github-private-backup` / `win-desktop-automation` / `windows-disk-reclaim`，PyYAML 复核：`mapping values are not allowed here`）→ 宿主读不出 name、整条跳过；`domain-modeling` / `grill-me` / `grill-with-docs` / `grilling` 各有一份 `.bak-mp20261017-1350` 同名备份；11 个技能的 description 是 `>` 折叠块，旧解析把它们读成「>」 |
+| 已装 Skill（R14 实测，本机） | 技能根 `.dsh/skills` 下 **59 个目录 = 55 个技能 + 4 个备份残留**；上线第一分钟抓出 **3 个 frontmatter 不是合法 YAML** 的技能（`github-private-backup` / `win-desktop-automation` / `windows-disk-reclaim`，PyYAML 复核：`mapping values are not allowed here`）→ 宿主读不出 name、整条跳过；用 `.tools/fix-skill-frontmatter.py --apply`（写前备份、写后 PyYAML 复核）改成块标量后，宿主重扫即认到 —— **`hostVisible` 55/55、`yamlBroken` 0、`notVisible` 0**；`domain-modeling` / `grill-me` / `grill-with-docs` / `grilling` 各有一份 `.bak-mp20261017-1350` 同名备份（尚未清）；11 个技能的 description 是 `>` 折叠块，旧解析把它们读成「>」 |
 | 激活失败的真实样本（R13 实测） | `dsh-imgops` 两次任务：①宿主返回 `application:"failed" / stage:"enable" / diagnostic:"1 entry did not activate … cannot get property \"tools\" without inject"`（pnpm exit 0、包已落地）→ 新分诊判 `activation-failed`，标题点名缺 `tools`，处置给出 `export const inject = ['tools']`；② `already-installed` → 判 noop + 照常诊断。同机 4 个健康插件（本插件 / dsh-screenshot / dsh-diag / dsh-ops）静态扫描**零误报**（canvas 的 `ctx.fillRect` 不计入） |
 | 重装静默无效（R13 第二个 bug） | 修好 `dsh-imgops` 并升到 0.1.1 重新提交，宿主仍回 `already-installed`（实测 `changed:false`、`elapsedMs:11`、pnpm 没跑）—— 判据是依赖行的 spec 字符串，不含版本文件名就永远是同一个 spec。修法：`pkg-<名字>-<版本>.tgz` + 只收「没人引用的旧包」 |
 | 已装清单 + 检查更新（R12 实测） | 本机 profile：**44** 个依赖（39 在 bundle 行里）= npm 17 / 本机目录 23 / 本面板装的 .tgz 2 / Git 2；17 个可比对的包 **1.9s** 查完，**7 个可升级**（`dsh-checkpoint-rewind` 0.6.24→0.6.33、`dsh-ops` 0.3.0→0.4.1、`dsh-vision-router` 3.0.4→3.0.5、`dsh-mnemon` 0.5.32→0.5.34、`dsh-provider-usage` 0.3.16→0.3.17、`dsh-chat-import` 0.26.1→0.26.2、`@linxin666/dsh-remote-web-ui` 0.4.7→0.4.8）；顺带查出 1 条「声明了但没落地」（`ghbackup` 是只挂了 `link:` 的旧别名） |
