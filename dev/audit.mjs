@@ -45,10 +45,10 @@ export const FROZEN_DEFAULTS = {
 };
 
 /** 文档里声明的自检项数（改断言就先跑一次 host_selfcheck，再同步这个数）。 */
-export const EXPECTED_ASSERTIONS = 595;
+export const EXPECTED_ASSERTIONS = 618;
 
 /** 界面自检项数（dev/render-check.cjs）。同样是「文档对表」的一半。 */
-const EXPECTED_RENDER_ASSERTIONS = 105;
+const EXPECTED_RENDER_ASSERTIONS = 108;
 
 /** 期望注册的宿主工具（漏一个 = 模型看不见一项能力）。 */
 const EXPECTED_TOOLS = [
@@ -236,6 +236,16 @@ async function main() {
 	ok("技能备份处置：index 暴露 park-skill-backup", /park-skill-backup/.test(indexSrc2));
 	ok("技能备份处置：不暴露给模型（动文件只能人按）", !/park-skill-backup/.test(toolsSrc) && !/parkSkillBackup/.test(toolsSrc));
 	ok("技能备份处置：面板两段式确认、写明不删除", clientSrc.includes("移出技能根…") && clientSrc.includes("我确认移出") && clientSrc.includes("不删除"));
+
+	/* ⑤i R16：把「frontmatter 写坏」的修复也做成插件能力（此前只在 .tools 脚本里）。
+	   改写必须是确定性的、且不能只看「改了」——三道自检（检测清零 / name 不变 / description 语义不变）缺一不可。 */
+	ok("frontmatter 修复：改写是纯函数", /export function rewriteSkillFrontmatter/.test(skillsSrc || "") && /export function planSkillFix/.test(skillsSrc || ""));
+	ok("frontmatter 修复：改写后必须检测清零", /yamlFrontmatterIssue\(newBlock\[1\]\)/.test(skillsSrc || ""));
+	ok("frontmatter 修复：name 变了就放弃", /name 变了/.test(skillsSrc || "") && /description 语义变了/.test(skillsSrc || ""));
+	ok("frontmatter 修复：pipeline 先备份再原子写", /async repairSkillFrontmatter\(/.test(pipelineSrc) && /skill-fixes/.test(pipelineSrc) && /renameWithRetry\(tmp, planned\.file\)/.test(pipelineSrc));
+	ok("frontmatter 修复：index 暴露 fix-skill-frontmatter", /fix-skill-frontmatter/.test(indexSrc2));
+	ok("frontmatter 修复：不暴露给模型（改用户文件只能人按）", !/fix-skill-frontmatter/.test(toolsSrc) && !/repairSkillFrontmatter/.test(toolsSrc));
+	ok("frontmatter 修复：面板两段式、写明先备份", clientSrc.includes("修成块标量…") && clientSrc.includes("我确认修复") && clientSrc.includes("先备份原文"));
 
 	/* ⑥ 数据目录：设置文件是否与运行时会一致（手改过就会出现差异） */
 	const settingsFile = join(dataDir(), "settings.json");

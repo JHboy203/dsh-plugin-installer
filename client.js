@@ -23,7 +23,7 @@ window.__ModuleLoader__.load({
 		/* 客户端 build 号（R5.1）：改 client.js 就提一位。
 		   client 会热重载、但没人保证「当前页面跑的是哪一版」—— 这个号随 client-state
 		   一起上报，宿主 /health 的 clientReport.build 就是答案（宿主侧另有 mtime 标签）。 */
-		const BUILD = "r15.0";
+		const BUILD = "r16.0";
 
 		/* ── 迷你 store（模块级，面板关着时图标也在用）──────────────────── */
 
@@ -1509,6 +1509,24 @@ window.__ModuleLoader__.load({
 			const [open, setOpen] = useState(false);
 			/* 待确认「移出」的备份目录名（R15）。两段式是刻意的：动文件前先说清后果。 */
 			const [parking, setParking] = useState(null);
+			/* 待确认「修 frontmatter」的目录名（R16）：先备份原文再改，同样两段式。 */
+			const [fixing, setFixing] = useState(null);
+			const fix = (dir) => {
+				setLocal({ skillsBusy: true });
+				api("/action", { method: "POST", body: JSON.stringify({ action: "fix-skill-frontmatter", dir }) })
+					.then((r) => {
+						if (r && r.state) setStore({ data: r.state });
+						if (!r || r.ok === false) {
+							toast((r && r.error) || "修不了");
+							return;
+						}
+						if (r.skills) setLocal({ skills: r.skills });
+						setFixing(null);
+						toast("已修好：" + dir + "（原文备份在 data/skill-fixes）");
+					})
+					.catch((e) => toast("修不了：" + String((e && e.message) || e)))
+					.finally(() => setLocal({ skillsBusy: false }));
+			};
 			const park = (dir) => {
 				setLocal({ skillsBusy: true });
 				api("/action", { method: "POST", body: JSON.stringify({ action: "park-skill-backup", dir }) })
@@ -1599,6 +1617,20 @@ window.__ModuleLoader__.load({
 							h("div", { className: "dpi-skill-desc" }, row.description || (row.reasons && row.reasons[0]) || "（没有描述：模型不会自动挑它）"),
 							row.yamlIssue
 								? h("div", { className: "dpi-detail" }, "改法：" + row.yamlIssue.fix)
+								: null,
+							/* R16：frontmatter 写坏的行给一个「就地修」入口（两段式，先备份原文） */
+							row.yamlIssue
+								? fixing === row.dir
+									? h("div", { className: "dpi-actions dpi-actions-tight" },
+										h("span", { className: "dpi-muted" }, "先备份原文，再把这一行改成块标量（不删任何内容）"),
+										h("button", {
+											className: "dpi-btn dpi-btn-sm dpi-btn-primary",
+											disabled: Boolean(s.local.skillsBusy),
+											onClick: () => fix(row.dir)
+										}, "我确认修复"),
+										h("button", { className: "dpi-btn dpi-btn-sm", onClick: () => setFixing(null) }, "取消"))
+									: h("div", { className: "dpi-actions dpi-actions-tight" },
+										h("button", { className: "dpi-btn dpi-btn-sm", onClick: () => setFixing(row.dir) }, "修成块标量…"))
 								: null,
 							/* R15：备份目录给一个「移出」入口（两段式）。移动不删除，落在 data/parked-skills。 */
 							row.backup

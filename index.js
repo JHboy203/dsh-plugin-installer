@@ -14,7 +14,8 @@
  *   GET  /plugin-installer/skills       已装 Skill（本地读 + 宿主技能清单对账；重名 / 备份 / 没被认）
  *   POST /plugin-installer/action       confirm / skip-review / cancel / ack / rollback / review /
  *                                       check-updates / rediagnose / approve-builds / exempt-version /
- *                                       repair / fix-landmine / integrations / park-skill-backup
+ *                                       repair / fix-landmine / integrations / park-skill-backup /
+ *                                       fix-skill-frontmatter
  *   POST /plugin-installer/upload       拖进来的文件（原始字节，x-file-name 带头）
  *   POST /plugin-installer/ai           面板 AI：搜索 → 推荐 → 安装请求
  *   GET  /plugin-installer/ai-status    AI 通道是否可用
@@ -372,6 +373,16 @@ export async function apply(ctx) {
 						return json(res, 200, parked.ok
 							? { ok: true, parked, skills: parked.skills || null, state: await installer.snapshotState() }
 							: { ok: false, error: parked.reason || "移不动", parked });
+					} else if (action === "fix-skill-frontmatter") {
+						/* R16：把「不是合法 YAML」的 frontmatter 就地改成块标量（先备份、原子写、重扫）。
+						   判据与改写都是确定性的（lib/skills.js），**不暴露给模型**：动用户文件只能人按。 */
+						if (typeof installer.repairSkillFrontmatter !== "function") {
+							return json(res, 503, { ok: false, error: "宿主还没重启：frontmatter 修复是新代码（lib/pipeline.js 不热重载）" });
+						}
+						const fixed = await installer.repairSkillFrontmatter(String(body.dir || ""));
+						return json(res, 200, fixed.ok
+							? { ok: true, fixed, skills: fixed.skills || null, state: await installer.snapshotState() }
+							: { ok: false, error: fixed.reason || "修不了", fixed });
 					} else if (action === "integrations") {
 						const eco = await installer.integrations(true);
 						return json(res, 200, { ok: true, integrations: eco, state: await installer.snapshotState() });

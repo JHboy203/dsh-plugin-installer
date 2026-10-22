@@ -23,8 +23,10 @@ import { detectKind } from "../lib/detect.js";
 import { parseSkillFrontmatter, yamlFrontmatterIssue } from "../lib/detect.js";
 import {
 	buildSkillView,
+	planSkillFix,
 	planSkillPark,
 	readSkillsOnDisk,
+	rewriteSkillFrontmatter,
 	skillBackupInfo,
 	skillFindings,
 	skillSourceLabel,
@@ -1357,6 +1359,49 @@ async function main() {
 	eq("skill park: 内容没变（移动不是重建）", await readFile(join(moved.to, "SKILL.md"), "utf8"), "---\nname: grill\ndescription: 旧副本\n---\n");
 	const again = await parkInstaller.parkSkillBackup("grill.bak-9", { roots: [moveRoot], parkedRoot: dir("park-move-parked") });
 	ok("skill park: 再移一次会如实说找不到（幂等）", again.ok === false && /找不到这个目录/.test(String(again.reason)), again);
+
+	/* R16：把「frontmatter 写坏」就地修好 —— 先备份、原子写、重扫；改写必须过三道自检 */
+	const brokenText = "---\nname: gamma\ndescription: 覆盖：A、B。Triggers: \"x\"、\"y\"\n---\n\n# gamma\n";
+	ok("skill fix: 规划层接受正经技能目录（不要求 .bak）", planSkillFix({ roots: [parkRoot], dir: "grill.bak-1" }).ok, true);
+	eq("skill fix: 不许带路径", planSkillFix({ roots: [parkRoot], dir: "a/b" }).ok, false);
+	eq("skill fix: 不许 .. 逃逸", planSkillFix({ roots: [parkRoot], dir: ".." }).ok, false);
+	/* 规划层只管「名字合法 + 在某个根下」，存在性在执行时判（纯函数不碰磁盘） */
+	eq("skill fix: 规划层不碰磁盘（ghost 也能规划）", planSkillFix({ roots: [parkRoot], dir: "ghost" }).ok, true);
+	const rewritten = rewriteSkillFrontmatter(brokenText);
+	eq("skill fix: 改写成功", rewritten.ok, true);
+	ok("skill fix: 改成了块标量", rewritten.ok && /description: >\n  /.test(rewritten.text), rewritten.text && rewritten.text.slice(0, 90));
+	eq("skill fix: 改写后 YAML 检测清零", parseSkillFrontmatter(rewritten.text).yamlIssue, null);
+	eq("skill fix: name 不变", parseSkillFrontmatter(rewritten.text).name, "gamma");
+	eq("skill fix: description 语义不变", parseSkillFrontmatter(rewritten.text).description, parseSkillFrontmatter(brokenText).description);
+	ok("skill fix: 正文原样保留", rewritten.text.endsWith("\n\n# gamma\n"), JSON.stringify(rewritten.text.slice(-20)));
+	ok("skill fix: 报告改了什么", Array.isArray(rewritten.changes) && rewritten.changes[0].code === "colon-space", rewritten.changes);
+	ok("skill fix: 已经合规的不动", rewriteSkillFrontmatter("---\nname: a\ndescription: 一句话\n---\n").ok === false);
+	ok("skill fix: 加引号的值不动", rewriteSkillFrontmatter('---\nname: a\ndescription: "含 Key: 值"\n---\n').ok === false);
+	ok("skill fix: 块标量不动", rewriteSkillFrontmatter("---\nname: a\ndescription: >\n  含 Key: 值\n---\n").ok === false);
+	ok("skill fix: 没有 frontmatter 时如实拒绝", rewriteSkillFrontmatter("# 只有正文").ok === false);
+	const crlf = rewriteSkillFrontmatter("---\r\nname: a\r\ndescription: 含 Key: 值\r\n---\r\n");
+	ok("skill fix: CRLF 文件也能改且保留 CRLF", crlf.ok && crlf.text.includes("\r\n---"), crlf.text && JSON.stringify(crlf.text.slice(0, 60)));
+
+	const fixRoot = dir("fix-root");
+	await mkdir(join(fixRoot, "broken"), { recursive: true });
+	await writeFile(join(fixRoot, "broken", "SKILL.md"), brokenText, "utf8");
+	const fixedSkill = await parkInstaller.repairSkillFrontmatter("broken", { roots: [fixRoot], backupRoot: dir("fix-backup") });
+	ok("skill fix: 真执行成功并说明改了什么", fixedSkill.ok === true && fixedSkill.changes.length === 1, fixedSkill);
+	ok("skill fix: 原文先备份了（路径落在 backupRoot 下）", /fix-backup/.test(String(fixedSkill.backup)), fixedSkill.backup);
+	let backupText = null;
+	try {
+		backupText = await readFile(join(fixedSkill.backup, "SKILL.md"), "utf8");
+	} catch {
+		backupText = null;
+	}
+	eq("skill fix: 备份的就是原文", backupText, brokenText);
+	const afterFix = await readFile(join(fixRoot, "broken", "SKILL.md"), "utf8");
+	eq("skill fix: 文件已改成合法 YAML", parseSkillFrontmatter(afterFix).yamlIssue, null);
+	eq("skill fix: 改写后 name 还是 gamma", parseSkillFrontmatter(afterFix).name, "gamma");
+	const secondFix = await parkInstaller.repairSkillFrontmatter("broken", { roots: [fixRoot], backupRoot: dir("fix-backup2") });
+	ok("skill fix: 再修一次如实说「无需修」", secondFix.ok === false && /无需修/.test(String(secondFix.reason)), secondFix);
+	const ghostFix = await parkInstaller.repairSkillFrontmatter("ghost", { roots: [fixRoot], backupRoot: dir("fix-backup3") });
+	ok("skill fix: 不存在的目录拒绝（不写盘）", ghostFix.ok === false, ghostFix);
 
 	/* R9 实测撞出来的真 bug：save() 用固定 `state.json.tmp`，并发两次就 ENOENT，
 	   而那条错误会被当成「安装失败」记在任务上。现在要求：并发调用串行 + tmp 名唯一。 */

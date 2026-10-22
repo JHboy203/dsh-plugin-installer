@@ -175,7 +175,7 @@ function textOf(node, acc) {
  * 正常不执行，所以**数源码不等于数断言**（实测 103 处、只跑 80 条）。真正的判据只能是
  * 「这次实际跑了几条」，所以由脚本自己报总数、并由自己比对。
  */
-const EXPECTED_TOTAL = 105;
+const EXPECTED_TOTAL = 108;
 
 let failed = 0;
 let passed = 0;
@@ -729,6 +729,7 @@ if (typeof t.Skills === "function") {
 		check("已装 Skill：备份行标「备份残留」", skillExpanded.includes("备份残留"));
 		check("已装 Skill：备份行有「移出技能根…」入口（R15）", skillExpanded.includes("移出技能根…"), skillExpanded.slice(0, 300));
 		check("已装 Skill：YAML 写坏的行被点名并给改法", skillExpanded.includes("frontmatter 写坏了") && skillExpanded.includes("改法："), skillExpanded.slice(0, 400));
+		check("已装 Skill：YAML 写坏的行有「修成块标量…」入口（R16）", skillExpanded.includes("修成块标量…"), skillExpanded.slice(0, 400));
 		check("已装 Skill：宿主没认的行被点名", skillExpanded.includes("beta") && skillExpanded.includes("宿主没认"));
 		check("已装 Skill：不会自动调用单独标出", skillExpanded.includes("不会自动调用"));
 		check("已装 Skill：缺 SKILL.md 的行说清原因", skillExpanded.includes("没有 SKILL.md"));
@@ -751,6 +752,19 @@ if (typeof t.Skills === "function") {
 		check("已装 Skill：确认态可取消", skillConfirm.includes("取消"));
 	} catch (e) {
 		check("已装 Skill：确认态渲染不抛异常", false, String((e && e.message) || e));
+	}
+
+	/* ②c 修复确认态（hook 4 = 待确认修的目录名）：动用户文件前必须说清「先备份原文、不删内容」 */
+	resetHooks();
+	hooks[2] = true;
+	hooks[4] = "theta";
+	let skillFixConfirm = "";
+	try {
+		skillFixConfirm = textOf(t.Skills({})).join(" | ");
+		check("已装 Skill：修 frontmatter 前有二次确认", skillFixConfirm.includes("我确认修复"), skillFixConfirm.slice(0, 400));
+		check("已装 Skill：确认时说清「先备份原文、不删内容」", skillFixConfirm.includes("先备份原文") && skillFixConfirm.includes("不删任何内容"), skillFixConfirm.slice(0, 400));
+	} catch (e) {
+		check("已装 Skill：修复确认态渲染不抛异常", false, String((e && e.message) || e));
 	}
 
 	/* ③ 读不到 / 空 / 宿主对账不了 三种兜底 */
