@@ -106,7 +106,9 @@ Sidebar icon (red dot lives here) ─┬─→ click = main panel
 >    scans the installed directory again, going straight into the diagnosis card.
 > 2. **Environment health expanded to 7 categories** (`lib/profilehealth.js`): `dsh.profile.bundles` reconciled against node_modules
 >    (also recognized when the "disable third-party plugins" button has cut it to 2 entries), the output contract of installed plugins, whether pnpm's dsh-tools pin has
->    expired with a host upgrade, which plugins the latest `crash-*-host.log` names. `apply:true` additionally, beyond the original two,
+>    expired with a host upgrade, and which plugins the latest startup failure names — both `crash-*-host.log`
+>    (host failed to boot) and `crash-*-web-boot.log` (host booted, but a web entry did not activate), newest wins,
+>    with a small known-signature table (e.g. `Web authentication failed` → dsh-auth cookie pile-up). `apply:true` additionally, beyond the original two,
 >    **syncs the pin to the host version** and **writes bundles/patch back from the latest snapshot** (auto-snapshotting another copy before writing).
 > 3. **See everything in one call**: `install_hub_doctor` by default returns only "one-line conclusion + one line per finding"; `verbose:true`
 >    includes detail; `contract:false` skips the installed-plugin scan for speed. On a session change / after install / when it won't start, this one tool suffices.

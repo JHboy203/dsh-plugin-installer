@@ -584,6 +584,145 @@ async function main() {
 	eq("profilehealth: bundles 写回 4 项", r8AfterPkg.dsh.profile.bundles.length, 4);
 	ok("profilehealth: 钉子同步到宿主版本", (await readFile(join(r8Profile, "pnpm-workspace.yaml"), "utf8")).includes("0.2.1-rc.2"));
 
+	/* ⑥.5 崩溃日志分诊（R17）：host 与 web-boot 两类、取最新、已知签名、另一类当 sibling 带出 */
+	const crashProfile = dir("crashProfile");
+	await mkdir(join(crashProfile, "node_modules"), { recursive: true });
+	await writeFile(join(crashProfile, "package.json"), JSON.stringify({
+		name: "crash-fixture",
+		dsh: { profile: { bundles: ["@deepseek-ai/dsh-base"] } }
+	}), "utf8");
+	const HOST_LOG_AUTH = [
+		"time: 2026-10-23T05:36:57.278Z",
+		"source: host",
+		"phase: startup",
+		"app: @deepseek-ai/dsh-desktop 0.2.1-rc.2",
+		"platform: win32 x64",
+		"",
+		"--- error ---",
+		"Error: desktop welcome: Web authentication failed",
+		"    at connectDesktopWelcome (file:///D:/DSH/resources/app.asar/lib/main.js:8886:31)",
+		"",
+		"--- renderer console (error level, oldest first) ---",
+		"(no error-level renderer console output was captured)"
+	].join("\n");
+	const WEB_LOG_ONE = [
+		"time: 2026-10-23T11:03:56.144Z",
+		"source: web-boot",
+		"phase: running",
+		"app: @deepseek-ai/dsh-desktop 0.2.1-rc.2",
+		"platform: win32 x64",
+		"",
+		"--- error ---",
+		"Error: web boot: 1 entry did not activate",
+		"dsh-web-research: import failed (see console for the import error)",
+		"    at file:///D:/DSH/resources/app.asar/lib/main.js:12437:15",
+		"",
+		"--- renderer console (error level, oldest first) ---",
+		"dsh-app://app/plugins/??dsh-diag/client.js&rev=a9448b50cf9f:664 Error: web boot: 1 entry did not activate",
+		"dsh-web-research: import failed (see console for the import error)"
+	].join("\n");
+	const nowMs = Date.now();
+	const ageFile = async (path, minutesAgo) => {
+		const stamp = new Date(nowMs - minutesAgo * 60000);
+		await utimes(path, stamp, stamp);
+	};
+
+	/* A：web-boot 最新 + 两小时前的 host */
+	const crashA = dir("crashA");
+	await mkdir(crashA, { recursive: true });
+	const hostOld = join(crashA, "crash-2026-10-23T05-36-57-278Z-host.log");
+	await writeFile(hostOld, HOST_LOG_AUTH, "utf8");
+	await ageFile(hostOld, 120);
+	const webNew = join(crashA, "crash-2026-10-23T11-03-56-144Z-web-boot.log");
+	await writeFile(webNew, WEB_LOG_ONE, "utf8");
+	await ageFile(webNew, 30);
+	const readA = await mHealth.readNewestCrash(crashA);
+	eq("crash: 认 web-boot 日志（旧代码只认 *-host.log）", readA.kind, "web-boot");
+	eq("crash: 点出没激活的入口", readA.failed.map((f) => f.plugin), ["dsh-web-research"]);
+	ok("crash: 摘要带 entry 数", String(readA.summary || "").includes("web boot: 1 entry"), readA.summary);
+	eq("crash: 另一类的新日志作为 sibling 带出", readA.sibling && readA.sibling.kind, "host");
+	const healthA = await inspectProfile({ profileDir: crashProfile, hostVersion: "0.2.1-rc.2", dataDir: dir("crashDataA"), crashDir: crashA, contract: false });
+	const findingA = healthA.findings.find((f) => f.code === "web-boot-recent");
+	ok("crash: web-boot 单独成条（不混进 crash-recent）", !!findingA && !healthA.findings.some((f) => f.code === "crash-recent"), healthA.findings.map((f) => f.code));
+	ok("crash: web-boot 条带处置步骤", Array.isArray(findingA && findingA.fix) && findingA.fix.length >= 2, findingA && findingA.fix);
+	ok("crash: web-boot 条说清「不是恢复对话框」", /不是恢复对话框/.test(findingA.plain || ""), findingA && findingA.plain);
+	ok("crash: web-boot 条 detail 带 sibling", /另：/.test(findingA.detail || ""), findingA && findingA.detail);
+	ok("crash: 摘要行认 web-boot", /前端入口没激活/.test(mHealth.describeCrash(healthA.info.crash)) && /dsh-web-research/.test(mHealth.describeCrash(healthA.info.crash)), mHealth.describeCrash(healthA.info.crash));
+
+	/* B：host 最新且不点名插件（本机真实形态）+ 六小时前的 web-boot */
+	const crashB = dir("crashB");
+	await mkdir(crashB, { recursive: true });
+	const hostNew = join(crashB, "crash-2026-10-23T11-20-00-000Z-host.log");
+	await writeFile(hostNew, HOST_LOG_AUTH, "utf8");
+	await ageFile(hostNew, 5);
+	const webOld = join(crashB, "crash-2026-10-23T06-29-57-186Z-web-boot.log");
+	await writeFile(webOld, WEB_LOG_ONE, "utf8");
+	await ageFile(webOld, 360);
+	const readB = await mHealth.readNewestCrash(crashB);
+	eq("crash: 取最新那份（host 比 web 新时认 host）", readB.kind, "host");
+	ok("crash: 认出登录态 cookie 签名", /cookie/.test((readB.signature && readB.signature.name) || ""), readB.signature);
+	eq("crash: sibling 记 web-boot", readB.sibling && readB.sibling.kind, "web-boot");
+	const healthB = await inspectProfile({ profileDir: crashProfile, hostVersion: "0.2.1-rc.2", dataDir: dir("crashDataB"), crashDir: crashB, contract: false });
+	const findingB = healthB.findings.find((f) => f.code === "crash-recent");
+	ok("crash: 不点名插件时不再谎称「点名了这些插件」", !/点名了这些插件/.test((findingB && findingB.plain) || ""), findingB && findingB.plain);
+	ok("crash: 无插件可归因时改成已知签名的大白话", /cookie/.test((findingB && findingB.plain) || ""), findingB && findingB.plain);
+	ok("crash: 标题带已知签名", /cookie/.test((findingB && findingB.title) || ""), findingB && findingB.title);
+	ok("crash: detail 直说没点名", /日志里没有点名失败插件/.test((findingB && findingB.detail) || ""), findingB && findingB.detail);
+	ok("crash: host 条也带 sibling", /另：/.test((findingB && findingB.detail) || ""), findingB && findingB.detail);
+
+	/* C：host 日志确实点名插件时，老文案（「点名了这些插件」）保持不变 */
+	const crashC = dir("crashC");
+	await mkdir(crashC, { recursive: true });
+	const hostNamed = join(crashC, "crash-2026-10-21T10-20-38-811Z-host.log");
+	await writeFile(hostNamed, [
+		"time: 2026-10-21T10:20:38.811Z",
+		"source: host",
+		"phase: startup",
+		"app: @deepseek-ai/dsh-desktop 0.2.1-rc.2",
+		"",
+		"--- error ---",
+		"Error: dsh: startup failed: required plugin did not activate",
+		"  dsh-fake-plugin",
+		"  Package: dsh-fake-plugin@1.0.0",
+		"  tool \"x\" must declare output { schema, render }"
+	].join("\n"), "utf8");
+	await ageFile(hostNamed, 20);
+	const readC = await mHealth.readNewestCrash(crashC);
+	eq("crash: 老格式仍能点出插件名", readC.failed.map((f) => f.plugin), ["dsh-fake-plugin"]);
+	eq("crash: 老格式能读出包名", readC.failed[0] && readC.failed[0].package, "dsh-fake-plugin@1.0.0");
+	eq("crash: 没有 sibling 时不硬塞", readC.sibling, null);
+	const findingC = (await inspectProfile({ profileDir: crashProfile, hostVersion: "0.2.1-rc.2", dataDir: dir("crashDataC"), crashDir: crashC, contract: false })).findings.find((f) => f.code === "crash-recent");
+	ok("crash: 真点名时保留「点名了这些插件」文案", /点名了这些插件/.test((findingC && findingC.plain) || ""), findingC && findingC.plain);
+	ok("crash: 真点名时 fix 指向点名的插件", /点名的插件/.test(((findingC && findingC.fix && findingC.fix[0] && findingC.fix[0].text) || "")), findingC && findingC.fix);
+
+	/* D：链式失败的长错误行要被压成「哪个包没起来」，renderer 里的 JS 异常要单独拎出来 */
+	const crashD = dir("crashD");
+	await mkdir(crashD, { recursive: true });
+	const webLong = join(crashD, "crash-2026-10-23T06-29-57-186Z-web-boot.log");
+	await writeFile(webLong, [
+		"time: 2026-10-23T06:29:57.186Z",
+		"source: web-boot",
+		"phase: running",
+		"app: @deepseek-ai/dsh-desktop 0.2.1-rc.2",
+		"",
+		"--- error ---",
+		"Error: web boot: 2 entries did not activate",
+		"dsh-our-free-model: import failed (see console for the import error)",
+		"dsh-web-research: import failed: client-modules: could not load \"dsh-web-research\": plugins/??a/client.js,plugins/??b/client.js; plugins/??dsh-web-research/client.js&rev=5e75a1e4f075: client-modules: bundle script plugins/??dsh-web-research/client.js&rev=5e75a1e4f075 failed to load",
+		"",
+		"--- renderer console (error level, oldest first) ---",
+		"dsh-app://app/plugins/??dsh-web-research/client.js&rev=abc123:12 ReferenceError: foo is not defined"
+	].join("\n"), "utf8");
+	await ageFile(webLong, 8);
+	const readD = await mHealth.readNewestCrash(crashD);
+	eq("crash: 两个入口都点出来", readD.failed.map((f) => f.plugin).sort(), ["dsh-our-free-model", "dsh-web-research"]);
+	const longErr = (readD.failed.find((f) => f.plugin === "dsh-web-research") || {}).error || "";
+	ok("crash: 长错误压成包名", /client 包加载失败/.test(longErr) && /dsh-web-research\/client.js/.test(longErr), longErr);
+	ok("crash: 压完不再是一整屏", longErr.length <= 80, longErr.length);
+	ok("crash: renderer 里的真实异常单独拎出", /^ReferenceError: foo is not defined$/.test(readD.console[0] || ""), readD.console);
+	const findingD = (await inspectProfile({ profileDir: crashProfile, hostVersion: "0.2.1-rc.2", dataDir: dir("crashDataD"), crashDir: crashD, contract: false })).findings.find((f) => f.code === "web-boot-recent");
+	ok("crash: 打包失败走「重装 client 包」那条处置", /client 包/.test(((findingD && findingD.fix && findingD.fix[0] && findingD.fix[0].text) || "")), findingD && findingD.fix);
+
 	/* ⑦ 快照与回滚 */
 	const profileRoot = dir("profileRoot");
 	await mkdir(profileRoot, { recursive: true });
