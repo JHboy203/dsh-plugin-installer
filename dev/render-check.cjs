@@ -175,7 +175,7 @@ function textOf(node, acc) {
  * 正常不执行，所以**数源码不等于数断言**（实测 103 处、只跑 80 条）。真正的判据只能是
  * 「这次实际跑了几条」，所以由脚本自己报总数、并由自己比对。
  */
-const EXPECTED_TOTAL = 113;
+const EXPECTED_TOTAL = 115;
 
 let failed = 0;
 let passed = 0;
@@ -765,6 +765,32 @@ if (typeof t.Skills === "function") {
 		check("已装 Skill：确认时说清「先备份原文、不删内容」", skillFixConfirm.includes("先备份原文") && skillFixConfirm.includes("不删任何内容"), skillFixConfirm.slice(0, 400));
 	} catch (e) {
 		check("已装 Skill：修复确认态渲染不抛异常", false, String((e && e.message) || e));
+	}
+
+	/* ②d R21：不可自动改写的 YAML 错误（Tab 缩进 / 重复键 / 引号没闭合）——
+	   只给「改法」，**不给**「修成块标量…」按钮（按了也不会好，比不给更糟） */
+	t.store.local = {
+		skills: {
+			...skillsFixture,
+			items: [skillItem({ dir: "iota", name: "iota", hostVisible: false, modelInvocable: null, description: null,
+				yamlIssue: { code: "tab-indent", kind: "tab-indent", fixable: false, key: null, line: 3,
+					message: "第 3 行的缩进里有 Tab", fix: "把缩进里的 Tab 换成两个空格" } })],
+			counts: { ...skillsFixture.counts, dirs: 1, skills: 1, valid: 0, backups: 0, yamlBroken: 1, invalid: 0,
+				duplicates: 0, duplicateDirs: 0, notVisible: 1, hostVisible: 0, modelInvisible: 0, byPanel: 0 },
+			yamlBroken: [{ dir: "iota", code: "tab-indent", message: "第 3 行的缩进里有 Tab", fix: "把缩进里的 Tab 换成两个空格" }],
+			duplicates: [], notVisible: [{ dir: "iota", name: "iota" }], invalid: [], modelInvisible: [],
+			summary: "1 个技能 · 宿主认 0 个 · 1 个 frontmatter 写坏了（宿主读不了）"
+		}
+	};
+	resetHooks();
+	hooks[2] = true;
+	let skillNonFix = "";
+	try {
+		skillNonFix = textOf(t.Skills({})).join(" | ");
+		check("已装 Skill：不可自动改写的 YAML 错误也给改法", skillNonFix.includes("把缩进里的 Tab 换成两个空格"), skillNonFix.slice(0, 400));
+		check("已装 Skill：不可自动改写的问题不显示「修成块标量…」", !skillNonFix.includes("修成块标量…"), skillNonFix.slice(0, 400));
+	} catch (e) {
+		check("已装 Skill：不可改写态渲染不抛异常", false, String((e && e.message) || e));
 	}
 
 	/* ③ 读不到 / 空 / 宿主对账不了 三种兜底 */

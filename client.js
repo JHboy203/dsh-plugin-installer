@@ -23,7 +23,7 @@ window.__ModuleLoader__.load({
 		/* 客户端 build 号（R5.1）：改 client.js 就提一位。
 		   client 会热重载、但没人保证「当前页面跑的是哪一版」—— 这个号随 client-state
 		   一起上报，宿主 /health 的 clientReport.build 就是答案（宿主侧另有 mtime 标签）。 */
-		const BUILD = "r16.0";
+		const BUILD = "r21.0";
 
 		/* ── 迷你 store（模块级，面板关着时图标也在用）──────────────────── */
 
@@ -1618,8 +1618,9 @@ window.__ModuleLoader__.load({
 							row.yamlIssue
 								? h("div", { className: "dpi-detail" }, "改法：" + row.yamlIssue.fix)
 								: null,
-							/* R16：frontmatter 写坏的行给一个「就地修」入口（两段式，先备份原文） */
-							row.yamlIssue
+							/* R16：frontmatter 写坏的行给一个「就地修」入口（两段式，先备份原文）。
+							   R21：只对 fixable 的（`: `/` #`）给 —— Tab 缩进/重复键/引号没闭合改写救不了。 */
+							row.yamlIssue && row.yamlIssue.fixable !== false
 								? fixing === row.dir
 									? h("div", { className: "dpi-actions dpi-actions-tight" },
 										h("span", { className: "dpi-muted" }, "先备份原文，再把这一行改成块标量（不删任何内容）"),

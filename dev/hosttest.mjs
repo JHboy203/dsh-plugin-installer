@@ -1765,7 +1765,9 @@ async function main() {
 	const hotkeyPipelineSrc = await readFile(join(pluginRoot, "lib", "pipeline.js"), "utf8");
 	ok("hotkey: 宿主 doctor(apply) 也有自己的并发闸", hotkeyPipelineSrc.includes("apply && this._running"));
 	ok("hotkey: 两条路都会把 busy 翻译成人话", clientSrc.includes('report.busy') && clientSrc.includes("先别动环境"));
-	ok("client: build 号已随本轮改动提到 r10（每改一次 client.js 提一位）", /BUILD\s*=\s*"r(?:9|1\d)\./.test(clientSrc), clientSrc.match(/BUILD\s*=\s*"[^"]+"/));
+	/* 别再写死「r10/r1x」—— R21 把 BUILD 提到 r21.0 时旧正则直接误报；判据改成「大版本号单调前进」 */
+	const clientBuildMatch = /BUILD\s*=\s*"r(\d+)\.(\d+)"/.exec(clientSrc);
+	ok("client: build 号已随本轮改动前进（每改一次 client.js 提一位）", !!clientBuildMatch && Number(clientBuildMatch[1]) >= 21, clientSrc.match(/BUILD\s*=\s*"[^"]+"/));
 
 	/* ⑫ 7z / rar：外包给系统 bsdtar，解完再按**实际落盘**的东西复核围栏。
 	   注意：这一组要 spawn 子进程，只有宿主进程里跑得动（沙箱里 spawn 会 EPERM）。 */
@@ -2264,6 +2266,20 @@ async function main() {
 	eq("skill: 块标量里的冒号合法", yamlFrontmatterIssue("description: >\n  覆盖：A。Triggers: x"), null);
 	eq("skill: 正常的单行描述没有 YAML 错误", yamlFrontmatterIssue("description: 一句话描述"), null);
 	eq("skill: 解析结果带上 yamlIssue", parseSkillFrontmatter("---\nname: a\n" + yamlBad + "\n---\n").yamlIssue.code, "colon-space");
+
+	/* R21：另外三类「同样整段解析失败、以前完全没看见」的硬错误 */
+	const tabIssue = yamlFrontmatterIssue("name: a\ndescription: >\n\t缩进用了 Tab");
+	ok("skill: 认出 Tab 缩进（YAML 只认空格）", tabIssue && tabIssue.code === "tab-indent" && tabIssue.fixable === false, tabIssue);
+	const dupIssue = yamlFrontmatterIssue("name: a\nname: b");
+	ok("skill: 认出重复键", dupIssue && dupIssue.code === "duplicate-key" && dupIssue.fixable === false, dupIssue);
+	const quoteIssue = yamlFrontmatterIssue('description: "没闭合');
+	ok("skill: 认出引号没闭合", quoteIssue && quoteIssue.code === "unclosed-quote" && quoteIssue.fixable === false, quoteIssue);
+	eq("skill: 两端都闭合的引号不报", yamlFrontmatterIssue('description: "完整的两端"'), null);
+	eq("skill: 两种老判据标成可自动改写", yamlFrontmatterIssue(yamlBad).fixable, true);
+	eq("skill: 闭合引号后面跟注释是合法的（不误报）", yamlFrontmatterIssue('description: "完整" # 注释'), null);
+	eq("skill: 块标量正文里的 Tab 是内容（不误报）", yamlFrontmatterIssue("description: |\n  line1\n  \tline2"), null);
+	const refuseTab = rewriteSkillFrontmatter("---\nname: a\ndescription: >\n\t缩进用了 Tab\n---\n");
+	ok("skill fix: Tab 缩进直接拒绝并说清原因", refuseTab.ok === false && /不能自动改写/.test(refuseTab.reason) && /Tab/.test(refuseTab.reason), refuseTab);
 
 	const hostList = [
 		{ name: "alpha", source: "user-dsh", invocation: { modelInvocable: true, userInvocable: true }, provider: "filesystem" },
