@@ -589,6 +589,12 @@ async function main() {
 	await mkdir(join(crashProfile, "node_modules"), { recursive: true });
 	await writeFile(join(crashProfile, "package.json"), JSON.stringify({
 		name: "crash-fixture",
+		dependencies: {
+			"dsh-web-research": "link:D:\\AI\\dsh-web-research",
+			"dsh-our-free-model": "^0.5.0",
+			"dsh-vendor-x": "file:data/vendor/dsh-vendor-x-1.0.0.tgz",
+			"dsh-git-x": "github:someone/dsh-git-x"
+		},
 		dsh: { profile: { bundles: ["@deepseek-ai/dsh-base"] } }
 	}), "utf8");
 	const HOST_LOG_AUTH = [
@@ -722,7 +728,7 @@ async function main() {
 	ok("crash: 压完不再是一整屏", longErr.length <= 80, longErr.length);
 	ok("crash: renderer 里的真实异常单独拎出", /^ReferenceError: foo is not defined$/.test(readD.console[0] || ""), readD.console);
 	const findingD = (await inspectProfile({ profileDir: crashProfile, hostVersion: "0.2.1-rc.2", dataDir: dir("crashDataD"), crashDir: crashD, contract: false, processStartedAt: nowMs - 3 * 3600000 })).findings.find((f) => f.code === "web-boot-recent");
-	ok("crash: 打包失败走「重装 client 包」那条处置", /client 包/.test(((findingD && findingD.fix && findingD.fix[0] && findingD.fix[0].text) || "")), findingD && findingD.fix);
+	ok("crash: 打包失败走「重装 client 包」那条处置", findingD.fix.some((x) => /client 包/.test(x.text)), findingD && findingD.fix);
 
 	/* E：web-boot 失败发生在「上一次启动」，本次启动之后没有新日志 → 只算留痕（warn） */
 	const crashE = dir("crashE");
@@ -766,6 +772,100 @@ async function main() {
 	ok("crash: stale host 标题说「上一次启动失败」", /^上一次启动失败/.test((findingF && findingF.title) || ""), findingF && findingF.title);
 	ok("crash: stale host detail 说之后已正常启动", /已正常/.test((findingF && findingF.detail) || ""), findingF && findingF.detail);
 	ok("crash: stale host 摘要标注「之后已正常启动」", /之后已正常启动/.test(mHealth.describeCrash(healthF.info.crash)), mHealth.describeCrash(healthF.info.crash));
+
+	/* G：点名插件的「来源」要写成可执行的这一步（link: 没有重装按钮；npm / .tgz / git 各不同） */
+	const crashG = dir("crashG");
+	await mkdir(crashG, { recursive: true });
+	const webSources = join(crashG, "crash-2026-10-24T00-00-00-000Z-web-boot.log");
+	await writeFile(webSources, [
+		"time: 2026-10-24T00:00:00.000Z",
+		"source: web-boot",
+		"phase: running",
+		"app: @deepseek-ai/dsh-desktop 0.2.1-rc.2",
+		"",
+		"--- error ---",
+		"Error: web boot: 4 entries did not activate",
+		"dsh-web-research: import failed (see console for the import error)",
+		"dsh-our-free-model: import failed (see console for the import error)",
+		"dsh-vendor-x: import failed: bundle script plugins/??dsh-vendor-x/client.js failed to load",
+		"dsh-git-x: import failed (see console for the import error)"
+	].join("\n"), "utf8");
+	await ageFile(webSources, 3);
+	const findingG = (await inspectProfile({ profileDir: crashProfile, hostVersion: "0.2.1-rc.2", dataDir: dir("crashDataG"), crashDir: crashG, contract: false, processStartedAt: nowMs - 3 * 3600000 })).findings.find((f) => f.code === "web-boot-recent");
+	ok("crash: link: 来源说清「没有重装按钮、要去目录重建」", findingG.fix.some((x) => /本机目录/.test(x.text) && /dsh-web-research/.test(x.text) && /client\.js/.test(x.text)), findingG.fix);
+	ok("crash: npm 来源指向「已装插件」重装", findingG.fix.some((x) => /npm/.test(x.text) && /dsh-our-free-model/.test(x.text)), findingG.fix);
+
+	const crashG2 = dir("crashG2");
+	await mkdir(crashG2, { recursive: true });
+	const webVendor = join(crashG2, "crash-2026-10-24T00-01-00-000Z-web-boot.log");
+	await writeFile(webVendor, [
+		"time: 2026-10-24T00:01:00.000Z",
+		"source: web-boot",
+		"phase: running",
+		"app: @deepseek-ai/dsh-desktop 0.2.1-rc.2",
+		"",
+		"--- error ---",
+		"Error: web boot: 2 entries did not activate",
+		"dsh-vendor-x: import failed: bundle script plugins/??dsh-vendor-x/client.js failed to load",
+		"dsh-git-x: import failed (see console for the import error)"
+	].join("\n"), "utf8");
+	await ageFile(webVendor, 4);
+	const findingG2 = (await inspectProfile({ profileDir: crashProfile, hostVersion: "0.2.1-rc.2", dataDir: dir("crashDataG2"), crashDir: crashG2, contract: false, processStartedAt: nowMs - 3 * 3600000 })).findings.find((f) => f.code === "web-boot-recent");
+	ok("crash: .tgz 来源说「重新提交一份新包」", findingG2.fix.some((x) => /\.tgz/.test(x.text) && /重新提交/.test(x.text)), findingG2.fix);
+	ok("crash: Git 来源指向重装/重新提交", findingG2.fix.some((x) => /Git 仓库/.test(x.text) && /dsh-git-x/.test(x.text)), findingG2.fix);
+
+	const crashG3 = dir("crashG3");
+	await mkdir(crashG3, { recursive: true });
+	const webGhost = join(crashG3, "crash-2026-10-24T00-02-00-000Z-web-boot.log");
+	await writeFile(webGhost, [
+		"time: 2026-10-24T00:02:00.000Z",
+		"source: web-boot",
+		"phase: running",
+		"app: @deepseek-ai/dsh-desktop 0.2.1-rc.2",
+		"",
+		"--- error ---",
+		"Error: web boot: 1 entry did not activate",
+		"dsh-ghost: import failed (see console for the import error)"
+	].join("\n"), "utf8");
+	await ageFile(webGhost, 5);
+	const findingG3 = (await inspectProfile({ profileDir: crashProfile, hostVersion: "0.2.1-rc.2", dataDir: dir("crashDataG3"), crashDir: crashG3, contract: false, processStartedAt: nowMs - 3 * 3600000 })).findings.find((f) => f.code === "web-boot-recent");
+	ok("crash: 来源判不出时不编（不硬塞来源行）", !findingG3.fix.some((x) => /来自本机目录|来自 npm|\.tgz|Git 仓库/.test(x.text)), findingG3.fix);
+
+	/* H：两张新签名（服务就绪前的 prepare / 返回值不是无损 JSON） */
+	const crashH = dir("crashH");
+	await mkdir(crashH, { recursive: true });
+	const hostPrepare = join(crashH, "crash-2026-10-24T00-03-00-000Z-host.log");
+	await writeFile(hostPrepare, [
+		"time: 2026-10-24T00:03:00.000Z",
+		"source: host",
+		"phase: startup",
+		"app: @deepseek-ai/dsh-desktop 0.2.1-rc.2",
+		"",
+		"--- error ---",
+		"Error: dsh: startup failed: required plugin did not activate",
+		"  dsh-broken-plugin",
+		"  Package: dsh-broken-plugin@1.0.0",
+		"  TypeError: Cannot read properties of undefined (reading 'prepare')"
+	].join("\n"), "utf8");
+	await ageFile(hostPrepare, 6);
+	const readH = await mHealth.readNewestCrash(crashH);
+	ok("crash: 认出「服务就绪前访问 prepare」签名", /prepare/.test((readH.signature && readH.signature.name) || ""), readH.signature);
+	ok("crash: prepare 签名说清「服务还没准备好」", /服务还没准备好/.test((readH.signature && readH.signature.plain) || ""), readH.signature && readH.signature.plain);
+
+	const hostLossless = join(crashH, "crash-2026-10-24T00-04-00-000Z-host.log");
+	await writeFile(hostLossless, [
+		"time: 2026-10-24T00:04:00.000Z",
+		"source: host",
+		"phase: startup",
+		"app: @deepseek-ai/dsh-desktop 0.2.1-rc.2",
+		"",
+		"--- error ---",
+		"Error: value is not lossless JSON"
+	].join("\n"), "utf8");
+	await ageFile(hostLossless, 2);
+	const readH2 = await mHealth.readNewestCrash(crashH);
+	ok("crash: 认出「返回值不是无损 JSON」签名", /无损 JSON/.test((readH2.signature && readH2.signature.name) || ""), readH2.signature);
+	ok("crash: 无损 JSON 签名说清是返回值不合法", /返回了 undefined/.test((readH2.signature && readH2.signature.plain) || ""), readH2.signature && readH2.signature.plain);
 
 	/* ⑦ 快照与回滚 */
 	const profileRoot = dir("profileRoot");
