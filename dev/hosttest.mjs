@@ -641,8 +641,9 @@ async function main() {
 	eq("crash: 点出没激活的入口", readA.failed.map((f) => f.plugin), ["dsh-web-research"]);
 	ok("crash: 摘要带 entry 数", String(readA.summary || "").includes("web boot: 1 entry"), readA.summary);
 	eq("crash: 另一类的新日志作为 sibling 带出", readA.sibling && readA.sibling.kind, "host");
-	const healthA = await inspectProfile({ profileDir: crashProfile, hostVersion: "0.2.1-rc.2", dataDir: dir("crashDataA"), crashDir: crashA, contract: false });
+	const healthA = await inspectProfile({ profileDir: crashProfile, hostVersion: "0.2.1-rc.2", dataDir: dir("crashDataA"), crashDir: crashA, contract: false, processStartedAt: nowMs - 3 * 3600000 });
 	const findingA = healthA.findings.find((f) => f.code === "web-boot-recent");
+	eq("crash: 本次启动内的失败仍是 error", findingA && findingA.severity, "error");
 	ok("crash: web-boot 单独成条（不混进 crash-recent）", !!findingA && !healthA.findings.some((f) => f.code === "crash-recent"), healthA.findings.map((f) => f.code));
 	ok("crash: web-boot 条带处置步骤", Array.isArray(findingA && findingA.fix) && findingA.fix.length >= 2, findingA && findingA.fix);
 	ok("crash: web-boot 条说清「不是恢复对话框」", /不是恢复对话框/.test(findingA.plain || ""), findingA && findingA.plain);
@@ -662,7 +663,7 @@ async function main() {
 	eq("crash: 取最新那份（host 比 web 新时认 host）", readB.kind, "host");
 	ok("crash: 认出登录态 cookie 签名", /cookie/.test((readB.signature && readB.signature.name) || ""), readB.signature);
 	eq("crash: sibling 记 web-boot", readB.sibling && readB.sibling.kind, "web-boot");
-	const healthB = await inspectProfile({ profileDir: crashProfile, hostVersion: "0.2.1-rc.2", dataDir: dir("crashDataB"), crashDir: crashB, contract: false });
+	const healthB = await inspectProfile({ profileDir: crashProfile, hostVersion: "0.2.1-rc.2", dataDir: dir("crashDataB"), crashDir: crashB, contract: false, processStartedAt: nowMs - 3 * 3600000 });
 	const findingB = healthB.findings.find((f) => f.code === "crash-recent");
 	ok("crash: 不点名插件时不再谎称「点名了这些插件」", !/点名了这些插件/.test((findingB && findingB.plain) || ""), findingB && findingB.plain);
 	ok("crash: 无插件可归因时改成已知签名的大白话", /cookie/.test((findingB && findingB.plain) || ""), findingB && findingB.plain);
@@ -691,7 +692,7 @@ async function main() {
 	eq("crash: 老格式仍能点出插件名", readC.failed.map((f) => f.plugin), ["dsh-fake-plugin"]);
 	eq("crash: 老格式能读出包名", readC.failed[0] && readC.failed[0].package, "dsh-fake-plugin@1.0.0");
 	eq("crash: 没有 sibling 时不硬塞", readC.sibling, null);
-	const findingC = (await inspectProfile({ profileDir: crashProfile, hostVersion: "0.2.1-rc.2", dataDir: dir("crashDataC"), crashDir: crashC, contract: false })).findings.find((f) => f.code === "crash-recent");
+	const findingC = (await inspectProfile({ profileDir: crashProfile, hostVersion: "0.2.1-rc.2", dataDir: dir("crashDataC"), crashDir: crashC, contract: false, processStartedAt: nowMs - 3 * 3600000 })).findings.find((f) => f.code === "crash-recent");
 	ok("crash: 真点名时保留「点名了这些插件」文案", /点名了这些插件/.test((findingC && findingC.plain) || ""), findingC && findingC.plain);
 	ok("crash: 真点名时 fix 指向点名的插件", /点名的插件/.test(((findingC && findingC.fix && findingC.fix[0] && findingC.fix[0].text) || "")), findingC && findingC.fix);
 
@@ -720,8 +721,51 @@ async function main() {
 	ok("crash: 长错误压成包名", /client 包加载失败/.test(longErr) && /dsh-web-research\/client.js/.test(longErr), longErr);
 	ok("crash: 压完不再是一整屏", longErr.length <= 80, longErr.length);
 	ok("crash: renderer 里的真实异常单独拎出", /^ReferenceError: foo is not defined$/.test(readD.console[0] || ""), readD.console);
-	const findingD = (await inspectProfile({ profileDir: crashProfile, hostVersion: "0.2.1-rc.2", dataDir: dir("crashDataD"), crashDir: crashD, contract: false })).findings.find((f) => f.code === "web-boot-recent");
+	const findingD = (await inspectProfile({ profileDir: crashProfile, hostVersion: "0.2.1-rc.2", dataDir: dir("crashDataD"), crashDir: crashD, contract: false, processStartedAt: nowMs - 3 * 3600000 })).findings.find((f) => f.code === "web-boot-recent");
 	ok("crash: 打包失败走「重装 client 包」那条处置", /client 包/.test(((findingD && findingD.fix && findingD.fix[0] && findingD.fix[0].text) || "")), findingD && findingD.fix);
+
+	/* E：web-boot 失败发生在「上一次启动」，本次启动之后没有新日志 → 只算留痕（warn） */
+	const crashE = dir("crashE");
+	await mkdir(crashE, { recursive: true });
+	const webStale = join(crashE, "crash-2026-10-23T11-03-56-144Z-web-boot.log");
+	await writeFile(webStale, WEB_LOG_ONE, "utf8");
+	await ageFile(webStale, 30);
+	const healthE = await inspectProfile({
+		profileDir: crashProfile,
+		hostVersion: "0.2.1-rc.2",
+		dataDir: dir("crashDataE"),
+		crashDir: crashE,
+		contract: false,
+		processStartedAt: nowMs - 10 * 60000
+	});
+	const findingE = healthE.findings.find((f) => f.code === "web-boot-recent");
+	eq("crash: 早于本次启动的日志标成 stale", healthE.info.crash.stale, true);
+	eq("crash: stale 的 web-boot 降为 warn", findingE && findingE.severity, "warn");
+	ok("crash: stale 标题说「上一次启动」", /^上一次启动/.test((findingE && findingE.title) || ""), findingE && findingE.title);
+	ok("crash: stale detail 说本次没再失败", /本次启动（\d\d:\d\d:\d\d）之后没有新的失败日志/.test((findingE && findingE.detail) || ""), findingE && findingE.detail);
+	ok("crash: stale 第一条处置是「先确认在不在」", /先确认/.test(((findingE && findingE.fix && findingE.fix[0] && findingE.fix[0].text) || "")), findingE && findingE.fix);
+	ok("crash: stale 也保留原处置（不是只让确认）", !!findingE && findingE.fix.length >= 3, findingE && findingE.fix.length);
+	ok("crash: 摘要行标注「本次未复现」", /本次未复现/.test(mHealth.describeCrash(healthE.info.crash)), mHealth.describeCrash(healthE.info.crash));
+
+	/* F：host 崩溃发生在「上一次启动」→ warn，且说清之后已正常启动 */
+	const crashF = dir("crashF");
+	await mkdir(crashF, { recursive: true });
+	const hostStale = join(crashF, "crash-2026-10-23T05-36-57-278Z-host.log");
+	await writeFile(hostStale, HOST_LOG_AUTH, "utf8");
+	await ageFile(hostStale, 120);
+	const healthF = await inspectProfile({
+		profileDir: crashProfile,
+		hostVersion: "0.2.1-rc.2",
+		dataDir: dir("crashDataF"),
+		crashDir: crashF,
+		contract: false,
+		processStartedAt: nowMs - 5 * 60000
+	});
+	const findingF = healthF.findings.find((f) => f.code === "crash-recent");
+	eq("crash: stale 的 host 崩溃降为 warn", findingF && findingF.severity, "warn");
+	ok("crash: stale host 标题说「上一次启动失败」", /^上一次启动失败/.test((findingF && findingF.title) || ""), findingF && findingF.title);
+	ok("crash: stale host detail 说之后已正常启动", /已正常/.test((findingF && findingF.detail) || ""), findingF && findingF.detail);
+	ok("crash: stale host 摘要标注「之后已正常启动」", /之后已正常启动/.test(mHealth.describeCrash(healthF.info.crash)), mHealth.describeCrash(healthF.info.crash));
 
 	/* ⑦ 快照与回滚 */
 	const profileRoot = dir("profileRoot");
