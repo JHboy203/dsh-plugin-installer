@@ -127,7 +127,7 @@
 > **构建标记格式**（`0.1.0 · YYYY-MM-DD HH:MM`，且 `/health` 不许写死）/ 客户端设置与热键入口 /
 > `settings.json` 归一化后逐字不变 / 等待确认任务的 staging 现场还在 / README 与交接文件里的
 > 断言数是否等于 `EXPECTED_ASSERTIONS`。**不碰宿主、不 spawn、不写盘**，只打印
-> 「接着跑 host_selfcheck（666）+ render-check（108）」。自洽检查现已 **101 项**。
+> 「接着跑 host_selfcheck（666）+ render-check（113）」。自洽检查现已 **101 项**。
 > 三层分工至此固定：**audit = 自洽，host_selfcheck = 行为，render-check = 界面**。
 > 线上实测：构建标签 `0.1.0 · 2026-10-20 19:45`、客户端 `r6.0`、`GET/POST /settings` 正常
 > （非法值当场夹取回默认）、`clientReport` 里有 360×658 的窄屏实例。
@@ -406,6 +406,29 @@
 >
 > 断言：hosttest **657 → 666**（+9：来源四类 5、新签名 4），render **108 → 108**，audit **101 → 101**。
 
+> **R20（2026-10-24 00:3x）窄屏（360×658）真量了一遍，并把它钉成文本契约**：
+>
+> 交接文件里一直挂着「没在真机上看过设置面板与二次确认的布局」。这轮在**运行中的 GUI** 里把
+> 面板临时压到 360px，逐个量溢出（不是看截图，量的是 `getBoundingClientRect` 与 `scrollWidth`）：
+>
+> | 表面 | 结果 |
+> |---|---|
+> | 主面板（8 张卡） | 宽 360 / 内容 311 / `scrollWidth` 355 / **0 处越界** |
+> | 设置面板（12 行 / 5 段，压到 360×634） | `scrollWidth` 354、`scrollHeight` 1375 内部滚动 / **0 处越界** |
+> | 已装 Skill 展开（55 行） | 卡宽 311 / `scrollWidth` 310 / **0 处越界** |
+>
+> 布局本身是好的（`min(620px,100%)`、`flex-wrap`、`min-width:0`、760px 媒体查询都在），
+> 缺的是**没人再量**。所以加 5 条**文本契约**到无头渲染自检：
+>
+> 1. CSS 能被提取（提取失败 → 这组检查静默失效，是最坏的假绿）；
+> 2. 存在 `@media (max-width:760px)`；
+> 3. 媒体查询里确实收紧了 `.dpi-panel` 的内边距；
+> 4. `.dpi-settings` 宽度流体（`min(...)`/`100%`）+ 可内部滚动 + 有 `max-height`；
+> 5. **不许出现 >320px 的固定宽度**（360 宽下必溢出，这条专拦以后有人加 `width:520px`）。
+>
+> 断言：render **108 → 113**（+5），hosttest **666 → 666**，audit **101 → 101**。
+> 顺带把「窄屏真机验收」从 §7 待办移到**已量**（确认态需要夹具，仍未覆盖，见 §7）。
+
 | 项目 | 值 |
 |---|---|
 | 包名 | `dsh-plugin-installer` |
@@ -557,7 +580,7 @@ node DSH-Plugin/dsh-plugin-installer/dev/audit.mjs
 #   已知签名、长错误压成包名、renderer 真实异常））
 host_selfcheck({ plugin: "dsh-plugin-installer" })
 
-# ③ 无头渲染自检（微型 React 真的渲染一遍；108 项：诊断卡 / 预检卡 / 审查卡 / 设置面板 /
+# ③ 无头渲染自检（微型 React 真的渲染一遍；113 项：诊断卡 / 预检卡 / 审查卡 / 设置面板 /
 #   跳过审核按钮 / 安装脚本批准卡（默认态 + 二次确认态）/ 版本不兼容卡（三态 + 旧豁免失效）/
 #   已装清单（折叠态 / 展开态 / 可升级按钮 / 读不到 / 空 profile）/
 #   已装 Skill（折叠态 / 展开态 / 三种标签 / 读不到 / 空根 / 对账不了））
@@ -612,7 +635,7 @@ DSH 每次启动换随机端口（`dsh-desktop-host` 里写死 `--port 0`），�
 
 | 场景 | 结果 |
 |---|---|
-| 确定性自检 | **666/666 通过**（`dev/hosttest.mjs`，含 zip/tar 构造、穿越与软链接拒绝、比例炸弹、5 种识别分支、快照还原、重打包往返、prune 引用保护、地雷处置、契约扫描、profile 体检与修复、设置归一化、审核三档、热键、pnpm 失败分诊、allowBuilds 解析、批准重装与三道闸、落盘串行、版本豁免读写与回读确认、兼容降级口径、预检「已授权不再阻断」回归、staging 生命周期、环境注意、运行中代码指纹、已装清单四类来源、registry 比对与缓存、npm: 前缀、**inject 六种写法与边界、激活失败分诊、fiberPhase 判据、SKILL.md 三种 frontmatter 形态、YAML 硬错误判据、技能备份识别与磁盘×宿主对账、指纹两栏（宿主/客户端）、备份处置的越权拒绝与真实搬运、frontmatter 改写的三道自检与真实修复、崩溃分诊两类日志与已知签名、崩溃结论的新鲜度（stale）、崩溃处置的来源判据（link:/tgz/git/npm）与两张新签名（prepare / lossless JSON）**）；另 **108 项**无头渲染 + **101 项**自洽体检 |
+| 确定性自检 | **666/666 通过**（`dev/hosttest.mjs`，含 zip/tar 构造、穿越与软链接拒绝、比例炸弹、5 种识别分支、快照还原、重打包往返、prune 引用保护、地雷处置、契约扫描、profile 体检与修复、设置归一化、审核三档、热键、pnpm 失败分诊、allowBuilds 解析、批准重装与三道闸、落盘串行、版本豁免读写与回读确认、兼容降级口径、预检「已授权不再阻断」回归、staging 生命周期、环境注意、运行中代码指纹、已装清单四类来源、registry 比对与缓存、npm: 前缀、**inject 六种写法与边界、激活失败分诊、fiberPhase 判据、SKILL.md 三种 frontmatter 形态、YAML 硬错误判据、技能备份识别与磁盘×宿主对账、指纹两栏（宿主/客户端）、备份处置的越权拒绝与真实搬运、frontmatter 改写的三道自检与真实修复、崩溃分诊两类日志与已知签名、崩溃结论的新鲜度（stale）、崩溃处置的来源判据（link:/tgz/git/npm）与两张新签名（prepare / lossless JSON）**）；另 **113 项**无头渲染 + **101 项**自洽体检 |
 | 已装 Skill（R14 实测，本机） | 技能根 `.dsh/skills` 下 **59 个目录 = 55 个技能 + 4 个备份残留**；上线第一分钟抓出 **3 个 frontmatter 不是合法 YAML** 的技能（`github-private-backup` / `win-desktop-automation` / `windows-disk-reclaim`，PyYAML 复核：`mapping values are not allowed here`）→ 宿主读不出 name、整条跳过；用 `.tools/fix-skill-frontmatter.py --apply`（写前备份、写后 PyYAML 复核）改成块标量后，宿主重扫即认到 —— **`hostVisible` 55/55、`yamlBroken` 0、`notVisible` 0**；`domain-modeling` / `grill-me` / `grill-with-docs` / `grilling` 各有一份 `.bak-mp20261017-1350` 同名备份（尚未清）；11 个技能的 description 是 `>` 折叠块，旧解析把它们读成「>」 |
 | 激活失败的真实样本（R13 实测） | `dsh-imgops` 两次任务：①宿主返回 `application:"failed" / stage:"enable" / diagnostic:"1 entry did not activate … cannot get property \"tools\" without inject"`（pnpm exit 0、包已落地）→ 新分诊判 `activation-failed`，标题点名缺 `tools`，处置给出 `export const inject = ['tools']`；② `already-installed` → 判 noop + 照常诊断。同机 4 个健康插件（本插件 / dsh-screenshot / dsh-diag / dsh-ops）静态扫描**零误报**（canvas 的 `ctx.fillRect` 不计入） |
 | 重装静默无效（R13 第二个 bug） | 修好 `dsh-imgops` 并升到 0.1.1 重新提交，宿主仍回 `already-installed`（实测 `changed:false`、`elapsedMs:11`、pnpm 没跑）—— 判据是依赖行的 spec 字符串，不含版本文件名就永远是同一个 spec。修法：`pkg-<名字>-<版本>.tgz` + 只收「没人引用的旧包」 |
@@ -676,7 +699,7 @@ dev/verify-r13.mjs       R13：端到端验收器（运行中代码 / 提交 / �
 lib/tools.js             五个宿主工具定义（含 output 契约）
 dev/hosttest.mjs         666 项确定性自检（宿主进程跑）
 dev/probe-crash.mjs      R17：不进宿主、只读真实崩溃日志，看分诊判据（改 lib 后立刻能验）
-dev/render-check.cjs     108 项无头渲染自检（诊断卡 / 预检卡 / 审查卡 / 设置面板 / 跳过审核 / 批准卡 / 兼容卡 / **已装清单 / 已装 Skill（含移出与修复确认态）**）
+dev/render-check.cjs     113 项无头渲染自检（诊断卡 / 预检卡 / 审查卡 / 设置面板 / 跳过审核 / 批准卡 / 兼容卡 / **已装清单 / 已装 Skill（含移出与修复确认态）/ 窄屏结构契约**）
 dev/audit.mjs            101 项自洽体检（不碰宿主；换会话先跑这个）
 dev/probe-inject.mjs     手动探针：拿本机真实插件验 inject 扫描会不会误报（R13）
 dev/quarantine-dshtools.mjs  手动兜底：把埋下的 dsh-tools 挪进备份（薄壳，复用 lib/landmine.js）

@@ -175,7 +175,7 @@ function textOf(node, acc) {
  * 正常不执行，所以**数源码不等于数断言**（实测 103 处、只跑 80 条）。真正的判据只能是
  * 「这次实际跑了几条」，所以由脚本自己报总数、并由自己比对。
  */
-const EXPECTED_TOTAL = 108;
+const EXPECTED_TOTAL = 113;
 
 let failed = 0;
 let passed = 0;
@@ -790,6 +790,24 @@ if (typeof t.Skills === "function") {
 } else {
 	check("__test 暴露了 Skills", false);
 }
+
+/* ── R20：窄屏结构契约（360×658）───────────────────────────────────────────
+ * 真机/离屏实测过（主面板 360、设置面板 360×634、已装 Skill 展开 55 行）都是 0 溢出，
+ * 但那次是「量出来的」，代码一改就没人再量。这里把它钉成文本契约：
+ * 宽度必须流体、必须有 760px 媒体查询、不许出现 >320px 的固定宽度。 */
+const cssStart = code.indexOf("const CSS = `");
+const cssEnd = cssStart >= 0 ? code.indexOf("\n`;", cssStart) : -1;
+const cssText = cssStart >= 0 && cssEnd > cssStart ? code.slice(cssStart + 12, cssEnd) : "";
+check("窄屏：能提取到插件的 CSS（提取失败则这组检查全失效）", cssText.length > 5000, cssText.length);
+const mediaIdx = cssText.search(/@media\s*\(max-width:\s*760px\)/);
+check("窄屏：有 760px 媒体查询（窄屏要靠它收边距/堆叠标题）", mediaIdx >= 0);
+check("窄屏：媒体查询里收紧了面板内边距", mediaIdx >= 0 && /\.dpi-panel\{[^}]*padding/.test(cssText.slice(mediaIdx)));
+check("窄屏：设置面板宽度流体 + 内部可滚动 + 有高度上限",
+	/\.dpi-settings\{[^}]*width:\s*(?:min\(|100%)/.test(cssText) &&
+	/\.dpi-settings\{[^}]*overflow:\s*auto/.test(cssText) &&
+	/\.dpi-settings\{[^}]*max-height:/.test(cssText));
+check("窄屏：没有超过 320px 的固定宽度（360 宽下必溢出）",
+	!/\.dpi-[\w-]+\{[^}]*\bwidth:\s*(?:3[3-9]\d|[4-9]\d\d|\d{4,})px/.test(cssText));
 
 /* 条数自对表：断言被删/被加都会在这里当场红（数源码不可靠，见 EXPECTED_TOTAL 的注释） */
 if (passed !== EXPECTED_TOTAL) {
