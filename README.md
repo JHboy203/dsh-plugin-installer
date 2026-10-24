@@ -455,6 +455,23 @@
 > `client.js` 的 BUILD 提到 **r21.0**（并顺手把「build 号必须匹配 r1x」的旧断言改成「大版本号单调前进」——
 > 旧正则在 r20 之后会误报）。
 
+> **R22（2026-10-24 01:0x）在运行中的宿主上把「修技能」整条链路真跑了一遍**（验证轮，无代码改动）：
+>
+> 交接文件里一直挂着两件「还没在真实宿主上验过」的事：R16 的「真修一个坏技能」与 R21 的「不可自动改写
+> 要拒绝」。这轮用两个临时技能夹具（`zz-r22-colon` / `zz-r22-tab`，验证完立即删除）在**运行中的宿主**
+> （01:02:50 加载、与磁盘一致）上跑通了整条链路：
+>
+> | 步骤 | 结果 |
+> |---|---|
+> | `GET /skills?refresh=1` | 识别出 `zz-r22-colon` → `colon-space` **`fixable:true`**；`zz-r22-tab` → `tab-indent` **`fixable:false`**（R21 新字段在跑） |
+> | `POST action:fix-skill-frontmatter {dir:"zz-r22-colon"}` | `ok:true`，`changes:[{key:"description",line:2,code:"colon-space"}]`，备份写入 `data/skill-fixes/2026-10-23T17-05-59/zz-r22-colon`；重扫后该行 `yamlIssue:null` |
+> | 宿主侧效果 | 修好后宿主**当场认了**这个技能（模型 skill catalog 里出现 `zz-r22-colon`）—— 不只是文件变了 |
+> | `POST … {dir:"zz-r22-tab"}` | `ok:false`，原文「这类问题不能自动改写（tab-indent）：把缩进里的 Tab 换成两个空格…」 |
+> | 清理 | 两个夹具目录 + 测试备份删除 → `GET /skills?refresh=1` 回到 **55 个技能 / 55 valid / yamlBroken 0**，catalog 里也不再出现夹具 |
+>
+> 结论：R16 的「先备份原文 → 原子写 → 三道自检 → 宿主重扫」与 R21 的「可修复性分流」在真实宿主上都成立。
+> 自检数字不变（674 / 115 / 101）。
+
 | 项目 | 值 |
 |---|---|
 | 包名 | `dsh-plugin-installer` |
