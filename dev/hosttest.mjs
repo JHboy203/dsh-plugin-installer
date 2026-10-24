@@ -38,7 +38,7 @@ import { backupVendorTarball, createSnapshot, fileSpecPath, restoreProfileFiles,
 import { buildReviewInput } from "../lib/ai.js";
 import { estimateReviewTokens, reviewWorthIt } from "../lib/ai.js";
 import { packPluginTarball } from "../lib/pack.js";
-import { stagingRefsFromManifest, stagingKeepNames, rollbackPlan, splitUpgradeTargets, Installer } from "../lib/pipeline.js";
+import { stagingRefsFromManifest, stagingKeepNames, rollbackPlan, splitUpgradeTargets, upgradeStalled, Installer } from "../lib/pipeline.js";
 import { buildStamp } from "../lib/hostinfo.js";
 import { normalizeNpmSpec } from "../lib/download.js";
 import {
@@ -1929,6 +1929,14 @@ async function main() {
 		split.risky.map((x) => [x.name, x.registryName, x.from, x.to, x.gap]),
 		[["dsh-ops", "@x/dsh-ops", "0.3.0", "0.4.1", "跨 1 个小版本"]]);
 	eq("split: 已是最新 / 没落地的不进任何一档", split.safe.length + split.risky.length, 2);
+
+	/* R26.3：宿主拒绝原地换版本 —— noop 不能当成功（本机 0.4.7→0.4.8 实测） */
+	eq("stalled: 目标是新版本但回 noop → 认成「升级没发生」",
+		upgradeStalled({ noop: true, previousVersion: "0.4.7", targetVersion: "0.4.8" }),
+		{ from: "0.4.7", to: "0.4.8", reason: "host-refuses-replace" });
+	eq("stalled: 同版本重装的 noop 是正常的", upgradeStalled({ noop: true, previousVersion: "0.4.8", targetVersion: "0.4.8" }), null);
+	eq("stalled: 全新安装没有 previousVersion 不算 stalled", upgradeStalled({ noop: true, previousVersion: null, targetVersion: "0.4.8" }), null);
+	eq("stalled: 真装成功不算 stalled", upgradeStalled({ noop: false, previousVersion: "0.4.7", targetVersion: "0.4.8" }), null);
 
 	/* 搜索源开关：关掉的源一个请求都不该发 */
 	const realFetch2 = globalThis.fetch;

@@ -45,7 +45,7 @@ export const FROZEN_DEFAULTS = {
 };
 
 /** 文档里声明的自检项数（改断言就先跑一次 host_selfcheck，再同步这个数）。 */
-export const EXPECTED_ASSERTIONS = 785;
+export const EXPECTED_ASSERTIONS = 789;
 
 /** 界面自检项数（dev/render-check.cjs）。同样是「文档对表」的一半。 */
 const EXPECTED_RENDER_ASSERTIONS = 127;
@@ -300,6 +300,11 @@ async function main() {
 		/export function splitUpgradeTargets/.test(pipelineSrc) &&
 		/includeRisky: body\.includeRisky === true/.test(indexSrc2) &&
 		clientSrc.includes("仍要一起升级"));
+	/* R26.3：本机实测「升级」回 already-installed —— noop 不能当成功 */
+	ok("升级停滞：目标版本不同却 noop 时报失败并清空队列（R26.3）",
+		/export function upgradeStalled/.test(pipelineSrc) &&
+		/job\.install\.stalled = stalled/.test(pipelineSrc) &&
+		/this\._queue = \[\]/.test(pipelineSrc));
 	/* R26.2：inject 扫描的两处误判修正 */
 	const injectSrc = (await readText("lib/inject.js")) || "";
 	ok("inject 扫描：timer 方法映射到 timer、客户端 bundle 不参与宿主扫描（R26.2）",
