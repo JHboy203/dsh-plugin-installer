@@ -2174,6 +2174,30 @@ async function main() {
 	eq("inject: 从宿主原话里取出服务名", servicesFromHostError('imgops (dsh-imgops): Error: cannot get property "tools" without inject'), ["tools"]);
 	eq("inject: 宿主原话认不出时返回空", servicesFromHostError("某个别的错"), []);
 
+	/* R26.2：两个误判的实证修正 ——
+	   ① `ctx.interval()` 是 timer 服务的方法，不是名为 interval 的服务；
+	   ② client.js 的 inject 是 web 平台的，不能混进宿主声明（否则既遮漏声明、又污染修法建议）。 */
+	const injTimerOk = dir("inject-timer-ok");
+	await mkdir(injTimerOk, { recursive: true });
+	await writeFile(join(injTimerOk, "index.js"), "export const inject = ['webServer','timer']\nexport function apply(ctx){ ctx.interval(()=>{}, 1000); ctx.webServer.register({}, ()=>1) }\n", "utf8");
+	const timerOk = await scanInject(injTimerOk, { maxFiles: 30 });
+	eq("inject: ctx.interval 有 timer 声明时不报", timerOk.violations.length, 0);
+
+	const injTimerBad = dir("inject-timer-bad");
+	await mkdir(injTimerBad, { recursive: true });
+	await writeFile(join(injTimerBad, "index.js"), "export const inject = ['webServer']\nexport function apply(ctx){ ctx.interval(()=>{}, 1000) }\n", "utf8");
+	const timerBad = await scanInject(injTimerBad, { maxFiles: 30 });
+	eq("inject: 缺 timer 时报的是 timer 而不是 interval", timerBad.violations.map((v) => v.service), ["timer"]);
+	ok("inject: 修法给的是 timer", /export const inject = \['webServer', 'timer'\]/.test(injectFixLine(["timer"], ["webServer"])));
+
+	const injClientMix = dir("inject-client-mix");
+	await mkdir(injClientMix, { recursive: true });
+	await writeFile(join(injClientMix, "index.js"), "export const inject = ['webServer','timer']\nexport function apply(ctx){ ctx.interval(()=>{}, 1000); ctx.webServer.register({}, ()=>1) }\n", "utf8");
+	await writeFile(join(injClientMix, "client.js"), "function apply(ctx){ ctx.slots.register({ name: 'main' }, ()=>1) }\nconst exports = { apply, inject: ['slots', 'layout'] }\n", "utf8");
+	const clientMix = await scanInject(injClientMix, { maxFiles: 30 });
+	eq("inject: 客户端 bundle 的 inject 不混进宿主声明", clientMix.declared, ["timer", "webServer"]);
+	eq("inject: 客户端用到的服务不参与宿主扫描", clientMix.violations.length, 0);
+
 	/* ② 宿主「不抛异常」的失败也要分诊（activation / already-installed） */
 	const actDiag = 'dsh: warning: 1 entry did not activate\nimgops (dsh-imgops): Error: cannot get property "tools" without inject';
 	const actInstall = await installPlugin({

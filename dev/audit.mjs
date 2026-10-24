@@ -45,7 +45,7 @@ export const FROZEN_DEFAULTS = {
 };
 
 /** 文档里声明的自检项数（改断言就先跑一次 host_selfcheck，再同步这个数）。 */
-export const EXPECTED_ASSERTIONS = 780;
+export const EXPECTED_ASSERTIONS = 785;
 
 /** 界面自检项数（dev/render-check.cjs）。同样是「文档对表」的一半。 */
 const EXPECTED_RENDER_ASSERTIONS = 127;
@@ -300,6 +300,11 @@ async function main() {
 		/export function splitUpgradeTargets/.test(pipelineSrc) &&
 		/includeRisky: body\.includeRisky === true/.test(indexSrc2) &&
 		clientSrc.includes("仍要一起升级"));
+	/* R26.2：inject 扫描的两处误判修正 */
+	const injectSrc = (await readText("lib/inject.js")) || "";
+	ok("inject 扫描：timer 方法映射到 timer、客户端 bundle 不参与宿主扫描（R26.2）",
+		/TIMER_METHODS/.test(injectSrc) && /CLIENT_BUNDLE/.test(injectSrc) &&
+		/TIMER_METHODS\.has\(service\) \? "timer"/.test(injectSrc) && /CLIENT_BUNDLE\.test\(entry\.name\)/.test(injectSrc));
 	ok("批量升级：有串行队列与 drain（R26）", /async upgradeOutdated/.test(pipelineSrc) && /async _drainQueue/.test(pipelineSrc));
 	ok("批量升级：一次只跑一单（等确认时不启动）",
 		/awaiting-confirm/.test((pipelineSrc.match(/async _drainQueue[\s\S]{0,400}/) || [""])[0]));
