@@ -23,7 +23,7 @@ window.__ModuleLoader__.load({
 		/* 客户端 build 号（R5.1）：改 client.js 就提一位。
 		   client 会热重载、但没人保证「当前页面跑的是哪一版」—— 这个号随 client-state
 		   一起上报，宿主 /health 的 clientReport.build 就是答案（宿主侧另有 mtime 标签）。 */
-		const BUILD = "r26.1";
+		const BUILD = "r26.3";
 
 		/* ── 迷你 store（模块级，面板关着时图标也在用）──────────────────── */
 
@@ -1592,6 +1592,11 @@ window.__ModuleLoader__.load({
 						"队列：" + queue.count + " 个待装（" + queue.items.slice(0, 3).map((q) => q.name || q.raw).join("、") +
 						(queue.count > 3 ? " 等" : "") + "）· 一次装一个，装完自动继续",
 						h("button", { className: "dpi-btn dpi-btn-sm", style: { marginLeft: "8px" }, onClick: clearQueue }, "清空队列"))
+					: null,
+				outdated.length > 0
+					? h("div", { className: "dpi-muted" },
+						"⚠ 宿主 0.2.1 的 installBundle 对已存在的包名回 already-installed：这里的「升级」不会真的换版本。",
+						"真升级要先卸载再装；重启面板后（R26.3）这条会明确报成失败，不再显示成已完成。")
 					: null,
 				inv && inv.ok === false
 					? h("div", { className: "dpi-actions dpi-actions-tight" },
