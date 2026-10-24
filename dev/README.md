@@ -23,6 +23,7 @@
 | `dev/probe-search.mjs` | 本机官方 `@deepseek-ai/*` basename 有哪些；影子包标注对不对。带 `DSH_PROBE_SEARCH="<查询>"` 会真联网搜一次 | `host_selfcheck({..., script:"dev/probe-search.mjs", env:{DSH_PROBE_SEARCH:"dsh-base"}})` |
 | `dev/probe-live.mjs` | **运行中的宿主**到底是不是磁盘这一版：`/state` 的 build、`/health` 的 code、`/skills` 的计数与 YAML；带 `DSH_PROBE_LIVE_SEARCH=1` 会打一次 `/search` 看 `shadowOf` | `host_selfcheck({..., script:"dev/probe-live.mjs", args:["<GUI端口>"]})` |
 | `dev/probe-rev.mjs` | **上次那个没激活的前端入口修没修**：先用固定向量验 rev 算法（其中一条是真机观测值），再把最近一份 `crash-*-web-boot.log` 里点名的每个包与磁盘对账（`same` / `rebuilt` / `unknown`）。`--full` 连体检结论与面板动作一起打 | `node dev/probe-rev.mjs --full`（自动往上找 `.dsh/profiles/<name>`，也可 `--profile <dir>`） |
+| `dev/probe-sources.mjs` | **「已装分来源」在真 profile 上是什么结果**：多少依赖能算出 `host/owner/repo`（对账下限）、link 与 npm 样本、三条对账（同仓库 `same` / 换仓库 `different`(warn) / link `different`(**error**) / 未知 `unknown`）、以及「你搜的是本机插件」那句话 | `node dev/probe-sources.mjs`（同样自动找 profile，可 `--profile <dir>`；不联网） |
 
 GUI 端口每次重启会变：看 `install_hub_status` 最后一行的「远程访问地址」，或运行时给的 GUI URL。
 
