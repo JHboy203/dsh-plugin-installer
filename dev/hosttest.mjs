@@ -16,7 +16,7 @@ import { gzipSync, deflateRawSync } from "node:zlib";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 
-import { satisfiesVersion } from "../lib/semver.js";
+import { satisfiesVersion, versionGap } from "../lib/semver.js";
 import { classifyInput } from "../lib/urls.js";
 import { DEFAULT_LIMITS, extractToDir, findBsdtar, sniffFormat } from "../lib/formats.js";
 import { detectKind } from "../lib/detect.js";
@@ -34,11 +34,11 @@ import {
 } from "../lib/skills.js";
 import { scanTree, redact, detectPromptInjection } from "../lib/scan.js";
 import { precheck } from "../lib/precheck.js";
-import { createSnapshot, restoreProfileFiles, backupSkillInSnapshot, readSnapshotMeta, restoreSkill } from "../lib/snapshot.js";
+import { backupVendorTarball, createSnapshot, fileSpecPath, restoreProfileFiles, backupSkillInSnapshot, readSnapshotMeta, restoreSkill, restoreVendorTarball } from "../lib/snapshot.js";
 import { buildReviewInput } from "../lib/ai.js";
 import { estimateReviewTokens, reviewWorthIt } from "../lib/ai.js";
 import { packPluginTarball } from "../lib/pack.js";
-import { stagingRefsFromManifest, stagingKeepNames, Installer } from "../lib/pipeline.js";
+import { stagingRefsFromManifest, stagingKeepNames, rollbackPlan, Installer } from "../lib/pipeline.js";
 import { buildStamp } from "../lib/hostinfo.js";
 import { normalizeNpmSpec } from "../lib/download.js";
 import {
@@ -1018,6 +1018,36 @@ async function main() {
 	eq("snapshot: 技能被覆盖后可还原", skillRestore.mode, "restored-previous");
 	ok("snapshot: 还原的是旧内容", (await readFile(join(skillsRoot, "old-skill", "SKILL.md"), "utf8")).includes("v1"));
 
+	/* R26：升级本地包的回滚要「装回旧版」，所以旧 .tgz 必须先被拷进快照 ——
+	   重打包之后旧文件名/内容都不在磁盘上了，没这一份就永远回不去。 */
+	const vendorDir = dir("vendor");
+	await mkdir(vendorDir, { recursive: true });
+	const vendorOld = join(vendorDir, "pkg-demo-0.1.0.tgz");
+	await writeFile(vendorOld, "OLD-TGZ-BYTES");
+	eq("rollback: file: 声明能取出本机路径", fileSpecPath("file:" + vendorOld), vendorOld);
+	eq("rollback: 相对 file: 不解析（不猜）", fileSpecPath("file:../x/pkg.tgz"), null);
+	eq("rollback: npm 声明不算 file", fileSpecPath("^1.2.3"), null);
+	const vendorSnap = dir("vendor-snap");
+	const vendorBackup = await backupVendorTarball(vendorSnap, "file:" + vendorOld);
+	ok("rollback: 旧包被拷进快照", Boolean(vendorBackup && vendorBackup.copy), vendorBackup);
+	await writeFile(vendorOld, "NEW-TGZ-BYTES");
+	const vendorRestored = await restoreVendorTarball(vendorBackup);
+	eq("rollback: 旧包能写回原路径", vendorRestored.restored, true);
+	eq("rollback: 写回的是旧字节", await readFile(vendorOld, "utf8"), "OLD-TGZ-BYTES");
+	eq("rollback: 没有快照旧包时如实说没有", (await restoreVendorTarball(null)).restored, false);
+
+	/* R26：回滚计划是纯函数 —— 升级与全新安装必须走不同分支（否则「回滚」会把插件卸掉） */
+	eq("rollbackPlan: 全新安装 → 卸载", rollbackPlan({ bundleName: "x", ok: true }).mode, "remove");
+	eq("rollbackPlan: npm 升级 → 按旧版本重装",
+		rollbackPlan({ bundleName: "x", upgrade: true, previousVersion: "0.6.24", previousSpec: "0.6.24" }),
+		{ mode: "reinstall-npm", spec: "npm:x@0.6.24", version: "0.6.24" });
+	const filePlan = rollbackPlan({ bundleName: "x", upgrade: true, previousVersion: "0.1.0", previousSpec: "file:" + vendorOld, previousTarball: vendorBackup });
+	ok("rollbackPlan: 本地包升级 → 先还原旧包再重装", filePlan.mode === "reinstall-file" && filePlan.path === vendorOld && filePlan.tarball === vendorBackup, filePlan);
+	eq("rollbackPlan: link 来源只还原声明（不动开发目录）",
+		rollbackPlan({ bundleName: "x", upgrade: true, previousVersion: "0.1.0", previousSpec: "link:D:/src/x" }).mode, "restore-only");
+	eq("rollbackPlan: 升级但没记下旧版本 → 退回卸载（宁可少做）",
+		rollbackPlan({ bundleName: "x", upgrade: true, previousSpec: null }).mode, "remove");
+
 	/* ⑦.5 重打包成 tgz（安装不依赖临时目录）*/
 	const packSrc = dir("packSrc");
 	await mkdir(join(packSrc, "lib"), { recursive: true });
@@ -1840,6 +1870,44 @@ async function main() {
 	const collisions = await Promise.all([1, 2, 3].map(() => Installer.prototype.writeStateFile.call(writerThis).then(() => null, (e) => String(e && e.code))));
 	eq("save: 同一实例并发写同一个 state 不再撞 ENOENT", collisions.filter(Boolean), []);
 
+	/* R26：批量升级队列 —— 入队去重、一次一单、坏 spec 不卡死。
+	   全部打在 prototype 上（fake this），不碰宿主、不真装。 */
+	const qFake = {
+		_queue: [],
+		jobs: [],
+		_running: null,
+		log: async () => {},
+		_drainQueue: Installer.prototype._drainQueue,
+		submit: async () => ({ ok: true, job: { id: "job-q" } })
+	};
+	eq("queue: 入队成功", Installer.prototype.enqueue.call(qFake, "npm:x@1.0.0", "x").added, true);
+	eq("queue: 同一个 spec 不排两次", Installer.prototype.enqueue.call(qFake, "npm:x@1.0.0", "x").added, false);
+	qFake.jobs = [{ id: "r", status: "running", input: { raw: "npm:y@2.0.0" } }];
+	eq("queue: 正在跑的同一个不重排", Installer.prototype.enqueue.call(qFake, "npm:y@2.0.0", "y").added, false);
+	eq("queue: 摘要带数量", Installer.prototype.queueView.call(qFake).count, 1);
+	eq("queue: 空闲时启动下一单", (await Installer.prototype._drainQueue.call(qFake)).started, true);
+	eq("queue: 启动后队列清空", Installer.prototype.queueView.call(qFake).count, 0);
+	qFake._running = Promise.resolve();
+	eq("queue: 有单在跑时不并发启动", (await Installer.prototype._drainQueue.call(qFake)).reason, "busy");
+	qFake._running = null;
+	qFake.jobs = [{ id: "w", status: "awaiting-confirm" }];
+	eq("queue: 有任务在等确认时先暂停", (await Installer.prototype._drainQueue.call(qFake)).reason, "awaiting-confirm");
+	qFake.jobs = [];
+	eq("queue: 空队列不启动", (await Installer.prototype._drainQueue.call(qFake)).reason, "empty");
+	const skipFake = {
+		_queue: [{ raw: "npm:bad@1", name: "bad" }],
+		jobs: [],
+		_running: null,
+		log: async () => {},
+		_drainQueue: Installer.prototype._drainQueue,
+		submit: async () => ({ ok: false, reason: "unrecognized" })
+	};
+	const skipDrain = await Installer.prototype._drainQueue.call(skipFake);
+	ok("queue: 坏 spec 不卡死整条队列（跳过后如实说空）", skipDrain.started === false && skipDrain.reason === "empty", skipDrain);
+	const clearFake = { _queue: [{ raw: "npm:a@1" }, { raw: "npm:b@1" }] };
+	eq("queue: 清空返回清掉几个", (await Installer.prototype.clearQueue.call(clearFake)).cleared, 2);
+	eq("queue: 清空后计数为 0", Installer.prototype.queueView.call(clearFake).count, 0);
+
 	/* 搜索源开关：关掉的源一个请求都不该发 */
 	const realFetch2 = globalThis.fetch;
 	const seenUrls2 = [];
@@ -2370,6 +2438,11 @@ async function main() {
 	eq("updates: 解析不了就 unknown（不猜）", relationOf("1.0.0", "not-a-version"), "unknown");
 	eq("updates: 预发布也能比", relationOf("0.2.1-rc.2", "0.2.1"), "outdated");
 	ok("updates: scope 包名编码后仍是合法 URL", registryUrl("@liustack/modlens") === "https://registry.npmjs.org/%40liustack/modlens/latest", registryUrl("@liustack/modlens"));
+	/* R26：两个版本号之间的「跨度」—— 0.x 的 minor 按 npm 惯例可能是破坏性变更 */
+	eq("updates: 跨度写明跨几个补丁", versionGap("0.6.24", "0.6.33").text, "跨 9 个补丁");
+	ok("updates: 0.x 的 minor 变化标成可能不兼容", versionGap("0.2.1", "0.3.0").severe === true && /小版本/.test(versionGap("0.2.1", "0.3.0").text), versionGap("0.2.1", "0.3.0"));
+	ok("updates: 大版本变化单独说清", /主版本 1 → 2/.test(versionGap("1.4.0", "2.0.0").text) && versionGap("1.4.0", "2.0.0").severe, versionGap("1.4.0", "2.0.0"));
+	eq("updates: 没落后就没有跨度", versionGap("1.0.0", "1.0.0"), null);
 
 	const realFetchR12 = globalThis.fetch;
 	const hits = [];
@@ -2407,6 +2480,9 @@ async function main() {
 	const mergedItems = mergeUpdates(inv.items, updateResult);
 	eq("updates: 并回清单后 update 就在那一行上", mergedItems.find((i) => i.name === "dsh-npm").update.relation, "outdated");
 	eq("updates: 没比对的条目 update 为 null", mergedItems.find((i) => i.name === "dsh-link").update, null);
+	ok("updates: 并回清单的 outdated 条目带跨度（面板不用自己算）",
+		/主版本 1 → 9/.test(mergedItems.find((i) => i.name === "dsh-npm").update.gap.text),
+		mergedItems.find((i) => i.name === "dsh-npm").update.gap);
 
 	/* npm: 前缀（R12 修的输入 bug）：前缀是输入简写，不能进包名 */
 	eq("input: npm: 前缀不进 spec", classifyInput("npm:dsh-ffmpeg@0.5.1").spec, "dsh-ffmpeg@0.5.1");
@@ -2540,6 +2616,10 @@ async function main() {
 	eq("skill: 认不出技能根时 ok=false", noRoots.ok, false);
 	eq("skill: 认不出技能根时摘要直说", noRoots.summary, "认不出技能根目录");
 	ok("skill: summarizeSkills 空计数不崩", typeof summarizeSkills(null) === "string");
+	/* R26：宿主认的技能里有一部分来自插件包/内置，它们不在技能根 —— 摘要要说清 */
+	ok("skill: 摘要说明还有几个来自插件包/内置",
+		/2 个来自插件包\/内置/.test(summarizeSkills({ roots: 1, skills: 3, hostTotal: 5, hostOnly: 2 })),
+		summarizeSkills({ roots: 1, skills: 3, hostTotal: 5, hostOnly: 2 }));
 
 	/* 接线（静态）：宿主服务是**可选**的，必须走 ctx.get("skills")，否则永远读到 undefined */
 	const pipelineSrcR14 = await readFile(join(pluginRoot, "lib", "pipeline.js"), "utf8");

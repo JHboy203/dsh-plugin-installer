@@ -23,7 +23,7 @@ window.__ModuleLoader__.load({
 		/* 客户端 build 号（R5.1）：改 client.js 就提一位。
 		   client 会热重载、但没人保证「当前页面跑的是哪一版」—— 这个号随 client-state
 		   一起上报，宿主 /health 的 clientReport.build 就是答案（宿主侧另有 mtime 标签）。 */
-		const BUILD = "r23.0";
+		const BUILD = "r26.0";
 
 		/* ── 迷你 store（模块级，面板关着时图标也在用）──────────────────── */
 
@@ -1147,7 +1147,14 @@ window.__ModuleLoader__.load({
 						: null,
 					job.snapshot
 						? h("button", { className: "dpi-btn", disabled: busy !== null, onClick: () => act("rollback") },
-							busy === "rollback" ? "回滚中…" : job.rollback ? "再回滚一次" : "回滚到安装前")
+							busy === "rollback"
+								? "回滚中…"
+								: job.rollback
+									? "再回滚一次"
+									: job.install && job.install.upgrade && job.install.previousVersion
+										/* R26：升级的回滚是「装回旧版」，不是卸载 */
+										? "回滚到 v" + job.install.previousVersion
+										: "回滚到安装前")
 						: null,
 					job.status === "failed" && job.input
 						? h("button", { className: "dpi-btn", onClick: () => { submitInput(job.input.raw); } }, "重试")
@@ -1432,7 +1439,10 @@ window.__ModuleLoader__.load({
 			const s = useStore();
 			const inv = s.local.inventory || null;
 			const [open, setOpen] = useState(false);
+			/* R26：80 条上限原本是静默截断 —— 本机 47 条时看不出来，插件多了以后会「有更新却找不到」 */
+			const [showAll, setShowAll] = useState(false);
 			const busy = s.local.invBusy;
+			const queue = (s.data && s.data.queue) || null;
 			const load = () => {
 				api("/inventory")
 					.then((r) => {
@@ -1470,6 +1480,42 @@ window.__ModuleLoader__.load({
 			const items = (inv && inv.items) || [];
 			const problems = (inv && inv.problems) || [];
 			const outdated = items.filter((item) => item.update && item.update.relation === "outdated");
+			/* R26：批量升级 —— 串行排队、一次一单；只升 npm 来源（本地 .tgz 要重新打包，排不了队）。
+			   队列是宿主内存态：重启后不续跑，避免一开机就在没人看着的时候装东西。 */
+			const upgradeAll = () => {
+				const targets = sorted.filter((item) => item.update && item.update.relation === "outdated");
+				if (!targets.length) return;
+				const ok = typeof window !== "undefined" && window.confirm
+					? window.confirm("把可升级的 " + targets.length + " 个 npm 包排进队列，逐个安装？\n\n" +
+						"· 每个都会先做安全预检与安装前快照\n" +
+						"· 中途需要确认的会停下来等你\n" +
+						"· 宿主重启后队列不自动续跑\n" +
+						"· 本地 .tgz / Git / link 来源不排队（需要时按单条「升级」走）")
+					: true;
+				if (!ok) return;
+				setLocal({ invBusy: true });
+				api("/action", { method: "POST", body: JSON.stringify({ action: "update-all" }) })
+					.then((r) => {
+						if (r && r.state) setStore({ data: r.state });
+						if (!r || r.ok === false) {
+							toast((r && r.error) || "排队失败");
+							return;
+						}
+						const n = (r.queued || []).length;
+						if (n > 0) toast("已排队 " + n + " 个（第一个已开始，后面的自动接着跑）");
+						else toast("没有可排队的升级");
+					})
+					.catch((e) => toast("排队失败：" + String((e && e.message) || e)))
+					.finally(() => setLocal({ invBusy: false }));
+			};
+			const clearQueue = () => {
+				api("/action", { method: "POST", body: JSON.stringify({ action: "clear-queue" }) })
+					.then((r) => {
+						if (r && r.state) setStore({ data: r.state });
+						toast(r && r.cleared ? "已清空队列（" + r.cleared + " 个）" : "队列本来就是空的");
+					})
+					.catch((e) => toast("清空失败：" + String((e && e.message) || e)));
+			};
 			const rank = (item) => {
 				if (item.update && item.update.relation === "outdated") return 0;
 				if (!item.installed) return 1;
@@ -1495,6 +1541,14 @@ window.__ModuleLoader__.load({
 						title: "联网比对 npm registry 上每个包的最新版（30 分钟内同结果走缓存）",
 						onClick: checkUpdates
 					}, busy ? "检查中…" : "检查更新"),
+					outdated.length > 0
+						? h("button", {
+							className: "dpi-btn dpi-btn-sm",
+							disabled: busy,
+							title: "把可升级的 npm 包排进队列，逐个安装（需要确认的仍会停下来等你）",
+							onClick: upgradeAll
+						}, "全部升级 " + outdated.length)
+						: null,
 					h("button", { className: "dpi-btn dpi-btn-sm", disabled: !counts, onClick: () => setOpen(!open) },
 						open ? "收起" : "展开")),
 				summary
@@ -1511,12 +1565,18 @@ window.__ModuleLoader__.load({
 				problems.length > 0 && !open
 					? h("div", { className: "dpi-muted" }, "· " + problems.length + " 个依赖「声明了但没落地」（展开看，或用环境体检细查）")
 					: null,
+				queue && queue.count > 0
+					? h("div", { className: "dpi-muted" },
+						"队列：" + queue.count + " 个待装（" + queue.items.slice(0, 3).map((q) => q.name || q.raw).join("、") +
+						(queue.count > 3 ? " 等" : "") + "）· 一次装一个，装完自动继续",
+						h("button", { className: "dpi-btn dpi-btn-sm", style: { marginLeft: "8px" }, onClick: clearQueue }, "清空队列"))
+					: null,
 				inv && inv.ok === false
 					? h("div", { className: "dpi-actions dpi-actions-tight" },
 						h("button", { className: "dpi-btn dpi-btn-sm", onClick: load }, "重试"))
 					: null,
 				open && sorted.length > 0
-					? h("ul", { className: "dpi-list dpi-list-info dpi-inv-list" }, sorted.slice(0, 80).map((item) =>
+					? h("ul", { className: "dpi-list dpi-list-info dpi-inv-list" }, sorted.slice(0, showAll ? sorted.length : 80).map((item) =>
 						h("li", { key: "inv" + item.name },
 							h("div", { className: "dpi-reco-head" },
 								h("b", null, item.name),
@@ -1525,6 +1585,14 @@ window.__ModuleLoader__.load({
 								item.bundle ? h("span", { className: "dpi-tag dpi-tag-kind" }, "bundle 行") : null,
 								item.update && item.update.relation === "outdated"
 									? h("span", { className: "dpi-pill dpi-pill-warn" }, "可升级 → " + item.update.latestVersion)
+									: null,
+								/* R26：只给两个版本号看不出「跨了 9 个补丁」还是「跨了一个大版本」；
+								   0.x 的 minor 变化按 npm 惯例可能是破坏性变更，单独染色但仍不拦安装 */
+								item.update && item.update.relation === "outdated" && item.update.gap && item.update.gap.text
+									? h("span", {
+										className: item.update.gap.severe ? "dpi-tag dpi-tag-medium" : "dpi-tag",
+										title: (item.update.localVersion || "?") + " → " + item.update.latestVersion + (item.update.gap.severe ? "（这个跨度可能含破坏性变更）" : "")
+									}, item.update.gap.text)
 									: null,
 								item.update && item.update.relation === "current"
 									? h("span", { className: "dpi-pill dpi-pill-ok" }, "最新")
@@ -1547,6 +1615,13 @@ window.__ModuleLoader__.load({
 									}, "升级到 " + item.update.latestVersion))
 								: null,
 							h("div", { className: "dpi-detail" }, item.spec + (item.checkable ? "" : " · " + item.why)))))
+					: null,
+				open && sorted.length > 80
+					? h("div", { className: "dpi-muted" },
+						"只显示前 80 个（共 " + sorted.length + " 个）。按「有更新 → 没落地 → 其它」排序，所以可升级的不会被折叠掉。",
+						showAll
+							? null
+							: h("button", { className: "dpi-btn dpi-btn-sm", style: { marginLeft: "8px" }, onClick: () => setShowAll(true) }, "显示全部"))
 					: null,
 				open && sorted.length === 0
 					? h("div", { className: "dpi-muted" }, "这个 profile 里没有依赖声明（或还没装上任何东西）。")
@@ -1619,6 +1694,7 @@ window.__ModuleLoader__.load({
 			}, []);
 			const counts = (view && view.counts) || null;
 			const items = (view && view.items) || [];
+			const hostOnly = (view && view.hostOnly) || [];
 			const summary = (view && view.summary) || "";
 			const hostKnown = Boolean(view && view.host && view.host.available);
 			const headline = view && view.ok === false
@@ -1653,6 +1729,17 @@ window.__ModuleLoader__.load({
 				counts && counts.notVisible > 0
 					? h("div", { className: "dpi-muted", style: { color: "var(--dsw-alias-state-error-primary)" } },
 						"⚠ " + counts.notVisible + " 个技能宿主没认 —— 文件在，但用不上（展开看是哪些）")
+					: null,
+				/* R26：磁盘之外的那批（插件包内置 / 宿主自带）。不写这一句，人会以为
+				   「55 + 12 = 67」全是自己装的，然后去技能根里找一个根本不存在的目录。 */
+				counts && counts.hostOnly > 0
+					? h("div", { className: "dpi-muted" },
+						"另有 " + counts.hostOnly + " 个来自插件包/内置（不在技能根，所以这里删不掉）：",
+						hostOnly.length > 0
+							? " " + hostOnly.slice(0, 8).map((entry) => entry.name).join("、") +
+								(counts.hostOnly > 8 ? " 等" : "") +
+								(hostOnly.some((entry) => entry.source) ? "（来源：" + hostOnly.filter((entry) => entry.source).slice(0, 4).map((entry) => entry.name + " ← " + entry.source).join("；") + "）" : "")
+							: "")
 					: null,
 				view && view.ok === false
 					? h("div", { className: "dpi-actions dpi-actions-tight" },

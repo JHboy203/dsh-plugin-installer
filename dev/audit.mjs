@@ -45,10 +45,10 @@ export const FROZEN_DEFAULTS = {
 };
 
 /** 文档里声明的自检项数（改断言就先跑一次 host_selfcheck，再同步这个数）。 */
-export const EXPECTED_ASSERTIONS = 744;
+export const EXPECTED_ASSERTIONS = 774;
 
 /** 界面自检项数（dev/render-check.cjs）。同样是「文档对表」的一半。 */
-const EXPECTED_RENDER_ASSERTIONS = 122;
+const EXPECTED_RENDER_ASSERTIONS = 127;
 
 /** 期望注册的宿主工具（漏一个 = 模型看不见一项能力）。 */
 const EXPECTED_TOOLS = [
@@ -281,6 +281,31 @@ async function main() {
 	ok("搜索结果带上游仓库地址（三个 shaper 都带）", (sourcesSrc.match(/repoUrl/g) || []).length >= 3);
 	ok("工具输出不再丢掉「已装」（模型也要看得见）", /已装 " \+ \(item\.installed/.test(toolsSrc) && /result\.localOnly/.test(toolsSrc));
 	ok("面板 chip 写出来源形态，并把提示渲染出来", clientSrc.includes("installedKindLabel") && clientSrc.includes("localOnly.text"));
+
+	/* ⑤k R26：升级回滚 / 批量升级 / 三个「看得见」的小改 ——
+	   最危险的一条是「升级后点回滚把插件整个卸掉」，所以判定钉在源码上。 */
+	ok("升级回滚：回滚计划是纯函数（可单测）", /export function rollbackPlan/.test(pipelineSrc));
+	ok("升级回滚：npm 升级按旧版本重装（不是 removeBundle）",
+		/mode: "reinstall-npm"/.test(pipelineSrc) && /spec: "npm:" \+ it\.bundleName \+ "@" \+ prevVersion/.test(pipelineSrc));
+	ok("升级回滚：本地包先把旧 tgz 写回原路径",
+		/mode: "reinstall-file"/.test(pipelineSrc) && /restoreVendorTarball\(plan\.tarball\)/.test(pipelineSrc));
+	ok("升级回滚：link/git 只还原声明（不动开发目录）", /mode: "restore-only"/.test(pipelineSrc));
+	ok("升级回滚：安装前记下旧版本与旧声明",
+		/job\.installedBefore = /.test(pipelineSrc) && /job\.install\.previousVersion = job\.installedBefore\.version/.test(pipelineSrc));
+	ok("升级回滚：旧包在安装前被拷进快照", /backupVendorTarball\(snap\.dir/.test(pipelineSrc));
+	ok("批量升级：有串行队列与 drain（R26）", /async upgradeOutdated/.test(pipelineSrc) && /async _drainQueue/.test(pipelineSrc));
+	ok("批量升级：一次只跑一单（等确认时不启动）",
+		/awaiting-confirm/.test((pipelineSrc.match(/async _drainQueue[\s\S]{0,400}/) || [""])[0]));
+	ok("批量升级：index 暴露 update-all / clear-queue",
+		/action === "update-all"/.test(indexSrc2) && /action === "clear-queue"/.test(indexSrc2));
+	ok("批量升级：面板有「全部升级」、队列行与清空",
+		clientSrc.includes("全部升级 ") && clientSrc.includes("队列：") && clientSrc.includes("清空队列"));
+	ok("已装清单：跨度提示（R26）",
+		/export function versionGap/.test((await readText("lib\\semver.js")) || "") &&
+		/versionGap\(item\.localVersion/.test(updSrc || "") && clientSrc.includes("item.update.gap.text"));
+	ok("已装清单：超过 80 条不再静默截断", clientSrc.includes("只显示前 80 个") && clientSrc.includes("showAll"));
+	ok("已装 Skill：说明「来自插件包/内置」的那批",
+		/来自插件包\/内置/.test(skillsSrc || "") && clientSrc.includes("counts.hostOnly > 0"));
 
 	/* ⑥ 数据目录：设置文件是否与运行时会一致（手改过就会出现差异） */
 	const settingsFile = join(dataDir(), "settings.json");

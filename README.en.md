@@ -187,8 +187,12 @@ Browser half  ──HTTP──▶  Host half (deterministic)  ──▶ ctx.plug
 
 ## 4. Snapshot / rollback (including two pitfalls specific to this machine)
 
-Rollback order: remove the plugin (`removeBundle`) → restore the profile triad → clear dangling `link:` links →
-roll back the Skill (restore backup or delete) → scan dsh-tools once more. Completed steps are reported truthfully, not pretended to all succeed.
+Rollback is **upgrade-aware** (R26): an upgrade is rolled back by *reinstalling the previous version*
+(npm: `npm:<name>@<old version>`; local `.tgz`: the old tarball is copied into the snapshot before install and put back
+before reinstalling) — not by uninstalling the plugin. `link:`/Git sources only get their declaration restored
+(the dev directory is never touched), and a fresh install still uses `removeBundle`.
+Then: restore the profile triad → clear dangling `link:` links → roll back the Skill (restore backup or delete) →
+scan dsh-tools once more. Completed steps are reported truthfully, not pretended to all succeed.
 
 ### Pitfall A: after pnpm finishes, the host restarts
 
@@ -236,7 +240,7 @@ or `python .tools/dsh_doctor.py --fix`.
 | POST | `/plugin-installer/search` | `{query}` → candidates (6 sources: npm ×2 / GitHub ×3 / dsh-hub store; cached within 5 minutes) |
 | GET | `/plugin-installer/settings` | Personalization settings + defaults + legal tiers |
 | POST | `/plugin-installer/settings` | Settings patch (merged item by item and persisted to `data/settings.json`) |
-| POST | `/plugin-installer/action` | `{action,id}`: `confirm`/`skip-review`/`cancel`/`ack`/`rollback`/`review`/`rediagnose`/`repair`/`fix-landmine`/`integrations` |
+| POST | `/plugin-installer/action` | `{action,id}`: `confirm`/`skip-review`/`cancel`/`ack`/`rollback`/`review`/`rediagnose`/`repair`/`fix-landmine`/`park-skill-backup`/`fix-skill-frontmatter`/`approve-builds`/`exempt-version`/`check-updates`/`update-all`/`clear-queue`/`integrations` |
 | POST | `/plugin-installer/upload` | Raw bytes + `x-file-name`, lands in staging then submits immediately |
 | POST | `/plugin-installer/ai` | `{message}` → search → recommend (structured) |
 | GET | `/plugin-installer/ai-status` | AI channel availability and current default model |

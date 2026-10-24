@@ -175,7 +175,7 @@ function textOf(node, acc) {
  * 正常不执行，所以**数源码不等于数断言**（实测 103 处、只跑 80 条）。真正的判据只能是
  * 「这次实际跑了几条」，所以由脚本自己报总数、并由自己比对。
  */
-const EXPECTED_TOTAL = 122;
+const EXPECTED_TOTAL = 127;
 
 let failed = 0;
 let passed = 0;
@@ -622,7 +622,7 @@ if (typeof t.Inventory === "function") {
 				name: "dsh-ffmpeg", spec: "^0.5.0", kind: "npm", kindLabel: "npm",
 				why: "来自 npm registry，可以比对最新版", checkable: true, bundle: true,
 				installed: true, localVersion: "0.5.0",
-				update: { relation: "outdated", localVersion: "0.5.0", latestVersion: "0.6.0", error: null, deprecated: null }
+				update: { relation: "outdated", localVersion: "0.5.0", latestVersion: "0.6.0", error: null, deprecated: null, gap: { text: "跨 1 个小版本", severe: false } }
 			},
 			{
 				name: "dsh-local", spec: "link:D:/x/dsh-local", kind: "link", kindLabel: "本机目录",
@@ -665,11 +665,30 @@ if (typeof t.Inventory === "function") {
 		check("已装清单：可升级行有「升级到」按钮", expanded.includes("升级到 0.6.0"));
 		check("已装清单：标出来源（本机目录）", expanded.includes("本机目录"));
 		check("已装清单：不比对的行说清为什么", expanded.includes("改了就生效"), expanded.slice(0, 300));
+		check("已装清单：跨度写明跨几个版本（R26）", expanded.includes("跨 1 个小版本"), expanded.slice(0, 400));
 		check("已装清单：没落地的行被点名", expanded.includes("声明了但没落地") && expanded.includes("dsh-missing"));
 		check("已装清单：收起入口", expanded.includes("收起"));
 	} catch (e) {
 		check("已装清单：展开态渲染不抛异常", false, String((e && e.message) || e));
 	}
+
+	/* ②b R26：批量升级队列与 80 条折叠提示 */
+	const savedDataQ = t.store.data;
+	t.store.data = Object.assign({}, savedDataQ || {}, { queue: { count: 2, items: [{ name: "dsh-a" }, { name: "dsh-b" }] } });
+	t.store.local = { inventory: invFixture };
+	resetHooks();
+	const queueText = textOf(t.Inventory({})).join(" | ");
+	check("已装清单：队列显示待装数量（R26）", queueText.includes("队列：2 个待装"), queueText.slice(0, 300));
+	t.store.data = savedDataQ;
+	const manyItems = Array.from({ length: 81 }, (_, i) => ({
+		name: "dsh-many-" + i, spec: "^1.0.0", kind: "npm", kindLabel: "npm", why: "来自 npm",
+		checkable: false, installed: true, localVersion: "1.0.0", update: null
+	}));
+	t.store.local = { inventory: { ...invFixture, items: manyItems, counts: { ...invFixture.counts, total: 81 } } };
+	resetHooks();
+	hooks[2] = true;
+	const manyText = textOf(t.Inventory({})).join(" | ");
+	check("已装清单：超过 80 条说明被折叠（R26）", manyText.includes("只显示前 80 个"), manyText.slice(0, 240));
 
 	/* ③ 没检查过 / 读不到 / 空 profile 三种兜底态 */
 	t.store.local = { inventory: { ...invFixture, summary: null, updatesAt: null } };
@@ -745,6 +764,20 @@ if (typeof t.Skills === "function") {
 		check("已装 Skill：YAML 写坏时给另一条红色告警（查不出根因就没法修）", skillCollapsed.includes("不是合法 YAML"), skillCollapsed.slice(0, 300));
 		check("已装 Skill：折叠态不铺开逐条", !skillCollapsed.includes("旧副本"));
 		check("已装 Skill：有「刷新」与「展开」入口", skillCollapsed.includes("刷新") && skillCollapsed.includes("展开"));
+
+		/* R26：磁盘之外的那批（插件包内置 / 宿主自带）要说清「这里删不掉」 */
+		t.store.local = { skills: {
+			...skillsFixture,
+			counts: { ...skillsFixture.counts, hostOnly: 2 },
+			hostOnly: [{ name: "builtin-a", source: "dsh-base" }, { name: "builtin-b", source: null }],
+			summary: skillsFixture.summary + " · 2 个来自插件包/内置（不在技能根）"
+		} };
+		resetHooks();
+		const hostOnlyText = textOf(t.Skills({})).join(" | ");
+		check("已装 Skill：说明还有几个来自插件包/内置（R26）", hostOnlyText.includes("来自插件包/内置"), hostOnlyText.slice(0, 400));
+		check("已装 Skill：点名其中几个（R26）", hostOnlyText.includes("builtin-a"), hostOnlyText.slice(0, 500));
+		t.store.local = { skills: skillsFixture };
+		resetHooks();
 	} catch (e) {
 		check("已装 Skill：折叠态渲染不抛异常", false, String((e && e.message) || e));
 	}
