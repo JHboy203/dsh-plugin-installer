@@ -175,7 +175,7 @@ function textOf(node, acc) {
  * 正常不执行，所以**数源码不等于数断言**（实测 103 处、只跑 80 条）。真正的判据只能是
  * 「这次实际跑了几条」，所以由脚本自己报总数、并由自己比对。
  */
-const EXPECTED_TOTAL = 115;
+const EXPECTED_TOTAL = 118;
 
 let failed = 0;
 let passed = 0;
@@ -215,6 +215,36 @@ try {
 	check("有「大白话解释」开关", joined.includes("大白话解释"));
 } catch (e) {
 	check("新格式渲染不抛异常", false, String((e && e.message) || e));
+}
+
+/* R24：发现卡上的可点动作（finding.actions）—— 「检查更新并升级」这类按钮。
+   判据只看渲染：按钮文字要出来、要是主按钮（不是幽灵按钮）、没有动作时不许留空容器。 */
+resetHooks();
+try {
+	const diagAction = {
+		verdict: "error",
+		findings: [
+			{
+				severity: "error",
+				title: "前端入口没激活，且失败的那份字节还在",
+				detail: "dsh-x：日志里那份还在（rev abcdefabcdef）—— 重启会再遇到同一个错误",
+				plain: "大白话：重启只是再错一次。",
+				fix: [{ text: "rev 没变 = 重启没用" }],
+				actions: [{ kind: "upgrade-npm", plugin: "dsh-x", label: "检查更新并升级 dsh-x", hint: "先查 npm 上有没有新版" }]
+			}
+		]
+	};
+	const elAction = t.DiagnosisCard({ diagnosis: diagAction });
+	const joinedAction = textOf(elAction).join(" | ");
+	check("发现卡渲染动作按钮文字", joinedAction.includes("检查更新并升级 dsh-x"));
+	const actionButtons = findNodes(elAction, (p) => typeof p.className === "string" && p.className.includes("dpi-btn-primary") && typeof p.onClick === "function");
+	check("动作按钮是主按钮且真的可点", actionButtons.length === 1, actionButtons.length);
+	const noAction = textOf(t.DiagnosisCard({
+		diagnosis: { verdict: "error", findings: [{ severity: "error", title: "没问题可点", detail: "d", fix: [{ text: "x" }] }] }
+	})).join(" | ");
+	check("没有 actions 时不留空按钮", !noAction.includes("检查更新"));
+} catch (e) {
+	check("动作按钮渲染不抛异常", false, String((e && e.message) || e));
 }
 
 resetHooks();

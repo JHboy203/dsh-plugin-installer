@@ -23,7 +23,7 @@ window.__ModuleLoader__.load({
 		/* 客户端 build 号（R5.1）：改 client.js 就提一位。
 		   client 会热重载、但没人保证「当前页面跑的是哪一版」—— 这个号随 client-state
 		   一起上报，宿主 /health 的 clientReport.build 就是答案（宿主侧另有 mtime 标签）。 */
-		const BUILD = "r21.0";
+		const BUILD = "r22.0";
 
 		/* ── 迷你 store（模块级，面板关着时图标也在用）──────────────────── */
 
@@ -648,11 +648,14 @@ window.__ModuleLoader__.load({
 
 		/* 「怎么解决」：把每条发现的处置步骤摊开（命令仍可一键复制）。
 		   数据来自宿主半边的 finding.fix = [{text, command?}]；老任务没有这个字段时退回到
-		   finding.action（只有 label/command），所以历史记录不会变成空白。 */
+		   finding.action（只有 label/command），所以历史记录不会变成空白。
+		   R24：finding.actions = [{kind:"upgrade-npm", plugin, label, hint}] —— 发现卡上的可点动作。
+		   现在只有一种：先查 registry 有没有新版，有就升级（真修法），没有就直说。 */
 		function FixSteps(props) {
 			const steps = props.steps || [];
 			const action = props.action;
-			if (steps.length === 0 && !(action && action.label)) return null;
+			const actions = Array.isArray(props.actions) ? props.actions : [];
+			if (steps.length === 0 && !(action && action.label) && actions.length === 0) return null;
 			return h(
 				"div",
 				{ className: "dpi-fixbox" },
@@ -663,6 +666,15 @@ window.__ModuleLoader__.load({
 						const cmd = s && typeof s === "object" ? s.command : null;
 						return h("li", { key: "fx" + i }, h("span", null, text), cmd ? h(Copyable, null, cmd) : null);
 					}))
+					: null,
+				actions.length > 0
+					? h("div", { className: "dpi-actions dpi-actions-tight" }, actions.map((a, i) =>
+						h("button", {
+							key: "fa" + i,
+							className: "dpi-btn dpi-btn-primary dpi-btn-sm",
+							title: (a && a.hint) || "",
+							onClick: () => runFindingAction(a)
+						}, (a && a.label) || "处置")))
 					: null,
 				action && action.label
 					? h("div", { className: "dpi-fixaction" },
@@ -724,7 +736,7 @@ window.__ModuleLoader__.load({
 								h("summary", null, "术语原文"),
 								h("div", { className: "dpi-detail" }, f.detail))
 							: null,
-						h(FixSteps, { steps: f.fix || [], action: f.action })
+						h(FixSteps, { steps: f.fix || [], action: f.action, actions: f.actions })
 					)
 				)
 			);
@@ -1176,6 +1188,41 @@ window.__ModuleLoader__.load({
 		}
 
 		/* ── 面板 ─────────────────────────────────────────────────────── */
+
+		/* R24：发现卡上的可点动作。当前只有 `upgrade-npm` ——
+		   「日志里失败的那份 client 包还是同一份字节」时，唯一真修法就是换成新版本。
+		   两步走：先问 registry（POST action:check-updates，30 分钟缓存），有新版才提交升级；
+		   没有就直说「已经是最新版」，不给假按钮（R19 的判据：别让人点一个做不成事的按钮）。 */
+		function runFindingAction(action) {
+			const kind = action && action.kind;
+			const plugin = String((action && action.plugin) || "");
+			if (kind !== "upgrade-npm" || !plugin) return Promise.resolve();
+			return api("/action", { method: "POST", body: JSON.stringify({ action: "check-updates" }) })
+				.then((r) => {
+					if (r && r.state) setStore({ data: r.state });
+					const inv = (r && r.inventory) || null;
+					if (inv && inv.ok === false) {
+						toast("读不到已装清单：" + (inv.error || inv.note || "未知原因"));
+						return null;
+					}
+					const item = ((inv && inv.items) || []).find((x) => x && x.name === plugin);
+					const current = item && item.update && item.update.relation === "current";
+					const latest = item && item.update && item.update.relation === "outdated" ? item.update.latestVersion : null;
+					if (!item) {
+						toast("已装清单里没有 " + plugin + "：它可能不是 npm 装的，重启也修不了那份字节");
+						return null;
+					}
+					if (!latest) {
+						toast(current
+							? "npm 上已经是最新版（v" + (item.localVersion || "?") + "）：这个错得等作者修，或先把这个插件停掉"
+							: "查不到 " + plugin + " 的最新版（" + ((item.update && item.update.error) || "registry 没回话") + "）：先按下面几步处置");
+						return null;
+					}
+					toast("升级 " + plugin + " → " + latest);
+					return submitInput("npm:" + (item.registryName || item.name) + "@" + latest);
+				})
+				.catch((e) => toast("检查更新失败：" + String((e && e.message) || e)));
+		}
 
 		function Composer() {
 			const s = useStore();

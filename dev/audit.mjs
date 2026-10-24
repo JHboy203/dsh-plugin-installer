@@ -45,10 +45,10 @@ export const FROZEN_DEFAULTS = {
 };
 
 /** 文档里声明的自检项数（改断言就先跑一次 host_selfcheck，再同步这个数）。 */
-export const EXPECTED_ASSERTIONS = 681;
+export const EXPECTED_ASSERTIONS = 704;
 
 /** 界面自检项数（dev/render-check.cjs）。同样是「文档对表」的一半。 */
-const EXPECTED_RENDER_ASSERTIONS = 115;
+const EXPECTED_RENDER_ASSERTIONS = 118;
 
 /** 期望注册的宿主工具（漏一个 = 模型看不见一项能力）。 */
 const EXPECTED_TOOLS = [
@@ -246,6 +246,23 @@ async function main() {
 	ok("frontmatter 修复：index 暴露 fix-skill-frontmatter", /fix-skill-frontmatter/.test(indexSrc2));
 	ok("frontmatter 修复：不暴露给模型（改用户文件只能人按）", !/fix-skill-frontmatter/.test(toolsSrc) && !/repairSkillFrontmatter/.test(toolsSrc));
 	ok("frontmatter 修复：面板两段式、写明先备份", clientSrc.includes("修成块标量…") && clientSrc.includes("我确认修复") && clientSrc.includes("先备份原文"));
+
+	/* ⑤h R24：客户端包 rev 对账 —— 「日志里失败的那份字节，现在还在不在」。
+	   这块最容易写成**看着对但方向反了**的结论（把「该修」说成「已自愈」），所以判据要钉在源码上：
+	   算法必须复现宿主的（元数据 + framed sha1），combo 尾部那个 rev 必须丢掉，动作必须复用原流水线。 */
+	const revSrc = await readText("lib\\clientrev.js");
+	ok("rev 对账模块存在（R24）", Boolean(revSrc) && /export function artifactRevision/.test(revSrc || ""));
+	ok("rev：域名与宿主一致（plugin-artifact）", /plugin-artifact/.test(revSrc || ""));
+	ok("rev：12 位十六进制（宿主 HASH_REVISION_LENGTH）", /HOST_REV_LENGTH = 12/.test(revSrc || ""));
+	ok("rev：拿文件元数据算，不是读内容（宿主就不读内容）", /mtimeMs/.test(revSrc || "") && /ctimeMs/.test(revSrc || "") && /Buffer\.byteLength/.test(revSrc || ""));
+	ok("rev：combo 尾部的 rev 会被丢掉（记错了会把『该修』降级成『不用修』）", /includes\(","\)/.test(revSrc || ""));
+	ok("rev：入口判据与宿主一致（exports[\"./client\"]）", /exports\["\.\/client"\]/.test(revSrc || ""));
+	ok("体检接了 rev 对账（web-boot 点名的每个包）", /resolveClientArtifact/.test(profileSrc) && /classifyBundle/.test(profileSrc));
+	ok("体检把 rev 结论写进 crash.bundles（工具面看得见）", /crash\.bundles = bundles/.test(profileSrc));
+	ok("摘要行按字节状态改口（还在 / 已重建）", /字节还在/.test(profileSrc) && /字节已重建/.test(profileSrc));
+	ok("动作复用原流水线（index 没有新开安装旁路）", !/reinstall/.test(indexSrc2) && /submitInput\("npm:"/.test(clientSrc));
+	ok("面板渲染 finding.actions", clientSrc.includes("f.actions") && clientSrc.includes("runFindingAction"));
+	ok("体检报告把「面板动作」写出来（模型点不了按钮，但能指路）", /面板动作/.test(toolsSrc));
 
 	/* ⑥ 数据目录：设置文件是否与运行时会一致（手改过就会出现差异） */
 	const settingsFile = join(dataDir(), "settings.json");

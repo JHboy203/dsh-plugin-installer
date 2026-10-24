@@ -11,7 +11,7 @@
  */
 import { mkdtemp, mkdir, readFile, readdir, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { gzipSync, deflateRawSync } from "node:zlib";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
@@ -73,6 +73,7 @@ import * as mExemptions from "../lib/exemptions.js";
 import * as mCompat from "../lib/compat.js";
 import * as mCodestamp from "../lib/codestamp.js";
 import * as mHealth from "../lib/profilehealth.js";
+import * as mRev from "../lib/clientrev.js";
 import { exemptionKey, parseExemptionKey, lookupExemption, summarizeExemptions, exemptionTarget } from "../lib/exemptions.js";
 import { buildInstallerTools } from "../lib/tools.js";
 import { clearSourceCaches, judgeTrust, memoizeTtl, normalizePopularity, searchAll, shapeGithub, shapeHub, shapeNpm, trustLine } from "../lib/sources.js";
@@ -832,6 +833,128 @@ async function main() {
 	await ageFile(webGhost, 5);
 	const findingG3 = (await inspectProfile({ profileDir: crashProfile, hostVersion: "0.2.1-rc.2", dataDir: dir("crashDataG3"), crashDir: crashG3, contract: false, processStartedAt: nowMs - 3 * 3600000 })).findings.find((f) => f.code === "web-boot-recent");
 	ok("crash: 来源判不出时不编（不硬塞来源行）", !findingG3.fix.some((x) => /来自本机目录|来自 npm|\.tgz|Git 仓库/.test(x.text)), findingG3.fix);
+
+	/* G4：client 包 rev 对账（R24）——「日志里失败的那份字节，现在还在不在」。
+	   宿主 @deepseek-ai/dsh-client-modules 的 rev 是 (mtime, ctime, size) 的 framed sha1，
+	   日志把出错的 bundle URL 连同 rev 一起抄了下来 —— 于是这件事可以确定，而不是"可能已自愈"。 */
+	const revVectors = JSON.parse(await readFile(new URL("./fixtures/rev-vectors.json", import.meta.url), "utf8"));
+	const vecOf = (id) => revVectors.vectors.find((v) => v.id === id);
+	const authVec = revVectors.vectors.find((v) => v.authoritative);
+	eq("rev: 复现宿主真机 rev（日志里就是这 12 位）", mRev.artifactRevision(authVec), authVec.rev);
+	ok("rev: 长度前缀生效（size 9 / 10 的 rev 必须不同）",
+		mRev.artifactRevision(vecOf("framing-edge-size-9")) === vecOf("framing-edge-size-9").rev
+		&& mRev.artifactRevision(vecOf("framing-edge-size-10")) === vecOf("framing-edge-size-10").rev
+		&& vecOf("framing-edge-size-9").rev !== vecOf("framing-edge-size-10").rev,
+		[vecOf("framing-edge-size-9").rev, vecOf("framing-edge-size-10").rev]);
+	eq("rev: 入口取 exports[\"./client\"] 字符串", mRev.clientBundleRel({ "./client": "./dist/client.js" }).rel, "./dist/client.js");
+	eq("rev: 入口认 { default } 形式", mRev.clientBundleRel({ "./client": { default: "./client.js" } }).rel, "./client.js");
+	eq("rev: 非法 exports[\"./client\"] 如实说", mRev.clientBundleRel({ "./client": 42 }), { ok: false, reason: "bad-client-export" });
+	eq("rev: 没有 exports 时不给入口", mRev.clientBundleRel(undefined), { ok: false, reason: "no-exports" });
+
+	/* 真装四个「包」：同一份字节 / 字节已变 / 日志没抄 rev / 宿主自带 */
+	const revProfile = dir("revProfile");
+	await mkdir(join(revProfile, "node_modules"), { recursive: true });
+	const mkClientPkg = async (name, rel, body, minutesAgo) => {
+		const pdir = join(revProfile, "node_modules", name);
+		const file = join(pdir, rel);
+		await mkdir(dirname(file), { recursive: true });
+		await writeFile(join(pdir, "package.json"), JSON.stringify({
+			name,
+			version: "1.0.0",
+			dsh: { client: { platform: "web" } },
+			exports: { "./client": rel }
+		}), "utf8");
+		await writeFile(file, body, "utf8");
+		const stamp = new Date(nowMs - minutesAgo * 60000);
+		await utimes(file, stamp, stamp);
+		return file;
+	};
+	await writeFile(join(revProfile, "package.json"), JSON.stringify({
+		name: "rev-fixture",
+		dependencies: {
+			"dsh-rev-same": "^1.0.0",
+			"dsh-rev-rebuilt": "^2.0.0",
+			"dsh-rev-norev": "link:D:\\AI\\dsh-rev-norev",
+			"@deepseek-ai/dsh-hosted": "^0.2.0"
+		},
+		dsh: { profile: { bundles: [] } }
+	}), "utf8");
+	const sameFile = await mkClientPkg("dsh-rev-same", "./client.js", "// same\n", 40);
+	const rebuiltFile = await mkClientPkg("dsh-rev-rebuilt", "./dist/client.js", "// rebuilt\n", 20);
+	await mkClientPkg("dsh-rev-norev", "./client.js", "// norev\n", 60);
+	const hostedFile = await mkClientPkg("@deepseek-ai/dsh-hosted", "./client.js", "// hosted\n", 30);
+	const revOfFile = async (file) => mRev.artifactRevision(await stat(file));
+	const sameRev = await revOfFile(sameFile);
+	const hostedRev = await revOfFile(hostedFile);
+	ok("rev: 真文件的 rev 是 12 位十六进制", /^[0-9a-f]{12}$/.test(sameRev), sameRev);
+	const resolved = await mRev.resolveClientArtifact(revProfile, "dsh-rev-rebuilt");
+	ok("rev: 解析到 dist/client.js 并算出 rev", resolved.ok === true && /(^|[\\/])dist[\\/]client\.js$/.test(resolved.path) && resolved.rev === (await revOfFile(rebuiltFile)), resolved);
+
+	const revLogDir = dir("revLog");
+	await mkdir(revLogDir, { recursive: true });
+	const revLog = join(revLogDir, "crash-2026-10-24T00-10-00-000Z-web-boot.log");
+	await writeFile(revLog, [
+		"time: 2026-10-24T00:10:00.000Z",
+		"source: web-boot",
+		"phase: running",
+		"app: @deepseek-ai/dsh-desktop 0.2.1-rc.2",
+		"",
+		"--- error ---",
+		"Error: web boot: 4 entries did not activate",
+		"dsh-rev-same: import failed: bundle script plugins/??dsh-rev-same/client.js&rev=" + sameRev + " failed to load",
+		"dsh-rev-rebuilt: import failed: bundle script plugins/??dsh-rev-rebuilt/dist/client.js&rev=aaaaaaaaaaaa failed to load",
+		"dsh-rev-norev: import failed (see console for the import error)",
+		"@deepseek-ai/dsh-hosted: import failed: bundle script plugins/??@deepseek-ai/dsh-hosted/client.js&rev=" + hostedRev + " failed to load",
+		"plugins/??a/client.js,b/client.js,dsh-combo-last/client.js&rev=cccccccccccc: skipped after an earlier failure of this bundle"
+	].join("\n"), "utf8");
+	await ageFile(revLog, 300);
+	const revs = mRev.parseBundleRevs(await readFile(revLog, "utf8"));
+	eq("rev: 抓到 per-entry 的 rev", mRev.findBundleRev(revs, "dsh-rev-same"), sameRev);
+	ok("rev: combo 尾部的 rev 不记到最后一个包头（记错了会把『该修』降级成『不用修』）",
+		mRev.findBundleRev(revs, "dsh-combo-last") === null, revs);
+	const revHealth = await inspectProfile({ profileDir: revProfile, hostVersion: "0.2.1-rc.2", dataDir: dir("revData"), crashDir: revLogDir, contract: false, processStartedAt: nowMs - 3 * 3600000 });
+	const revFinding = revHealth.findings.find((f) => f.code === "web-boot-recent");
+	const revBundles = (revHealth.info.crash && revHealth.info.crash.bundles) || [];
+	const stateOf = (name) => (revBundles.find((b) => b.plugin === name) || {}).state;
+	const lineOf = (name) => (revBundles.find((b) => b.plugin === name) || {}).line || "";
+	eq("rev: 同一份字节判成 same", stateOf("dsh-rev-same"), "same");
+	eq("rev: 字节变了判成 rebuilt", stateOf("dsh-rev-rebuilt"), "rebuilt");
+	eq("rev: 日志没抄 rev 的判成 unknown（不硬猜）", stateOf("dsh-rev-norev"), "unknown");
+	eq("rev: 同一份字节即使 stale 也必须是 error", revFinding && revFinding.severity, "error");
+	ok("rev: 标题点出「失败的那份字节还在」", /字节还在/.test((revFinding && revFinding.title) || ""), revFinding && revFinding.title);
+	ok("rev: 处置第一步说清「rev 没变 = 重启没用」", /rev 没变/.test((((revFinding || {}).fix || [])[0] || {}).text || ""), revFinding && revFinding.fix);
+	ok("rev: rebuilt 那条说「已经不在了」", /已经不在了/.test(lineOf("dsh-rev-rebuilt")), lineOf("dsh-rev-rebuilt"));
+	ok("rev: 只给 npm 来源动作（link: 与宿主自带都不给）",
+		Array.isArray(revFinding && revFinding.actions)
+		&& revFinding.actions.some((a) => a.plugin === "dsh-rev-same" && a.kind === "upgrade-npm")
+		&& revFinding.actions.some((a) => a.plugin === "dsh-rev-rebuilt")
+		&& !revFinding.actions.some((a) => a.plugin === "dsh-rev-norev")
+		&& !revFinding.actions.some((a) => a.plugin === "@deepseek-ai/dsh-hosted"),
+		revFinding && revFinding.actions);
+	ok("rev: 摘要行说「失败那份字节还在」", /字节还在/.test(mHealth.describeCrash(revHealth.info.crash)), mHealth.describeCrash(revHealth.info.crash));
+
+	/* G5：全都重建过时，结论要改成「重启一次就行」，不能还指挥人去重装 */
+	const revLogDir2 = dir("revLog2");
+	await mkdir(revLogDir2, { recursive: true });
+	const revLog2 = join(revLogDir2, "crash-2026-10-24T00-20-00-000Z-web-boot.log");
+	await writeFile(revLog2, [
+		"time: 2026-10-24T00:20:00.000Z",
+		"source: web-boot",
+		"phase: running",
+		"app: @deepseek-ai/dsh-desktop 0.2.1-rc.2",
+		"",
+		"--- error ---",
+		"Error: web boot: 1 entry did not activate",
+		"dsh-rev-rebuilt: import failed: bundle script plugins/??dsh-rev-rebuilt/dist/client.js&rev=aaaaaaaaaaaa failed to load"
+	].join("\n"), "utf8");
+	await ageFile(revLog2, 320);
+	const revHealth2 = await inspectProfile({ profileDir: revProfile, hostVersion: "0.2.1-rc.2", dataDir: dir("revData2"), crashDir: revLogDir2, contract: false, processStartedAt: nowMs - 3 * 3600000 });
+	const revFinding2 = revHealth2.findings.find((f) => f.code === "web-boot-recent");
+	eq("rev: 全重建过 + stale = warn（不需要人动手）", revFinding2 && revFinding2.severity, "warn");
+	ok("rev: 标题标「那份已重建」", /那份已重建/.test((revFinding2 && revFinding2.title) || ""), revFinding2 && revFinding2.title);
+	ok("rev: 处置改成「重启一次就能用上」", /重启一次/.test((((revFinding2 || {}).fix || [])[0] || {}).text || ""), revFinding2 && revFinding2.fix);
+	ok("rev: 摘要行说「那份字节已重建」", /字节已重建/.test(mHealth.describeCrash(revHealth2.info.crash)), mHealth.describeCrash(revHealth2.info.crash));
+
 
 	/* H：两张新签名（服务就绪前的 prepare / 返回值不是无损 JSON） */
 	const crashH = dir("crashH");

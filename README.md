@@ -127,7 +127,7 @@
 > **构建标记格式**（`0.1.0 · YYYY-MM-DD HH:MM`，且 `/health` 不许写死）/ 客户端设置与热键入口 /
 > `settings.json` 归一化后逐字不变 / 等待确认任务的 staging 现场还在 / README 与交接文件里的
 > 断言数是否等于 `EXPECTED_ASSERTIONS`。**不碰宿主、不 spawn、不写盘**，只打印
-> 「接着跑 host_selfcheck（681）+ render-check（115）」。自洽检查现已 **101 项**。
+> 「接着跑 host_selfcheck（704）+ render-check（118）」。自洽检查现已 **113 项**。
 > 三层分工至此固定：**audit = 自洽，host_selfcheck = 行为，render-check = 界面**。
 > 线上实测：构建标签 `0.1.0 · 2026-10-20 19:45`、客户端 `r6.0`、`GET/POST /settings` 正常
 > （非法值当场夹取回默认）、`clientReport` 里有 360×658 的窄屏实例。
@@ -495,6 +495,51 @@
 > 断言：hosttest **674 → 681**（+7：三处汇总 1、影子包/别的作用域/官方不误报/无关包/空集合 6），
 > render **115 → 115**，audit **101 → 101**。**宿主侧要重启才生效**。
 
+> **R24（2026-10-24 13:3x）web-boot 失败改成「和磁盘上的字节对账」：不再说「可能已自愈」**：
+>
+> 现场：`crash-2026-10-24T05-03-45-web-boot.log` 点明 `dsh-web-research`、`dsh-plugin-catalog`
+> 两个前端入口没激活。面板当时的结论只有「本次启动之后没有新的失败日志 —— 这条**可能**已自愈」。
+> 这句既不能证明失败的那份字节已经不在了，也不能证明现在就是好的 —— 用户还是不知道该不该动手。
+>
+> 宿主其实给了确定性答案：`@deepseek-ai/dsh-client-modules` 给每个 client bundle 算一个 `rev`
+> 写进 bundle URL（`plugins/??<包名>/client.js&rev=<12 hex>`），崩溃日志把出错的 URL **原样抄了下来**。
+> rev 的算法是
+> `sha1("plugin-artifact" + "\0" + Σ「<bufLen>:<part>」).hex.slice(0,12)`，三个 part 是
+> `String(mtimeMs)` / `String(ctimeMs)` / `String(size)` —— **只读文件元数据，不读内容**。
+>
+> 所以 `lib/clientrev.js` 在宿主里反算「现在这份」的 rev，与日志里的比：
+>
+> | 判定 | 含义 | 结论怎么改口 |
+> |---|---|---|
+> | `same` | 同一份字节 | **即使这条日志是上一次启动留下的，也报 error**：重启只是再错一次 |
+> | `rebuilt` | 日志里那份已被重建/覆盖 | 「那份已经不在了」；全部如此时改成「重启一次就能用上」 |
+> | `unknown` | 日志没抄 rev（`import failed (see console)` 那类） | 只说「失败之后有没有改过」，不许断言好坏 |
+>
+> 两个真机细节（都写进断言了）：
+> - **算法必须逐字一致**：拿 `dsh-diag/client.js` 的 stat 三元组反算，得到的正是日志里那个
+>   `a9448b50cf9f`（`dev/fixtures/rev-vectors.json` 把它钉成固定向量，改成读内容算哈希就当场红）；
+> - **combo URL 尾部那个 `&rev=` 是整条 combo 的哈希，不是最后一个包的**。真机日志里
+>   `…,dsh-plugin-installer/client.js&rev=ae080526f657: skipped after…`，若记到 `dsh-plugin-installer`
+>   头上就会得出「字节变了」→ 把**该修**降级成**不用修**（方向正好反了）。判据：token 里有逗号 = 一串 id，丢弃。
+>
+> 顺带把处置从「泛泛说重装」落到真能做的事：发现卡现在可以带 `actions`
+> （`{kind:"upgrade-npm", plugin, label, hint}`），面板渲染成主按钮 —— 点它先
+> `POST action:check-updates`（30 分钟缓存），**有新版才提交升级**，没有就直说
+> 「已经是最新版：等作者修，或先停掉这个插件」。**只给 npm 来源**：`link:` 重装无意义、
+> `file:` .tgz 同一份字节、Git 同一 spec 会被判 `already-installed` —— 那三种给按钮都是假按钮。
+> `install_hub_doctor` 的工具输出也会把「↳ 面板动作：…」写出来（模型点不了按钮，但能指路）。
+>
+> 新增离线探针 `dev/probe-rev.mjs`（`--full` 连体检结论一起打）：换会话接手时一句话回答
+> 「上次那个没激活的面板修没修」。真机实测：catalog 日志里 `a6173c156f44`、磁盘上 `1ce141eca57c`
+> （13:23:35 重建）→ `rebuilt`；web-research 日志没抄 rev、包自 12:55 未再改 → `unknown`。
+>
+> 断言：hosttest **681 → 704**（+23：算法与入口解析 8、日志 rev 解析与 combo 守卫 2、三态与严重度 5、
+> 处置文案与摘要 4、动作只给 npm 来源 1、全重建时的改口 3），render **115 → 118**
+> （+3：动作按钮文字 / 是主按钮且可点 / 无动作不留空容器），
+> audit **101 → 113**（+12：模块接线、算法域与长度、元数据口径、combo 守卫、入口判据、
+> crash.bundles 落盘、摘要改口、动作复用原流水线、面板渲染、工具输出指路）。
+> **宿主侧（`lib/*`）要重启才生效；`client.js` 提到 BUILD `r22.0`，刷新页面即生效。**
+
 | 项目 | 值 |
 |---|---|
 | 包名 | `dsh-plugin-installer` |
@@ -628,29 +673,37 @@ dsh-tools 钉子是否过期、最近一次启动失败（宿主崩溃 / 前端�
 ```bash
 # ① 自洽体检（最快，不碰宿主、不重启；换会话先跑这条）
 node DSH-Plugin/dsh-plugin-installer/dev/audit.mjs
-#   101 项：默认档冻结快照 / 5 个工具的 output 契约 / 构建标记形如「0.1.0 · 2026-10-22 02:40」/
+#   113 项：默认档冻结快照 / 5 个工具的 output 契约 / 构建标记形如「0.1.0 · 2026-10-22 02:40」/
 #   契约扫描与 profile 体检是否真的接着线 / 失败分诊与批准闭环是否接线 / 版本豁免是否三处一起接 /
 #   staging 是否保住「等确认」的现场 / 状态工具的「环境注意」行 / 「批准」与「授权」都没暴露给模型 /
 #   已装清单四类来源是否分开判 / 宿主自带包是否被排除在升级外 / check-updates 是否只挂在动作上（不在轮询里）/
 #   技能对账的「读不到宿主清单 ≠ 没被认」闸门 / YAML 硬错误与「宿主没认」是否分开判 /
 #   面板有没有把 Skill 卡真的接进 Panel /
+#   rev 对账是否接线（域名 plugin-artifact / 12 位 / 元数据口径 / combo 尾部 rev 丢弃 / crash.bundles /
+#   动作复用原流水线 / 工具输出指路）/
 #   客户端设置与热键入口 / settings.json 归一化后不变 / 等待确认任务的 staging 现场 /
 #   README 与交接文件里的断言数是否等于 EXPECTED_ASSERTIONS（改测试就同步它）
 
-# ② 681 项确定性自检（解包围栏 / 识别短路 / 扫描与密度 / 快照回滚 / 重打包 / prune 保鲜 / 地雷 /
+# ② 704 项确定性自检（解包围栏 / 识别短路 / 扫描与密度 / 快照回滚 / 重打包 / prune 保鲜 / 地雷 /
 #   契约扫描 / profile 体检与修复 / 已装版本对照 / 已装清单判据 / registry 最新版比对（打桩 fetch）/
 #   设置归一化与审核三档 / 红点与跳过审核门禁 / 热键 / 7z 往返与围栏 / 搜索缓存 / 工具契约 /
 #   pnpm 失败分诊 / allowBuilds 解析 / 批准重装 / 版本豁免读写与回读确认 / 兼容降级口径 /
 #   staging 生命周期 / 环境注意 / npm: 前缀不进包名 / SKILL.md 三种 frontmatter 形态 /
 #   技能备份识别 / 磁盘×宿主对账计数与结论分级 / 崩溃分诊（host×web-boot 取最新、sibling、
-#   已知签名、长错误压成包名、renderer 真实异常））
+#   已知签名、长错误压成包名、renderer 真实异常）/
+#   client 包 rev 对账（真机向量复现 / 入口解析 / combo 守卫 / same·rebuilt·unknown 三态 /
+#   同一份字节即使 stale 也是 error / 动作只给 npm 来源 / 全重建时改口成「重启一次」））
 host_selfcheck({ plugin: "dsh-plugin-installer" })
 
-# ③ 无头渲染自检（微型 React 真的渲染一遍；115 项：诊断卡 / 预检卡 / 审查卡 / 设置面板 /
+# ③ 无头渲染自检（微型 React 真的渲染一遍；118 项：诊断卡 / 预检卡 / 审查卡 / 设置面板 /
 #   跳过审核按钮 / 安装脚本批准卡（默认态 + 二次确认态）/ 版本不兼容卡（三态 + 旧豁免失效）/
 #   已装清单（折叠态 / 展开态 / 可升级按钮 / 读不到 / 空 profile）/
-#   已装 Skill（折叠态 / 展开态 / 三种标签 / 读不到 / 空根 / 对账不了））
+#   已装 Skill（折叠态 / 展开态 / 三种标签 / 读不到 / 空根 / 对账不了）/
+#   发现卡动作按钮（文字 / 是主按钮且可点 / 没有动作时不留空容器））
 node DSH-Plugin/dsh-plugin-installer/dev/render-check.cjs
+
+# ④ rev 探针（离线，只读）：算法固定向量 + 最近一份 web-boot 日志里那份字节还在不在
+node DSH-Plugin/dsh-plugin-installer/dev/probe-rev.mjs --full
 
 # 环境体检：只读 → 修（幂等：挪 dsh-tools、从 node_modules 重打包补回 .tgz）
 install_hub_doctor({})
@@ -701,7 +754,7 @@ DSH 每次启动换随机端口（`dsh-desktop-host` 里写死 `--port 0`），�
 
 | 场景 | 结果 |
 |---|---|
-| 确定性自检 | **681/681 通过**（`dev/hosttest.mjs`，含 zip/tar 构造、穿越与软链接拒绝、比例炸弹、5 种识别分支、快照还原、重打包往返、prune 引用保护、地雷处置、契约扫描、profile 体检与修复、设置归一化、审核三档、热键、pnpm 失败分诊、allowBuilds 解析、批准重装与三道闸、落盘串行、版本豁免读写与回读确认、兼容降级口径、预检「已授权不再阻断」回归、staging 生命周期、环境注意、运行中代码指纹、已装清单四类来源、registry 比对与缓存、npm: 前缀、**inject 六种写法与边界、激活失败分诊、fiberPhase 判据、SKILL.md 三种 frontmatter 形态、YAML 硬错误判据、技能备份识别与磁盘×宿主对账、指纹两栏（宿主/客户端）、备份处置的越权拒绝与真实搬运、frontmatter 改写的三道自检与真实修复、崩溃分诊两类日志与已知签名、崩溃结论的新鲜度（stale）、崩溃处置的来源判据（link:/tgz/git/npm）与两张新签名（prepare / lossless JSON）、YAML 三类新硬错误（Tab 缩进 / 重复键 / 引号没闭合）与「不可自动改写」分流、搜索结果影子包警戒（官方 @deepseek-ai/* 同名但不全等）**）；另 **115 项**无头渲染 + **101 项**自洽体检 |
+| 确定性自检 | **704/704 通过**（`dev/hosttest.mjs`，含 zip/tar 构造、穿越与软链接拒绝、比例炸弹、5 种识别分支、快照还原、重打包往返、prune 引用保护、地雷处置、契约扫描、profile 体检与修复、设置归一化、审核三档、热键、pnpm 失败分诊、allowBuilds 解析、批准重装与三道闸、落盘串行、版本豁免读写与回读确认、兼容降级口径、预检「已授权不再阻断」回归、staging 生命周期、环境注意、运行中代码指纹、已装清单四类来源、registry 比对与缓存、npm: 前缀、**inject 六种写法与边界、激活失败分诊、fiberPhase 判据、SKILL.md 三种 frontmatter 形态、YAML 硬错误判据、技能备份识别与磁盘×宿主对账、指纹两栏（宿主/客户端）、备份处置的越权拒绝与真实搬运、frontmatter 改写的三道自检与真实修复、崩溃分诊两类日志与已知签名、崩溃结论的新鲜度（stale）、崩溃处置的来源判据（link:/tgz/git/npm）与两张新签名（prepare / lossless JSON）、YAML 三类新硬错误（Tab 缩进 / 重复键 / 引号没闭合）与「不可自动改写」分流、搜索结果影子包警戒（官方 @deepseek-ai/* 同名但不全等）、客户端包 rev 对账（真机向量 / combo 守卫 / same·rebuilt·unknown 与「同一份字节即使 stale 也报 error」/ 动作只给 npm 来源）**）；另 **118 项**无头渲染 + **113 项**自洽体检 |
 | 已装 Skill（R14 实测，本机） | 技能根 `.dsh/skills` 下 **59 个目录 = 55 个技能 + 4 个备份残留**；上线第一分钟抓出 **3 个 frontmatter 不是合法 YAML** 的技能（`github-private-backup` / `win-desktop-automation` / `windows-disk-reclaim`，PyYAML 复核：`mapping values are not allowed here`）→ 宿主读不出 name、整条跳过；用 `.tools/fix-skill-frontmatter.py --apply`（写前备份、写后 PyYAML 复核）改成块标量后，宿主重扫即认到 —— **`hostVisible` 55/55、`yamlBroken` 0、`notVisible` 0**；`domain-modeling` / `grill-me` / `grill-with-docs` / `grilling` 各有一份 `.bak-mp20261017-1350` 同名备份（尚未清）；11 个技能的 description 是 `>` 折叠块，旧解析把它们读成「>」 |
 | 激活失败的真实样本（R13 实测） | `dsh-imgops` 两次任务：①宿主返回 `application:"failed" / stage:"enable" / diagnostic:"1 entry did not activate … cannot get property \"tools\" without inject"`（pnpm exit 0、包已落地）→ 新分诊判 `activation-failed`，标题点名缺 `tools`，处置给出 `export const inject = ['tools']`；② `already-installed` → 判 noop + 照常诊断。同机 4 个健康插件（本插件 / dsh-screenshot / dsh-diag / dsh-ops）静态扫描**零误报**（canvas 的 `ctx.fillRect` 不计入） |
 | 重装静默无效（R13 第二个 bug） | 修好 `dsh-imgops` 并升到 0.1.1 重新提交，宿主仍回 `already-installed`（实测 `changed:false`、`elapsedMs:11`、pnpm 没跑）—— 判据是依赖行的 spec 字符串，不含版本文件名就永远是同一个 spec。修法：`pkg-<名字>-<版本>.tgz` + 只收「没人引用的旧包」 |
@@ -763,10 +816,11 @@ lib/activation.js        R13：激活判据唯一来源（enabled+fiberPhase≠a
 lib/skills.js            R14：已装 Skill —— 磁盘扫技能根 × 宿主 ctx.skills.list() 对账（没被认/重名/备份/不会自动调用）
 dev/verify-r13.mjs       R13：端到端验收器（运行中代码 / 提交 / ⑧ 回执 / ⑨ 诊断 / 体检），逐条 PASS/FAIL
 lib/tools.js             五个宿主工具定义（含 output 契约）
-dev/hosttest.mjs         681 项确定性自检（宿主进程跑）
+dev/hosttest.mjs         704 项确定性自检（宿主进程跑）
 dev/probe-crash.mjs      R17：不进宿主、只读真实崩溃日志，看分诊判据（改 lib 后立刻能验）
-dev/render-check.cjs     115 项无头渲染自检（诊断卡 / 预检卡 / 审查卡 / 设置面板 / 跳过审核 / 批准卡 / 兼容卡 / **已装清单 / 已装 Skill（含移出与修复确认态、不可自动改写态）/ 窄屏结构契约**）
-dev/audit.mjs            101 项自洽体检（不碰宿主；换会话先跑这个）
+dev/probe-rev.mjs        R24：算法固定向量 + 最近一份 web-boot 日志里那份 client 包还在不在（`--full` 连体检结论）
+dev/render-check.cjs     118 项无头渲染自检（诊断卡 / 预检卡 / 审查卡 / 设置面板 / 跳过审核 / 批准卡 / 兼容卡 / **已装清单 / 已装 Skill（含移出与修复确认态、不可自动改写态）/ 窄屏结构契约 / 发现卡动作按钮**）
+dev/audit.mjs            113 项自洽体检（不碰宿主；换会话先跑这个）
 dev/probe-inject.mjs     手动探针：拿本机真实插件验 inject 扫描会不会误报（R13）
 dev/quarantine-dshtools.mjs  手动兜底：把埋下的 dsh-tools 挪进备份（薄壳，复用 lib/landmine.js）
 dev/restore-vendor-tarball.mjs 手动兜底：把断掉的 file: 依赖补回来（薄壳，复用 lib/repair.js）

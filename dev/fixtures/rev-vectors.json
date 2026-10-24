@@ -1,0 +1,41 @@
+{
+  "note": "宿主 @deepseek-ai/dsh-client-modules 的 artifactRevision 固定向量。第一条是**真机观测值**：2026-10-24 13:03 的 crash-*-web-boot.log 里写着 dsh-diag/client.js&rev=a9448b50cf9f，而该文件的 stat 三元组就是下面这组 —— 所以它同时证明了『我们的反算 = 宿主算的』。改 lib/clientrev.js 的算法会让这条当场红。",
+  "vectors": [
+    {
+      "id": "real-dsh-diag-20261024",
+      "source": "profile/node_modules/dsh-diag/client.js（宿主日志实测 rev）",
+      "mtimeMs": "1792138989498.4966",
+      "ctimeMs": "1792138989504.0027",
+      "size": 29154,
+      "rev": "a9448b50cf9f",
+      "authoritative": true
+    },
+    {
+      "id": "real-dsh-plugin-catalog-20261024",
+      "source": "profile/node_modules/dsh-plugin-catalog/client.js（本机复算，用于防回归）",
+      "mtimeMs": "1792818633151.6636",
+      "ctimeMs": "1792818633160.043",
+      "size": 160913,
+      "rev": "b8d1e4459df4",
+      "authoritative": false
+    },
+    {
+      "id": "framing-edge-size-9",
+      "source": "合成：size=9（长度前缀 1 字符）",
+      "mtimeMs": "1",
+      "ctimeMs": "2",
+      "size": 9,
+      "rev": "508e2203e82f",
+      "authoritative": false
+    },
+    {
+      "id": "framing-edge-size-10",
+      "source": "合成：size=10（长度前缀变 2 字符）—— 与上一条不同才证明 framing 生效",
+      "mtimeMs": "1",
+      "ctimeMs": "2",
+      "size": 10,
+      "rev": "029f6f5a4703",
+      "authoritative": false
+    }
+  ]
+}
