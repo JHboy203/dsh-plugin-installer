@@ -43,9 +43,11 @@ import { buildStamp } from "../lib/hostinfo.js";
 import { normalizeNpmSpec } from "../lib/download.js";
 import {
 	annotateInstalled,
+	annotateShadows,
 	classifyDepSpec,
 	installedIndex,
 	npmAliasTarget,
+	officialBasenames,
 	readInventory,
 	summarizeInventory
 } from "../lib/inventory.js";
@@ -2137,6 +2139,28 @@ async function main() {
 	eq("inventory: 已装标记大小写不敏感", annotated[1].installedKnown, true);
 	eq("inventory: 没装的不会被误标", annotated[2].installedKnown, false);
 	ok("inventory: 名字→版本索引只有已装的", installedIndex(inv).size === 6, installedIndex(inv).size);
+
+	/* R23：影子包警戒 —— 名字撞官方 @deepseek-ai/*，但全名不是官方那个 */
+	const shadowProfile = dir("shadowProfile");
+	await mkdir(join(shadowProfile, "node_modules", "@deepseek-ai", "dsh-web-app"), { recursive: true });
+	await writeFile(join(shadowProfile, "package.json"), JSON.stringify({
+		dependencies: { "@deepseek-ai/dsh-base": "0.2.1" },
+		dsh: { profile: { bundles: ["@deepseek-ai/dsh-tools"] } }
+	}), "utf8");
+	const official = await officialBasenames(shadowProfile);
+	ok("shadow: 官方名从 deps/bundles/node_modules 三处汇总", ["dsh-base", "dsh-tools", "dsh-web-app"].every((n) => official.has(n)), [...official]);
+	const shadowItems = annotateShadows([
+		{ name: "dsh-base", trust: { level: "community", badges: [], flags: [], score: 40 } },
+		{ name: "@someone/dsh-tools", trust: { level: "community", badges: [], flags: [], score: 60 } },
+		{ name: "@deepseek-ai/dsh-base", trust: { level: "official", badges: [], flags: [], score: 95 } },
+		{ name: "dsh-unrelated", trust: { level: "community", badges: [], flags: [], score: 40 } }
+	], official);
+	eq("shadow: 未加作用域的同名包被标出官方名", shadowItems[0].shadowOf, "@deepseek-ai/dsh-base");
+	ok("shadow: 影子包带 error 红旗并扣 20 分", shadowItems[0].trust.flags.some((f) => f.id === "official-shadow" && f.tone === "error") && shadowItems[0].trust.score === 20, shadowItems[0].trust);
+	eq("shadow: 别的作用域的同名包同样标出", shadowItems[1].shadowOf, "@deepseek-ai/dsh-tools");
+	ok("shadow: 官方包自己不误报", shadowItems[2].shadowOf === undefined && !shadowItems[2].trust.flags.some((f) => f.id === "official-shadow"), shadowItems[2].trust);
+	ok("shadow: 无关包原样返回", shadowItems[3].shadowOf === undefined && shadowItems[3].trust.score === 40, shadowItems[3].trust);
+	ok("shadow: 没有官方名时不动（不猜）", annotateShadows([{ name: "dsh-base" }], new Set())[0].shadowOf === undefined);
 
 	/* 更新比对：判据（纯函数）+ 接线（打桩 fetch，不联网） */
 	eq("updates: 本地旧 → 可升级", relationOf("0.4.7", "0.4.8"), "outdated");

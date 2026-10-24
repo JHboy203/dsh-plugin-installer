@@ -127,7 +127,7 @@
 > **构建标记格式**（`0.1.0 · YYYY-MM-DD HH:MM`，且 `/health` 不许写死）/ 客户端设置与热键入口 /
 > `settings.json` 归一化后逐字不变 / 等待确认任务的 staging 现场还在 / README 与交接文件里的
 > 断言数是否等于 `EXPECTED_ASSERTIONS`。**不碰宿主、不 spawn、不写盘**，只打印
-> 「接着跑 host_selfcheck（674）+ render-check（115）」。自洽检查现已 **101 项**。
+> 「接着跑 host_selfcheck（681）+ render-check（115）」。自洽检查现已 **101 项**。
 > 三层分工至此固定：**audit = 自洽，host_selfcheck = 行为，render-check = 界面**。
 > 线上实测：构建标签 `0.1.0 · 2026-10-20 19:45`、客户端 `r6.0`、`GET/POST /settings` 正常
 > （非法值当场夹取回默认）、`clientReport` 里有 360×658 的窄屏实例。
@@ -472,6 +472,29 @@
 > 结论：R16 的「先备份原文 → 原子写 → 三道自检 → 宿主重扫」与 R21 的「可修复性分流」在真实宿主上都成立。
 > 自检数字不变（674 / 115 / 101）。
 
+> **R23（2026-10-24 12:4x）搜索结果标出「影子包」：名字撞官方、但全名不是官方那个**：
+>
+> 一直挂着的候选 ④「同名抢注靠人看」。真实的形态很具体：本机官方包是 `@deepseek-ai/dsh-base`、
+> `@deepseek-ai/dsh-tools`……而 npm 上可能另有**未加作用域的同名包**（`dsh-base`）或**别的作者的同名包**
+> （`@someone/dsh-tools`）。两者在搜索结果卡上看起来几乎一样，装错了就是另一份代码。
+>
+> 判据只用**本机事实**，不靠「名字像官方」猜：`officialBasenames(profileDir)` 从三处汇总
+> `@deepseek-ai/*` 的 basename —— profile 的 `dependencies`、`dsh.profile.bundles`、
+> `node_modules/@deepseek-ai/` 目录。
+>
+> `annotateShadows(items, official)` 的行为：
+> - 未加作用域的同名包 → `trust.flags` 加一条 **error** 红旗：「未加作用域的同名包；官方那份是
+>   `@deepseek-ai/dsh-base` —— 这条不是它，装之前确认要哪一个」，并**扣 20 分**；
+> - 别的作用域的同名包（`@someone/dsh-tools`）同样标出，文案说清作用域不同；
+> - **官方包自己绝不误报**（`@deepseek-ai/` 开头直接放行）；
+> - 没有官方名可判（空集合）时**原样返回**，不猜。
+>
+> 接线在 `pipeline.search()`（与 R12 的「已装」标记同一条链），客户端早已渲染 `trust.flags`，
+> **不需要改 client.js**。`install_hub_search_plugins` 的工具描述也补了这句。
+>
+> 断言：hosttest **674 → 681**（+7：三处汇总 1、影子包/别的作用域/官方不误报/无关包/空集合 6），
+> render **115 → 115**，audit **101 → 101**。**宿主侧要重启才生效**。
+
 | 项目 | 值 |
 |---|---|
 | 包名 | `dsh-plugin-installer` |
@@ -614,7 +637,7 @@ node DSH-Plugin/dsh-plugin-installer/dev/audit.mjs
 #   客户端设置与热键入口 / settings.json 归一化后不变 / 等待确认任务的 staging 现场 /
 #   README 与交接文件里的断言数是否等于 EXPECTED_ASSERTIONS（改测试就同步它）
 
-# ② 674 项确定性自检（解包围栏 / 识别短路 / 扫描与密度 / 快照回滚 / 重打包 / prune 保鲜 / 地雷 /
+# ② 681 项确定性自检（解包围栏 / 识别短路 / 扫描与密度 / 快照回滚 / 重打包 / prune 保鲜 / 地雷 /
 #   契约扫描 / profile 体检与修复 / 已装版本对照 / 已装清单判据 / registry 最新版比对（打桩 fetch）/
 #   设置归一化与审核三档 / 红点与跳过审核门禁 / 热键 / 7z 往返与围栏 / 搜索缓存 / 工具契约 /
 #   pnpm 失败分诊 / allowBuilds 解析 / 批准重装 / 版本豁免读写与回读确认 / 兼容降级口径 /
@@ -678,7 +701,7 @@ DSH 每次启动换随机端口（`dsh-desktop-host` 里写死 `--port 0`），�
 
 | 场景 | 结果 |
 |---|---|
-| 确定性自检 | **674/674 通过**（`dev/hosttest.mjs`，含 zip/tar 构造、穿越与软链接拒绝、比例炸弹、5 种识别分支、快照还原、重打包往返、prune 引用保护、地雷处置、契约扫描、profile 体检与修复、设置归一化、审核三档、热键、pnpm 失败分诊、allowBuilds 解析、批准重装与三道闸、落盘串行、版本豁免读写与回读确认、兼容降级口径、预检「已授权不再阻断」回归、staging 生命周期、环境注意、运行中代码指纹、已装清单四类来源、registry 比对与缓存、npm: 前缀、**inject 六种写法与边界、激活失败分诊、fiberPhase 判据、SKILL.md 三种 frontmatter 形态、YAML 硬错误判据、技能备份识别与磁盘×宿主对账、指纹两栏（宿主/客户端）、备份处置的越权拒绝与真实搬运、frontmatter 改写的三道自检与真实修复、崩溃分诊两类日志与已知签名、崩溃结论的新鲜度（stale）、崩溃处置的来源判据（link:/tgz/git/npm）与两张新签名（prepare / lossless JSON）、YAML 三类新硬错误（Tab 缩进 / 重复键 / 引号没闭合）与「不可自动改写」分流**）；另 **115 项**无头渲染 + **101 项**自洽体检 |
+| 确定性自检 | **681/681 通过**（`dev/hosttest.mjs`，含 zip/tar 构造、穿越与软链接拒绝、比例炸弹、5 种识别分支、快照还原、重打包往返、prune 引用保护、地雷处置、契约扫描、profile 体检与修复、设置归一化、审核三档、热键、pnpm 失败分诊、allowBuilds 解析、批准重装与三道闸、落盘串行、版本豁免读写与回读确认、兼容降级口径、预检「已授权不再阻断」回归、staging 生命周期、环境注意、运行中代码指纹、已装清单四类来源、registry 比对与缓存、npm: 前缀、**inject 六种写法与边界、激活失败分诊、fiberPhase 判据、SKILL.md 三种 frontmatter 形态、YAML 硬错误判据、技能备份识别与磁盘×宿主对账、指纹两栏（宿主/客户端）、备份处置的越权拒绝与真实搬运、frontmatter 改写的三道自检与真实修复、崩溃分诊两类日志与已知签名、崩溃结论的新鲜度（stale）、崩溃处置的来源判据（link:/tgz/git/npm）与两张新签名（prepare / lossless JSON）、YAML 三类新硬错误（Tab 缩进 / 重复键 / 引号没闭合）与「不可自动改写」分流、搜索结果影子包警戒（官方 @deepseek-ai/* 同名但不全等）**）；另 **115 项**无头渲染 + **101 项**自洽体检 |
 | 已装 Skill（R14 实测，本机） | 技能根 `.dsh/skills` 下 **59 个目录 = 55 个技能 + 4 个备份残留**；上线第一分钟抓出 **3 个 frontmatter 不是合法 YAML** 的技能（`github-private-backup` / `win-desktop-automation` / `windows-disk-reclaim`，PyYAML 复核：`mapping values are not allowed here`）→ 宿主读不出 name、整条跳过；用 `.tools/fix-skill-frontmatter.py --apply`（写前备份、写后 PyYAML 复核）改成块标量后，宿主重扫即认到 —— **`hostVisible` 55/55、`yamlBroken` 0、`notVisible` 0**；`domain-modeling` / `grill-me` / `grill-with-docs` / `grilling` 各有一份 `.bak-mp20261017-1350` 同名备份（尚未清）；11 个技能的 description 是 `>` 折叠块，旧解析把它们读成「>」 |
 | 激活失败的真实样本（R13 实测） | `dsh-imgops` 两次任务：①宿主返回 `application:"failed" / stage:"enable" / diagnostic:"1 entry did not activate … cannot get property \"tools\" without inject"`（pnpm exit 0、包已落地）→ 新分诊判 `activation-failed`，标题点名缺 `tools`，处置给出 `export const inject = ['tools']`；② `already-installed` → 判 noop + 照常诊断。同机 4 个健康插件（本插件 / dsh-screenshot / dsh-diag / dsh-ops）静态扫描**零误报**（canvas 的 `ctx.fillRect` 不计入） |
 | 重装静默无效（R13 第二个 bug） | 修好 `dsh-imgops` 并升到 0.1.1 重新提交，宿主仍回 `already-installed`（实测 `changed:false`、`elapsedMs:11`、pnpm 没跑）—— 判据是依赖行的 spec 字符串，不含版本文件名就永远是同一个 spec。修法：`pkg-<名字>-<版本>.tgz` + 只收「没人引用的旧包」 |
@@ -740,7 +763,7 @@ lib/activation.js        R13：激活判据唯一来源（enabled+fiberPhase≠a
 lib/skills.js            R14：已装 Skill —— 磁盘扫技能根 × 宿主 ctx.skills.list() 对账（没被认/重名/备份/不会自动调用）
 dev/verify-r13.mjs       R13：端到端验收器（运行中代码 / 提交 / ⑧ 回执 / ⑨ 诊断 / 体检），逐条 PASS/FAIL
 lib/tools.js             五个宿主工具定义（含 output 契约）
-dev/hosttest.mjs         674 项确定性自检（宿主进程跑）
+dev/hosttest.mjs         681 项确定性自检（宿主进程跑）
 dev/probe-crash.mjs      R17：不进宿主、只读真实崩溃日志，看分诊判据（改 lib 后立刻能验）
 dev/render-check.cjs     115 项无头渲染自检（诊断卡 / 预检卡 / 审查卡 / 设置面板 / 跳过审核 / 批准卡 / 兼容卡 / **已装清单 / 已装 Skill（含移出与修复确认态、不可自动改写态）/ 窄屏结构契约**）
 dev/audit.mjs            101 项自洽体检（不碰宿主；换会话先跑这个）
