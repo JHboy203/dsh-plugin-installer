@@ -45,10 +45,10 @@ export const FROZEN_DEFAULTS = {
 };
 
 /** 文档里声明的自检项数（改断言就先跑一次 host_selfcheck，再同步这个数）。 */
-export const EXPECTED_ASSERTIONS = 704;
+export const EXPECTED_ASSERTIONS = 744;
 
 /** 界面自检项数（dev/render-check.cjs）。同样是「文档对表」的一半。 */
-const EXPECTED_RENDER_ASSERTIONS = 118;
+const EXPECTED_RENDER_ASSERTIONS = 122;
 
 /** 期望注册的宿主工具（漏一个 = 模型看不见一项能力）。 */
 const EXPECTED_TOOLS = [
@@ -158,6 +158,7 @@ async function main() {
 	   ① 读记录的模块存在；② 判定时真的把 exemptions 传进评估器；③ 面板能授权、模型不能。 */
 	const exemptionsSrc = await readText("lib\\exemptions.js");
 	const profileSrc = (await readText("lib\\profilehealth.js")) || "";
+	const sourcesSrc = (await readText("lib\\sources.js")) || "";
 	ok("豁免模块存在（R10）", Boolean(exemptionsSrc) && /export function exemptionTarget/.test(exemptionsSrc));
 	ok("豁免：记录文件名与宿主一致", /EXEMPTIONS_FILENAME = "compatibility\.json"/.test(exemptionsSrc || ""));
 	ok("豁免：授权走宿主接口（不是自己写文件）", /setVersionExemption/.test(exemptionsSrc) && /acceptRisk/.test(exemptionsSrc));
@@ -263,6 +264,23 @@ async function main() {
 	ok("动作复用原流水线（index 没有新开安装旁路）", !/reinstall/.test(indexSrc2) && /submitInput\("npm:"/.test(clientSrc));
 	ok("面板渲染 finding.actions", clientSrc.includes("f.actions") && clientSrc.includes("runFindingAction"));
 	ok("体检报告把「面板动作」写出来（模型点不了按钮，但能指路）", /面板动作/.test(toolsSrc));
+
+	/* ⑤j R25：「已装」必须分来源。本机 47 个依赖里 24 个是 link: 的本机目录（自己写的插件），
+	   只按名字说「已装」，同名 npm 包会被当成同一个包 —— 点安装就把本机那份换掉。
+	   判据钉在源码上：仓库归一是纯函数、对账按形态分级、红旗与提示都要真的接出去。 */
+	/* R25 起与 R12 共用同一个 invSrc（下面是同一份文件的另一组判据） */
+	ok("来源对账模块（R25）", Boolean(invSrc) && /export function repoKey/.test(invSrc || ""));
+	ok("repoKey：认 scp / github: / git+https / 裸 o/r", /\[\\w\.-\]\+@\(\[\\w\.-\]\+\):/.test(invSrc || "") && /github\|gh\|gitlab\|bitbucket/.test(invSrc || ""));
+	ok("repoKey：子目录路径只取前两段（tree/<branch>/<sub> 不算不同仓库）", /clean\.length < 2/.test(invSrc || ""));
+	ok("对账按安装形态分级（link 一定不同）", /known\.kind === "link"/.test(invSrc || "") && /known\.kind === "git"/.test(invSrc || "") && /known\.kind === "tarball"/.test(invSrc || ""));
+	ok("对账：两边仓库都未知就不判（不猜也不标红）", /if \(!known\.repoKey \|\| !cand\) return \{ source: "unknown"/.test(invSrc || ""));
+	ok("已装标记带上来源形态", /installedKindLabel: known\.kindLabel/.test(invSrc || ""));
+	ok("不同来源塞 name-collision 红旗", /id: "name-collision"/.test(invSrc || ""));
+	ok("只在本机：搜本机插件时给一句解释", /export function localOnlyHint/.test(invSrc || "") && /不会出现在 npm \/ GitHub/.test(invSrc || ""));
+	ok("pipeline 的 search 把 repoUrl 与 localOnly 带出去", /repoUrl: item\.repoUrl/.test(pipelineSrc) && /localOnly: localOnlyHint\(inv, query, items\)/.test(pipelineSrc));
+	ok("搜索结果带上游仓库地址（三个 shaper 都带）", (sourcesSrc.match(/repoUrl/g) || []).length >= 3);
+	ok("工具输出不再丢掉「已装」（模型也要看得见）", /已装 " \+ \(item\.installed/.test(toolsSrc) && /result\.localOnly/.test(toolsSrc));
+	ok("面板 chip 写出来源形态，并把提示渲染出来", clientSrc.includes("installedKindLabel") && clientSrc.includes("localOnly.text"));
 
 	/* ⑥ 数据目录：设置文件是否与运行时会一致（手改过就会出现差异） */
 	const settingsFile = join(dataDir(), "settings.json");

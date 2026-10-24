@@ -175,7 +175,7 @@ function textOf(node, acc) {
  * 正常不执行，所以**数源码不等于数断言**（实测 103 处、只跑 80 条）。真正的判据只能是
  * 「这次实际跑了几条」，所以由脚本自己报总数、并由自己比对。
  */
-const EXPECTED_TOTAL = 118;
+const EXPECTED_TOTAL = 122;
 
 let failed = 0;
 let passed = 0;
@@ -845,6 +845,50 @@ if (typeof t.Skills === "function") {
 	t.store.local = savedSkillsLocal;
 } else {
 	check("__test 暴露了 Skills", false);
+}
+
+/* ── R25：搜索卡上的「已装」要分来源 ─────────────────────────────────────
+ * 本机 24 个依赖是 link: 的本机目录（自己写的插件）。只按名字显示「已装」，
+ * 同名 npm 包会被当成同一个包 —— 点安装就把本机那份换掉。这里钉两件事：
+ *  ① chip 必须带来源形态（「已装 v0.4.0 · 本机目录」），不是只有版本号；
+ *  ② 「同名但来源不同」的红旗、「你搜的是本机插件」的提示必须真的画出来。 */
+if (typeof t.AiBox === "function") {
+	const savedAiLocal = t.store.local;
+	t.store.local = Object.assign({}, savedAiLocal, {
+		aiBusy: false,
+		ai: {
+			reply: "搜索：dsh-imgops（6 条）",
+			searchOnly: true,
+			localOnly: { name: "dsh-imgops", version: "0.4.0", kind: "link", kindLabel: "本机目录", spec: "link:D:/信息库/AI工作区/DSH-Plugin/dsh-imgops",
+				text: "「dsh-imgops」是本机已装的插件（本机目录），本机目录装的（link:），不会出现在 npm / GitHub 的检索结果里" },
+			recommendations: [
+				{
+					name: "dsh-imgops", source: "npm", spec: "dsh-imgops@0.4.0", version: "0.4.0", why: "同名但不同来源",
+					installedKnown: true, installed: "0.4.0", installedKindLabel: "本机目录",
+					installedSpec: "link:D:/信息库/AI工作区/DSH-Plugin/dsh-imgops", installedSource: "different",
+					trust: { level: "community", badges: [], flags: [{ id: "name-collision", tone: "error",
+						text: "同名但来源不同：本机这份是本机目录（link:…），这条来自 npm —— 装它会把本机那份换掉" }], score: 40 }
+				},
+				{
+					name: "dsh-never", source: "npm", spec: "dsh-never@1.0.0", version: "1.0.0", why: "没装过",
+					installed: null, installedKnown: false,
+					trust: { level: "community", badges: [], flags: [], score: 60 }
+				}
+			]
+		}
+	});
+	resetHooks();
+	const aiText = textOf(t.AiBox({})).join(" | ");
+	check("搜索卡：已装标记带来源形态（本机目录）", aiText.includes("已装 v0.4.0 · 本机目录"), aiText.slice(0, 300));
+	check("搜索卡：同名不同来源的红旗画出来", aiText.includes("同名但来源不同：本机这份是本机目录"), aiText.slice(0, 400));
+	check("搜索卡：搜的是本机插件时有一句解释", aiText.includes("本机已装的插件（本机目录）"), aiText.slice(0, 300));
+	t.store.local = Object.assign({}, savedAiLocal, { aiBusy: false, ai: { reply: "搜索：x（2 条）", searchOnly: true, localOnly: null, recommendations: [] } });
+	resetHooks();
+	const aiPlain = textOf(t.AiBox({})).join(" | ");
+	check("搜索卡：没有这条提示时不画空容器", !aiPlain.includes("本机已装的插件"), aiPlain.slice(0, 200));
+	t.store.local = savedAiLocal;
+} else {
+	check("__test 暴露了 AiBox", false);
 }
 
 /* ── R20：窄屏结构契约（360×658）───────────────────────────────────────────

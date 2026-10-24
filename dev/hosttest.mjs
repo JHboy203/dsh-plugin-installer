@@ -45,10 +45,13 @@ import {
 	annotateInstalled,
 	annotateShadows,
 	classifyDepSpec,
+	compareInstalledSource,
 	installedIndex,
+	localOnlyHint,
 	npmAliasTarget,
 	officialBasenames,
 	readInventory,
+	repoKey,
 	summarizeInventory
 } from "../lib/inventory.js";
 import { checkUpdates, clearUpdateCache, clockText as mClockText, mergeUpdates, registryUrl, relationOf, summarizeUpdates } from "../lib/updates.js";
@@ -2262,6 +2265,81 @@ async function main() {
 	eq("inventory: 已装标记大小写不敏感", annotated[1].installedKnown, true);
 	eq("inventory: 没装的不会被误标", annotated[2].installedKnown, false);
 	ok("inventory: 名字→版本索引只有已装的", installedIndex(inv).size === 6, installedIndex(inv).size);
+
+	/* ── R25：仓库地址归一 + 「同名但来源不同」对账 ──────────────────────
+	   为什么必须逐条钉：这一层判错的代价是**覆盖用户自己的插件**（本机 24 个 link: 依赖）。
+	   判据只认两种确定性事实：依赖的安装形态（link/tarball/git/npm）+ 两边的 repository。 */
+	const keyCases = [
+		["git+https://github.com/Anionex/dsh-vision-toolkit.git", "github.com/anionex/dsh-vision-toolkit"],
+		["https://github.com/zhu1090093659/dsh-web.git", "github.com/zhu1090093659/dsh-web"],
+		["github:PerryLink/dsh-checkpoint-rewind", "github.com/perrylink/dsh-checkpoint-rewind"],
+		["git@github.com:T-Auto/dsh-ops.git", "github.com/t-auto/dsh-ops"],
+		["Owner/Repo", "github.com/owner/repo"],
+		["https://github.com/o/r/tree/main/packages/x", "github.com/o/r"],
+		[{ url: "git+https://github.com/a/b.git" }, "github.com/a/b"],
+		["https://gitlab.com/g/p", "gitlab.com/g/p"]
+	];
+	for (const [input, want] of keyCases) eq("repoKey: " + JSON.stringify(input).slice(0, 46), repoKey(input), want);
+	eq("repoKey: .git 后缀不算不同仓库", repoKey("https://github.com/o/r.git"), repoKey("github:o/r"));
+	for (const junk of [null, "", "   ", "https://example.com/only-one-seg", "not a url at all"]) {
+		eq("repoKey: 认不出就 null（不猜）", repoKey(junk), null);
+	}
+
+	const localKnown = { kind: "link", kindLabel: "本机目录", spec: "link:D:/信息库/AI工作区/DSH-Plugin/dsh-imgops", localVersion: "0.4.0", repoKey: null };
+	const npmKnown = { kind: "npm", kindLabel: "npm", spec: "^1.2.0", localVersion: "1.2.0", repoKey: "github.com/a/dsh-x" };
+	const gitKnown = { kind: "git", kindLabel: "Git", spec: "github:b/dsh-y", localVersion: null, repoKey: "github.com/b/dsh-y" };
+	const tgzKnown = { kind: "tarball", kindLabel: ".tgz", spec: "file:D:/x.tgz", localVersion: "2.0.0", repoKey: null };
+
+	const vsLocal = compareInstalledSource(localKnown, { source: "npm", repoUrl: "https://github.com/a/dsh-x" });
+	eq("来源对账: 本机目录装的，同名的 npm 包一定算「来源不同」", vsLocal.source, "different");
+	eq("来源对账: 本机目录这条是 error 级", vsLocal.tone, "error");
+	ok("来源对账: 明说会换掉本机那份", /本机目录/.test(vsLocal.text) && /换掉/.test(vsLocal.text), vsLocal.text);
+
+	eq("来源对账: git 装的仓库对得上 → 同一个",
+		compareInstalledSource(gitKnown, { source: "github", repoUrl: "https://github.com/B/dsh-y" }).source, "same");
+	eq("来源对账: git 装的仓库对不上 → 来源不同",
+		compareInstalledSource(gitKnown, { source: "npm", repoUrl: "https://github.com/c/dsh-y" }).source, "different");
+	eq("来源对账: npm 范围两边仓库一致 → 同一个",
+		compareInstalledSource(npmKnown, { source: "npm", repoUrl: "git+https://github.com/a/dsh-x.git" }).source, "same");
+	const vsNpmDiff = compareInstalledSource(npmKnown, { source: "npm", repoUrl: "https://github.com/zzz/dsh-x" });
+	eq("来源对账: npm 范围但仓库不同 → 来源不同", vsNpmDiff.source, "different");
+	ok("来源对账: 不同仓库时把两边都写出来", /a\/dsh-x/.test(vsNpmDiff.text) && /zzz\/dsh-x/.test(vsNpmDiff.text), vsNpmDiff.text);
+	eq("来源对账: 结果没给仓库地址 → unknown（不标红）",
+		compareInstalledSource(npmKnown, { source: "npm", repoUrl: null }).source, "unknown");
+	eq("来源对账: .tgz 且没有仓库可比 → unknown",
+		compareInstalledSource(tgzKnown, { source: "npm", repoUrl: "https://github.com/a/dsh-x" }).source, "unknown");
+	eq("来源对账: 本机没有这份 → unknown", compareInstalledSource(null, { source: "npm" }).source, "unknown");
+
+	const sourceInv = { items: [
+		{ name: "dsh-local", installed: true, kind: "link", kindLabel: "本机目录", spec: "link:D:/x/dsh-local", localVersion: "0.3.0", repoKey: null },
+		{ name: "dsh-npm-a", installed: true, kind: "npm", kindLabel: "npm", spec: "^1.0.0", localVersion: "1.0.0", repoKey: "github.com/a/repo" }
+	] };
+	const marked = annotateInstalled([
+		{ name: "dsh-local", source: "npm", repoUrl: "https://github.com/someone/dsh-local", trust: { level: "community", badges: [], flags: [], score: 40 } },
+		{ name: "DSH-NPM-A", source: "npm", repoUrl: "https://github.com/a/repo", trust: { level: "community", badges: [], flags: [], score: 60 } },
+		{ name: "dsh-never", source: "npm", repoUrl: null, trust: { level: "community", badges: [], flags: [], score: 50 } }
+	], sourceInv);
+	eq("已装标记: link 那份带上来源形态", marked[0].installedKindLabel, "本机目录");
+	eq("已装标记: 同名但来源不同要能被机读", marked[0].installedSource, "different");
+	eq("已装标记: 不同来源塞一条 name-collision 红旗",
+		marked[0].trust.flags.filter((f) => f.id === "name-collision").length, 1);
+	eq("已装标记: 红旗是 error 级（会被面板标红）",
+		marked[0].trust.flags.find((f) => f.id === "name-collision").tone, "error");
+	eq("已装标记: 同名同仓库不塞红旗", marked[1].trust.flags.filter((f) => f.id === "name-collision").length, 0);
+	eq("已装标记: 同仓库时 installedSource=same", marked[1].installedSource, "same");
+	eq("已装标记: 没装的仍然没有来源字段", marked[2].installedKnown, false);
+	eq("已装标记: 原来的 installed=版本号 不变（面板在用）", marked[0].installed, "0.3.0");
+	const noTrust = annotateInstalled([{ name: "dsh-local" }], sourceInv);
+	ok("已装标记: 条目本来没有 trust 也不崩（就地补一个）",
+		Boolean(noTrust[0].trust && noTrust[0].trust.flags && noTrust[0].trust.flags.length === 1), JSON.stringify(noTrust[0].trust).slice(0, 120));
+
+	const localHint = localOnlyHint(sourceInv, "dsh-local", []);
+	ok("只在本机: 搜本机插件的名字时明确说出来", Boolean(localHint && /本机已装的插件/.test(localHint.text)), localHint && localHint.text);
+	eq("只在本机: 带上来源形态（本机目录）", localHint.kindLabel, "本机目录");
+	eq("只在本机: 结果里已有同名条目就不再提示", localOnlyHint(sourceInv, "dsh-local", [{ name: "dsh-local" }]), null);
+	eq("只在本机: 没装的名字不提示", localOnlyHint(sourceInv, "dsh-unknown", []), null);
+	eq("只在本机: 空查询不提示", localOnlyHint(sourceInv, "  ", []), null);
+	eq("只在本机: 读不到清单不提示", localOnlyHint(null, "dsh-local", []), null);
 
 	/* R23：影子包警戒 —— 名字撞官方 @deepseek-ai/*，但全名不是官方那个 */
 	const shadowProfile = dir("shadowProfile");

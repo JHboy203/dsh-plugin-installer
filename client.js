@@ -23,7 +23,7 @@ window.__ModuleLoader__.load({
 		/* 客户端 build 号（R5.1）：改 client.js 就提一位。
 		   client 会热重载、但没人保证「当前页面跑的是哪一版」—— 这个号随 client-state
 		   一起上报，宿主 /health 的 clientReport.build 就是答案（宿主侧另有 mtime 标签）。 */
-		const BUILD = "r22.0";
+		const BUILD = "r23.0";
 
 		/* ── 迷你 store（模块级，面板关着时图标也在用）──────────────────── */
 
@@ -1301,7 +1301,7 @@ window.__ModuleLoader__.load({
 						busy ? "处理中…" : "安装"),
 					h("button", { className: "dpi-btn", disabled: busy || !text.trim(), onClick: () => { const t = text.trim(); setText(""); setLocal({ ai: { reply: "搜索中…", recommendations: [] }, aiBusy: true });
 						api("/search", { method: "POST", body: JSON.stringify({ query: t }) }).then((r) => {
-							setLocal({ ai: { reply: "搜索：" + t + "（" + ((r.items || []).length) + " 条）", recommendations: (r.items || []).map((x) => ({ ...x, why: x.description })), searchOnly: true }, aiBusy: false });
+							setLocal({ ai: { reply: "搜索：" + t + "（" + ((r.items || []).length) + " 条）", recommendations: (r.items || []).map((x) => ({ ...x, why: x.description })), localOnly: r.localOnly || null, searchOnly: true }, aiBusy: false });
 						}).catch((e) => setLocal({ ai: { reply: "搜索失败：" + String((e && e.message) || e), recommendations: [] }, aiBusy: false })); }
 					}, "只搜索"),
 					h("span", { className: "dpi-muted dpi-hint" }, "网盘链接不自动下载；只给名字会先搜候选")
@@ -1344,14 +1344,25 @@ window.__ModuleLoader__.load({
 					}),
 					h("button", { className: "dpi-btn", disabled: busy || !text.trim(), onClick: ask }, busy ? "思考中…" : "问 AI")),
 				result && result.reply ? h("div", { className: "dpi-ai-reply" }, result.reply) : null,
+				/* R25：搜的是本机自己写的插件时，六个源都不会有它 —— 不说清楚，6 条不相干的结果看起来像搜索坏了 */
+				result && result.localOnly
+					? h("div", { className: "dpi-muted dpi-local-only", title: result.localOnly.spec || "" }, "· " + result.localOnly.text)
+					: null,
 				result && result.recommendations && result.recommendations.length > 0
 					? h("div", { className: "dpi-recos" }, result.recommendations.map((item, i) =>
 						h("div", { className: "dpi-reco", key: "reco" + i },
 							h("div", { className: "dpi-reco-head" },
 								h("b", null, item.name),
-								/* R12：已经装过的包要当场说出来 —— 否则「安装这个」看起来永远像第一次装 */
+								/* R12：已经装过的包要当场说出来 —— 否则「安装这个」看起来永远像第一次装。
+								   R25：还要说清装的是**哪一种来源**：本机 24 个依赖是 link: 的本机目录，
+								   「已装」按名字对上不等于同一个包 —— 同名 npm 包能靠这行被认清。 */
 								item.installedKnown
-									? h("span", { className: "dpi-tag dpi-tag-kind", title: "本机已装这个包" }, "已装" + (item.installed ? " v" + item.installed : ""))
+									? h("span", {
+										className: "dpi-tag dpi-tag-kind",
+										title: "本机已装这个包" + (item.installedSpec ? "（" + item.installedSpec + "）" : "") +
+											(item.installedSource === "different" ? " —— 同名但来源不同，见下面的红旗" : "")
+									}, "已装" + (item.installed ? " v" + item.installed : "") +
+										(item.installedKindLabel ? " · " + item.installedKindLabel : ""))
 									: null,
 								item.stars ? h("span", { className: "dpi-tag" }, "★" + item.stars) : null,
 								item.downloads ? h("span", { className: "dpi-tag" }, "⬇" + item.downloads + "/周") : null,
@@ -2344,6 +2355,8 @@ window.__ModuleLoader__.load({
 			CompatExemptCard,
 			/* R12：已装清单 + 检查更新（无头渲染要能验折叠/可升级行/空态） */
 			Inventory,
+			/* R25：AI 推荐 / 只搜索卡片（无头渲染要能验「已装」分来源与「本机插件」提示） */
+			AiBox,
 			/* R14：已装 Skill（无头渲染要能验：折叠/展开、备份标签、宿主没认、读不到兜底） */
 			Skills,
 			/* R6.1：自检快捷键（无头渲染与自测也要能摸到这几个） */
