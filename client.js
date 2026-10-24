@@ -23,7 +23,7 @@ window.__ModuleLoader__.load({
 		/* 客户端 build 号（R5.1）：改 client.js 就提一位。
 		   client 会热重载、但没人保证「当前页面跑的是哪一版」—— 这个号随 client-state
 		   一起上报，宿主 /health 的 clientReport.build 就是答案（宿主侧另有 mtime 标签）。 */
-		const BUILD = "r26.0";
+		const BUILD = "r26.1";
 
 		/* ── 迷你 store（模块级，面板关着时图标也在用）──────────────────── */
 
@@ -1481,20 +1481,24 @@ window.__ModuleLoader__.load({
 			const problems = (inv && inv.problems) || [];
 			const outdated = items.filter((item) => item.update && item.update.relation === "outdated");
 			/* R26：批量升级 —— 串行排队、一次一单；只升 npm 来源（本地 .tgz 要重新打包，排不了队）。
-			   队列是宿主内存态：重启后不续跑，避免一开机就在没人看着的时候装东西。 */
-			const upgradeAll = () => {
+			   队列是宿主内存态：重启后不续跑，避免一开机就在没人看着的时候装东西。
+			   R26.1：跨越较大的版本（主版本 / 0.x 小版本）先不排，弹第二次确认再决定。 */
+			const upgradeAll = (includeRisky) => {
 				const targets = sorted.filter((item) => item.update && item.update.relation === "outdated");
 				if (!targets.length) return;
-				const ok = typeof window !== "undefined" && window.confirm
-					? window.confirm("把可升级的 " + targets.length + " 个 npm 包排进队列，逐个安装？\n\n" +
-						"· 每个都会先做安全预检与安装前快照\n" +
-						"· 中途需要确认的会停下来等你\n" +
-						"· 宿主重启后队列不自动续跑\n" +
-						"· 本地 .tgz / Git / link 来源不排队（需要时按单条「升级」走）")
-					: true;
-				if (!ok) return;
+				if (includeRisky !== true) {
+					const ok = typeof window !== "undefined" && window.confirm
+						? window.confirm("把可升级的 " + targets.length + " 个 npm 包排进队列，逐个安装？\n\n" +
+							"· 每个都会先做安全预检与安装前快照\n" +
+							"· 中途需要确认的会停下来等你\n" +
+							"· 宿主重启后队列不自动续跑\n" +
+							"· 跨大版本 / 0.x 小版本的会单独再问你一次\n" +
+							"· 本地 .tgz / Git / link 来源不排队（需要时按单条「升级」走）")
+						: true;
+					if (!ok) return;
+				}
 				setLocal({ invBusy: true });
-				api("/action", { method: "POST", body: JSON.stringify({ action: "update-all" }) })
+				api("/action", { method: "POST", body: JSON.stringify({ action: "update-all", includeRisky: includeRisky === true }) })
 					.then((r) => {
 						if (r && r.state) setStore({ data: r.state });
 						if (!r || r.ok === false) {
@@ -1502,8 +1506,26 @@ window.__ModuleLoader__.load({
 							return;
 						}
 						const n = (r.queued || []).length;
-						if (n > 0) toast("已排队 " + n + " 个（第一个已开始，后面的自动接着跑）");
-						else toast("没有可排队的升级");
+						const risky = (r.needsAttention || []);
+						if (risky.length > 0) {
+							/* 第二次确认：只把「跨越较大的版本」摆出来，让人明确知道要跨过什么 */
+							const list = risky.slice(0, 5).map((x) => "· " + x.name + " " + (x.from || "?") + " → " + x.to + (x.gap ? "（" + x.gap + "）" : "")).join("\n");
+							const go = typeof window !== "undefined" && window.confirm
+								? window.confirm("已把 " + n + " 个常规升级排进队列。\n\n另有 " + risky.length +
+									" 个跨越较大的版本（可能含破坏性变更）：\n" + list +
+									(risky.length > 5 ? "\n· …等 " + risky.length + " 个" : "") +
+									"\n\n仍要一起升级吗？点「取消」就只装前面那些。")
+								: false;
+							if (go) {
+								upgradeAll(true);
+								return;
+							}
+							toast("已排队 " + n + " 个；跨版本的 " + risky.length + " 个没有排");
+							return;
+						}
+						toast(n > 0
+							? "已排队 " + n + " 个（第一个已开始，后面的自动接着跑）"
+							: (includeRisky === true ? "没有可排队的升级" : "没有可排队的升级（跨版本的需单独确认）"));
 					})
 					.catch((e) => toast("排队失败：" + String((e && e.message) || e)))
 					.finally(() => setLocal({ invBusy: false }));
@@ -1545,8 +1567,8 @@ window.__ModuleLoader__.load({
 						? h("button", {
 							className: "dpi-btn dpi-btn-sm",
 							disabled: busy,
-							title: "把可升级的 npm 包排进队列，逐个安装（需要确认的仍会停下来等你）",
-							onClick: upgradeAll
+							title: "把可升级的 npm 包排进队列，逐个安装（跨大版本的会单独再问你一次；需要确认的仍会停下来等你）",
+							onClick: () => upgradeAll(false)
 						}, "全部升级 " + outdated.length)
 						: null,
 					h("button", { className: "dpi-btn dpi-btn-sm", disabled: !counts, onClick: () => setOpen(!open) },

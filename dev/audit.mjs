@@ -45,7 +45,7 @@ export const FROZEN_DEFAULTS = {
 };
 
 /** 文档里声明的自检项数（改断言就先跑一次 host_selfcheck，再同步这个数）。 */
-export const EXPECTED_ASSERTIONS = 774;
+export const EXPECTED_ASSERTIONS = 780;
 
 /** 界面自检项数（dev/render-check.cjs）。同样是「文档对表」的一半。 */
 const EXPECTED_RENDER_ASSERTIONS = 127;
@@ -293,6 +293,13 @@ async function main() {
 	ok("升级回滚：安装前记下旧版本与旧声明",
 		/job\.installedBefore = /.test(pipelineSrc) && /job\.install\.previousVersion = job\.installedBefore\.version/.test(pipelineSrc));
 	ok("升级回滚：旧包在安装前被拷进快照", /backupVendorTarball\(snap\.dir/.test(pipelineSrc));
+	/* R26.1：装之前就在的，回滚绝不许落到 remove；跨版本升级不跟常规升级一起排队 */
+	ok("升级回滚：同版本重装 / 只有旧声明也不许卸载（R26.1）",
+		/if \(prevVersion && it\.bundleName\)/.test(pipelineSrc) && /if \(prevSpec && it\.bundleName\)/.test(pipelineSrc));
+	ok("批量升级：跨版本默认不排队，二次确认才 includeRisky（R26.1）",
+		/export function splitUpgradeTargets/.test(pipelineSrc) &&
+		/includeRisky: body\.includeRisky === true/.test(indexSrc2) &&
+		clientSrc.includes("仍要一起升级"));
 	ok("批量升级：有串行队列与 drain（R26）", /async upgradeOutdated/.test(pipelineSrc) && /async _drainQueue/.test(pipelineSrc));
 	ok("批量升级：一次只跑一单（等确认时不启动）",
 		/awaiting-confirm/.test((pipelineSrc.match(/async _drainQueue[\s\S]{0,400}/) || [""])[0]));

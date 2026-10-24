@@ -385,11 +385,13 @@ export async function apply(ctx) {
 							: { ok: false, error: fixed.reason || "修不了", fixed });
 					} else if (action === "update-all") {
 						/* R26：批量升级 —— 只升「npm 来源 + 已落地 + 有明确 latest」的那一类，
-						   串行排队（一次只跑一单）。复用 30 分钟更新缓存；队列在宿主重启后不续跑。 */
+						   串行排队（一次只跑一单）。复用 30 分钟更新缓存；队列在宿主重启后不续跑。
+						   R26.1：跨大版本 / 0.x 小版本默认不排（回在 needsAttention 里），
+						   面板二次确认后才带 includeRisky:true 再来一次。 */
 						if (typeof installer.upgradeOutdated !== "function") {
 							return json(res, 503, { ok: false, error: "宿主还没重启：批量升级是新代码（lib/pipeline.js 不热重载）" });
 						}
-						const batch = await installer.upgradeOutdated();
+						const batch = await installer.upgradeOutdated({ includeRisky: body.includeRisky === true });
 						return json(res, 200, { ...batch, state: await installer.snapshotState() });
 					} else if (action === "clear-queue") {
 						/* 只清「还没开始装」的排队项，不碰正在跑的那一单 */

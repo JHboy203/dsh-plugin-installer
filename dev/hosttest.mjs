@@ -38,7 +38,7 @@ import { backupVendorTarball, createSnapshot, fileSpecPath, restoreProfileFiles,
 import { buildReviewInput } from "../lib/ai.js";
 import { estimateReviewTokens, reviewWorthIt } from "../lib/ai.js";
 import { packPluginTarball } from "../lib/pack.js";
-import { stagingRefsFromManifest, stagingKeepNames, rollbackPlan, Installer } from "../lib/pipeline.js";
+import { stagingRefsFromManifest, stagingKeepNames, rollbackPlan, splitUpgradeTargets, Installer } from "../lib/pipeline.js";
 import { buildStamp } from "../lib/hostinfo.js";
 import { normalizeNpmSpec } from "../lib/download.js";
 import {
@@ -1047,6 +1047,14 @@ async function main() {
 		rollbackPlan({ bundleName: "x", upgrade: true, previousVersion: "0.1.0", previousSpec: "link:D:/src/x" }).mode, "restore-only");
 	eq("rollbackPlan: 升级但没记下旧版本 → 退回卸载（宁可少做）",
 		rollbackPlan({ bundleName: "x", upgrade: true, previousSpec: null }).mode, "remove");
+	/* R26.1：装之前它就在 —— 「回滚」绝不能再落到 remove 上 */
+	eq("rollbackPlan: 同版本重装（upgrade=false）也按旧版本重装，不卸载",
+		rollbackPlan({ bundleName: "x", upgrade: false, previousVersion: "0.5.0", previousSpec: "^0.5.0" }),
+		{ mode: "reinstall-npm", spec: "npm:x@0.5.0", version: "0.5.0" });
+	eq("rollbackPlan: 有旧声明但没旧版本 → 只还原声明",
+		rollbackPlan({ bundleName: "x", upgrade: false, previousVersion: null, previousSpec: "^0.5.0" }).mode, "restore-only");
+	eq("rollbackPlan: 本地包没有旧包也没有旧版本 → 只还原声明（别把新版又装一遍）",
+		rollbackPlan({ bundleName: "x", upgrade: false, previousVersion: null, previousSpec: "file:C:/tmp/x.tgz" }).mode, "restore-only");
 
 	/* ⑦.5 重打包成 tgz（安装不依赖临时目录）*/
 	const packSrc = dir("packSrc");
@@ -1907,6 +1915,20 @@ async function main() {
 	const clearFake = { _queue: [{ raw: "npm:a@1" }, { raw: "npm:b@1" }] };
 	eq("queue: 清空返回清掉几个", (await Installer.prototype.clearQueue.call(clearFake)).cleared, 2);
 	eq("queue: 清空后计数为 0", Installer.prototype.queueView.call(clearFake).count, 0);
+
+	/* R26.1：批量升级分档 —— 跨大版本 / 0.x 小版本默认不跟常规升级一起排队 */
+	const splitItems = [
+		{ name: "dsh-a", installed: true, checkable: true, localVersion: "1.2.3", update: { relation: "outdated", latestVersion: "1.2.4", gap: { text: "跨 1 个补丁", severe: false } } },
+		{ name: "dsh-ops", registryName: "@x/dsh-ops", installed: true, checkable: true, localVersion: "0.3.0", update: { relation: "outdated", latestVersion: "0.4.1", gap: { text: "跨 1 个小版本", severe: true } } },
+		{ name: "dsh-b", installed: true, checkable: true, update: { relation: "current", latestVersion: "1.0.0" } },
+		{ name: "dsh-c", installed: false, checkable: true, update: { relation: "outdated", latestVersion: "2.0.0" } }
+	];
+	const split = splitUpgradeTargets(splitItems);
+	eq("split: 常规升级进 safe", split.safe.map((x) => x.name), ["dsh-a"]);
+	eq("split: 跨大版本进 risky（带 registryName 与跨度文案）",
+		split.risky.map((x) => [x.name, x.registryName, x.from, x.to, x.gap]),
+		[["dsh-ops", "@x/dsh-ops", "0.3.0", "0.4.1", "跨 1 个小版本"]]);
+	eq("split: 已是最新 / 没落地的不进任何一档", split.safe.length + split.risky.length, 2);
 
 	/* 搜索源开关：关掉的源一个请求都不该发 */
 	const realFetch2 = globalThis.fetch;
