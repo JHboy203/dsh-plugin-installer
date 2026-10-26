@@ -790,6 +790,9 @@ node DSH-Plugin/dsh-plugin-installer/dev/render-check.cjs
 # ④ rev 探针（离线，只读）：算法固定向量 + 最近一份 web-boot 日志里那份字节还在不在
 node DSH-Plugin/dsh-plugin-installer/dev/probe-rev.mjs --full
 
+# ④b 跨插件契约探针（R27）：真的 CatalogService ↔ installer 的字段契约（假宿主，不真卸载；协作方不在就 SKIP）
+node DSH-Plugin/dsh-plugin-installer/dev/probe-bridge.mjs
+
 # 环境体检：只读 → 修（幂等：挪 dsh-tools、从 node_modules 重打包补回 .tgz）
 install_hub_doctor({})
 install_hub_doctor({ apply: true })
