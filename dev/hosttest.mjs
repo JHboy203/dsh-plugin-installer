@@ -38,7 +38,7 @@ import { backupVendorTarball, createSnapshot, fileSpecPath, restoreProfileFiles,
 import { buildReviewInput } from "../lib/ai.js";
 import { estimateReviewTokens, reviewWorthIt } from "../lib/ai.js";
 import { packPluginTarball } from "../lib/pack.js";
-import { stagingRefsFromManifest, stagingKeepNames, rollbackPlan, splitUpgradeTargets, upgradeStalled, Installer, compactCollaborator } from "../lib/pipeline.js";
+import { stagingRefsFromManifest, stagingKeepNames, rollbackPlan, splitUpgradeTargets, upgradeStalled, historyDropPlan, Installer, compactCollaborator } from "../lib/pipeline.js";
 /* R27：换版本 = 先卸后装 —— 判据（升级/降级/装回）与协作方探测都要能被单测喂对象 */
 import { SELF_PACKAGE, decideReplacement, replacementReason, restoreTarget, summarizeReplacement } from "../lib/upgrade.js";
 import { describeCollaboratorLine, describeRemovalProvider, pickRemovalProvider } from "../lib/collaborator.js";
@@ -2996,6 +2996,30 @@ async function main() {
 	const attributionOnDisk = readAttribution(await readJournal(r29JournalPath), { now: Date.now() });
 	ok("R29 记账：从磁盘读回来能看到那条 observe（+1）", Boolean(attributionOnDisk) && attributionOnDisk.added === 1);
 	ok("R29 记账：读不到 profile 时如实失败（不是静默成功）", (await noteProfileState({ profileDir: join(root, "no-such-profile"), journalPath: join(root, "x.json") })).ok === false);
+
+	/* ══════════════════ R30：清历史（只清终态） ══════════════════ */
+
+	const dropFixture = [
+		{ id: "a", status: "done" },
+		{ id: "b", status: "failed" },
+		{ id: "c", status: "failed" },
+		{ id: "d", status: "cancelled" },
+		{ id: "e", status: "running" },
+		{ id: "f", status: "queued" },
+		{ id: "g", status: "awaiting-confirm" }
+	];
+	const plan = historyDropPlan(dropFixture);
+	eq("R30 清历史：只清终态（done / failed / cancelled）", plan.dropped.map((job) => job.id), ["a", "b", "c", "d"]);
+	eq("R30 清历史：进行中 / 排队 / 等待确认一律保留", [plan.kept, plan.dropped.length], [3, 4]);
+	eq("R30 清历史：按状态记账（给提示文案用）", plan.byStatus, { done: 1, failed: 2, cancelled: 1 });
+	ok("R30 清历史：没东西可清时 dropped 为空（调用方据此报 removed:0）",
+		historyDropPlan([{ id: "x", status: "running" }]).dropped.length === 0);
+	ok("R30 清历史：非数组 / 夹着空值也不炸", (() => {
+		const empty = historyDropPlan(null);
+		const mixed = historyDropPlan([null, { id: "y", status: "done" }, undefined]);
+		/* 空值先被滤掉：这一组里只有一条真任务，而它是终态 → dropped 1 / kept 0 */
+		return empty.dropped.length === 0 && empty.kept === 0 && mixed.dropped.length === 1 && mixed.kept === 0;
+	})());
 
 	await rm(root, { recursive: true, force: true });
 

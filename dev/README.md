@@ -30,6 +30,7 @@
 | `dev/git-commit.mjs` | **宿主侧提交**（沙箱写不了 `.git/index.lock`）：`git add -A`，或 **`--paths a.mjs,b.mjs` 只提交点名路径**（工作区里有另一个会话的未提交改动时用它）、`--push`、`--dry-run`。默认只动本仓 | `host_selfcheck({plugin:"dsh-plugin-installer", script:"dev/git-commit.mjs", args:["--message-file","…"]})` |
 | `dev/probe-inject.mjs` | **某个已安装包的服务声明扫描**：declare/used/violations 与行号。判定 `install_hub_doctor` 的「缺 inject」是真故障还是误报时用它（可传任意包目录，如 `node_modules/dsh-x`） | `node dev/probe-inject.mjs "D:/.../node_modules/dsh-x"` |
 | `dev/asar-find.mjs` | **宿主契约取证**：在 `app.asar` 里按字节搜 ASCII 标记并打印上下文（只读）。R26.3 的「宿主拒绝原地换版本」就是这么定的 | `node dev/asar-find.mjs "D:/DSH/resources/app.asar" "already-installed" 4 700` |
+| `dev/ui-narrow.js` | **窄屏实测片段（R20 立的法子，R30 第二次用 → 固定下来）**：把 `measure()` 整个函数体粘进 `client_eval`，它把面板克隆进离屏 360px 容器，区分「真越界」与「主动省略（ellipsis）」，给 `PASS/FAIL` + 明细。⚠️ 它**验不了** `@media (max-width:760px)` 那一段（媒体查询看视口），那部分由 `render-check` 的 5 条文本契约负责 | `client_eval` 粘 `dev/ui-narrow.js` 里的 `measure`（返回 `noHorizontalOverflow` / `overflowing` / `ellipsis`） |
 
 ### 宿主契约实测（别靠记忆，先在这里查）
 

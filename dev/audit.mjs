@@ -46,10 +46,10 @@ export const FROZEN_DEFAULTS = {
 };
 
 /** 文档里声明的自检项数（改断言就先跑一次 host_selfcheck，再同步这个数）。 */
-export const EXPECTED_ASSERTIONS = 880;
+export const EXPECTED_ASSERTIONS = 885;
 
 /** 界面自检项数（dev/render-check.cjs）。同样是「文档对表」的一半。 */
-const EXPECTED_RENDER_ASSERTIONS = 150;
+const EXPECTED_RENDER_ASSERTIONS = 153;
 
 /** 期望注册的宿主工具（漏一个 = 模型看不见一项能力）。 */
 const EXPECTED_TOOLS = [
@@ -413,6 +413,22 @@ async function main() {
 		{ actions: actionNamesR29 });
 	ok("R29 纪律：这个模块不 spawn、不 exec、不跑 pnpm",
 		!/child_process/.test(stateSrc) && !/runPnpm|execa|spawn\(/.test(stateSrc));
+
+	/* ⑤n R30：清历史（只清终态）+ 界面契约。
+	   判据只在一处（`historyDropPlan` 纯函数），进行中/等待确认必须保留，
+	   而且它是「整理界面」不是安装能力 —— 模型看不见这个动作。 */
+	ok("R30 清历史：判据是纯函数，导出给宿主与自检共用",
+		/export function historyDropPlan/.test(pipelineSrc) && /const plan = historyDropPlan\(this\.jobs\)/.test(pipelineSrc));
+	ok("R30 清历史：只清终态、保留 queued / running / awaiting-confirm",
+		/const keep = new Set\(\["queued", "running", "awaiting-confirm"\]\)/.test(pipelineSrc));
+	ok("R30 清历史：动作接线 + 宿主没换新时如实回 503",
+		/action === "clear-history"/.test(indexSrc2) && /清历史是新代码/.test(indexSrc2));
+	ok("R30 清历史：**不暴露给模型**（五个 install_hub_* 工具里没有它）",
+		!/clear-history/.test(toolsSrc) && !/clearHistory/.test(toolsSrc));
+	ok("R30 清历史：面板按钮是两段式，且 4 秒后自己收回确认态",
+		/确认清理？/.test(clientSrc) && /setConfirmClear\(false\), 4000/.test(clientSrc) && /action: "clear-history"/.test(clientSrc));
+	ok("R30 界面：`--dpi-*` 局部量只在面板根定义一次（层级与配色同源）",
+		/\.dpi-panel\{[^}]*--dpi-gap:/.test(clientSrc) && /--dpi-accent:/.test(clientSrc));
 
 	/* ⑥ 数据目录：设置文件是否与运行时会一致（手改过就会出现差异） */
 	const settingsFile = join(dataDir(), "settings.json");

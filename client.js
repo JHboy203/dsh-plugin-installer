@@ -1545,11 +1545,33 @@ window.__ModuleLoader__.load({
 		function History(props) {
 			const s = useStore();
 			const [openId, setOpenId] = useState(null);
+			/* R30：「清理」是两段式 —— 第一下只是把按钮变成「确认清理？」，4 秒内不再点就自己收回。
+			   清掉的是**已结束**的历史（进行中与等待确认的保留，判据在 lib/pipeline.js）。 */
+			const [confirmClear, setConfirmClear] = useState(false);
 			const jobs = (s.data && s.data.jobs) || [];
 			const activeId = s.data && s.data.active ? s.data.active.id : null;
 			const limit = currentSettings().historyLimit;
 			const all = jobs.filter((job) => job.id !== activeId);
 			const past = all.slice(0, limit);
+			useEffect(() => {
+				if (!confirmClear) return undefined;
+				const timer = setTimeout(() => setConfirmClear(false), 4000);
+				return () => clearTimeout(timer);
+			}, [confirmClear]);
+			const clearHistory = () => {
+				if (!confirmClear) {
+					setConfirmClear(true);
+					return;
+				}
+				setConfirmClear(false);
+				api("/action", { method: "POST", body: JSON.stringify({ action: "clear-history" }) })
+					.then((r) => {
+						if (r && r.state) setStore({ data: r.state });
+						if (!r || r.ok === false) return toast((r && r.error) || "清理失败");
+						toast("已清理 " + ((r.cleared && r.cleared.removed) || 0) + " 条历史");
+					})
+					.catch((e) => toast("清理失败：" + String((e && e.message) || e)));
+			};
 			/* 一条都没有：公开之后第一次打开看到的就是这里 —— 给一句「怎么开始」，而不是一片空白 */
 			if (past.length === 0) {
 				if (jobs.length > 0) return null;
@@ -1570,7 +1592,12 @@ window.__ModuleLoader__.load({
 					h("strong", null, "历史"),
 					h("span", { className: "dpi-count" }, past.length + (all.length > past.length ? " / " + all.length : "") + " 条"),
 					h("span", { className: "dpi-head-spacer" }),
-					h("span", { className: "dpi-muted" }, "点开看每一阶段")),
+					h("span", { className: "dpi-muted" }, "点开看每一阶段"),
+					h("button", {
+						className: "dpi-btn dpi-btn-sm dpi-btn-ghost" + (confirmClear ? " dpi-btn-confirm" : ""),
+						title: "清掉已结束的历史（进行中与等待确认的会保留）",
+						onClick: clearHistory
+					}, confirmClear ? "确认清理？" : "清理")),
 				h("div", { className: "dpi-history" },
 					past.map((job) => {
 						const open = openId === job.id;
@@ -2511,6 +2538,10 @@ window.__ModuleLoader__.load({
   border-color:transparent}
 .dpi-btn-ghost{background:transparent}
 .dpi-btn-ghost:hover:not(:disabled){background:color-mix(in srgb,var(--dpi-muted) 10%,transparent)}
+/* 二次确认态：从「清理」变成「确认清理？」—— 用 warn 色，别让它在两段式的第一下就被误点 */
+.dpi-btn-confirm{color:var(--dsw-alias-state-warn-primary);
+  border-color:color-mix(in srgb,var(--dsw-alias-state-warn-primary) 55%,transparent);
+  background:color-mix(in srgb,var(--dsw-alias-state-warn-primary) 12%,transparent)}
 .dpi-btn-sm{padding:4px 9px;font-size:12px}
 .dpi-mini{border:1px solid var(--dpi-line);background:transparent;color:var(--dpi-muted);
   border-radius:var(--dpi-r-xs);padding:2px 7px;font-size:11px;cursor:pointer;flex-shrink:0;

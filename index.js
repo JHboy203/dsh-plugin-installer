@@ -340,6 +340,16 @@ export async function apply(ctx) {
 					else if (action === "skip-review") result = await installer.skipReview(id);
 					else if (action === "cancel") result = await installer.cancel(id);
 					else if (action === "ack") result = await installer.ack(id);
+					else if (action === "clear-history") {
+						/* R30：清历史（只清终态；进行中 / 等待确认的保留）。
+						   **不暴露给模型** —— 它是「整理界面」，不是安装能力；模型看不见这个动作，
+						   也就不会替用户把证据清掉。面板上还要再点一次确认。 */
+						if (typeof installer.clearHistory !== "function") {
+							return json(res, 503, { ok: false, error: "宿主还没重启：清历史是新代码（lib/pipeline.js 不热重载）" });
+						}
+						const cleared = await installer.clearHistory();
+						return json(res, 200, { ok: true, cleared, state: await installer.snapshotState() });
+					}
 					else if (action === "rollback") result = await installer.rollback(id);
 					else if (action === "review") result = await installer.review(id);
 					else if (action === "rediagnose") result = await installer.rediagnose(id);

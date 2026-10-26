@@ -175,7 +175,7 @@ function textOf(node, acc) {
  * 正常不执行，所以**数源码不等于数断言**（实测 103 处、只跑 80 条）。真正的判据只能是
  * 「这次实际跑了几条」，所以由脚本自己报总数、并由自己比对。
  */
-const EXPECTED_TOTAL = 150;
+const EXPECTED_TOTAL = 153;
 
 let failed = 0;
 let passed = 0;
@@ -1077,6 +1077,28 @@ if (typeof t.History === "function") {
 		findNodes(openTree, (props) => typeof props.className === "string" && props.className.indexOf("dpi-hist-detail") === 0).length === 1);
 	check("R30 历史：展开时不再把标题重复一遍（hideHead 传进详情）",
 		findNodes(openTree, (props) => typeof props.className === "string" && props.className === "dpi-job-head").length === 0);
+
+	/* 清历史（R30）：有历史才有「清理」，而且是两段式（第一下只是变成「确认清理？」） */
+	const clearButtons = (tree) => findNodes(tree, (props) =>
+		typeof props.className === "string" && props.className.indexOf("dpi-btn") >= 0 &&
+		typeof props.children === "string" && /清理/.test(props.children));
+	const listTree = (() => {
+		t.store.data = { jobs: [jobFixture], active: null, host: {} };
+		resetHooks();
+		return t.History({});
+	})();
+	check("R30 清历史：有历史时头部有「清理」按钮", clearButtons(listTree).length === 1);
+	const confirmTree = (() => {
+		t.store.data = { jobs: [jobFixture], active: null, host: {} };
+		resetHooks();
+		hooks[3] = true; /* openId / confirmClear 之后的二次确认态 */
+		return t.History({});
+	})();
+	check("R30 清历史：第一下只把按钮变成「确认清理？」（不直接清）",
+		clearButtons(confirmTree).some((node) => /确认清理/.test(node.props.children)) &&
+		/dpi-btn-confirm/.test(String((clearButtons(confirmTree)[0] || { props: {} }).props.className || "")));
+	check("R30 清历史：一条记录都没有时不出现「清理」（没有可清的东西）",
+		clearButtons(emptyTree).length === 0);
 
 	t.store.data = savedData;
 	t.store.local = savedLocal;
