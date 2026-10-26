@@ -7,9 +7,9 @@
 
 | 层 | 命令 | 期望 |
 |---|---|---|
-| 自洽（不碰宿主、不 spawn、不写盘） | `node dev/audit.mjs` **或** `host_selfcheck({plugin:"dsh-plugin-installer", script:"dev/audit.mjs"})` | `SUMMARY audit passed`（142 项） |
-| 行为（真跑宿主逻辑） | `host_selfcheck({plugin:"dsh-plugin-installer"})` | 日志 `SUMMARY 789 passed, 0 failed`（工具头部 PASS 数是按输出尾部数的，会少算，**看日志**） |
-| 界面（无头渲染） | `node dev/render-check.cjs` **或** `host_selfcheck({..., script:"dev/render-check.cjs"})` | `TOTAL 127 checks` / `all render checks passed` |
+| 自洽（不碰宿主、不 spawn、不写盘） | `node dev/audit.mjs` **或** `host_selfcheck({plugin:"dsh-plugin-installer", script:"dev/audit.mjs"})` | `SUMMARY audit passed`（155 项） |
+| 行为（真跑宿主逻辑） | `host_selfcheck({plugin:"dsh-plugin-installer"})` | 日志 `SUMMARY 835 passed, 0 failed`（工具头部 PASS 数是按输出尾部数的，会少算，**看日志**） |
+| 界面（无头渲染） | `node dev/render-check.cjs` **或** `host_selfcheck({..., script:"dev/render-check.cjs"})` | `TOTAL 141 checks` / `all render checks passed` |
 
 改断言数就必须同步：`dev/audit.mjs` 的 `EXPECTED_ASSERTIONS` / `EXPECTED_RENDER_ASSERTIONS`、
 `dev/render-check.cjs` 的 `EXPECTED_TOTAL`、`README.md` 与本插件交接文件里的数字（audit 会当场对表）。
@@ -29,13 +29,17 @@
 
 ### 宿主契约实测（别靠记忆，先在这里查）
 
-- **`installBundle` 拒绝原地换版本**（2026-10-25 实测，宿主 0.2.1-rc.2）：
+- **`installBundle` 拒绝原地换版本**（2026-10-25 实测，宿主 0.2.1-rc.2 / 0.2.1-rc.3）：
   对**已在 profile 依赖里的包名**，`installBundle("name@新版本")` 直接回 `already-installed`，
   一次 pnpm 都不跑。宿主原文：
   `reasonAlreadyInstalled: "This package is already installed; uninstall it before installing another version."`
-  → 「升级」只能是 **卸载旧版 → 装新版**（两步都会写 profile；本机实测 install/remove 后宿主可能重启，
-  所以面板没做这一步，只在 noop 时明确报 `upgrade-stalled`）。
+  → 「升级」只能是 **卸载旧版 → 装新版**（两步都会写 profile；本机实测 install/remove 后宿主可能重启）。
+  **R27 起面板真的走这条路**：卸载由「插件目录」经 `pluginCatalog.removal` 服务执行（判据+执行+留痕在那边），
+  本插件负责准备新包、编排、失败装回与中断续跑；没有协作方时**明确拒绝**而不是回 `upgrade-stalled`。
   复验：`node dev/asar-find.mjs <app.asar> "reasonAlreadyInstalled" 2 600`。
+- **替换已安装包要下次启动才加载新的 JS 代**（宿主插件开发指南原文：
+  *Replacing an installed package requires restart to load a fresh JavaScript module generation.*）——
+  所以两阶段升级装完，面板会说「新版本要重启 DSH 才加载」。
 - **`ctx.interval` / `ctx.sleep` 是 `timer` 服务的方法**，inject 要声明 `timer`，不是 `interval`。
 - **`client.js` 的 `inject: ['slots','layout']` 是 web 平台声明**，不能并进宿主 inject 计算（R26.2）。
 

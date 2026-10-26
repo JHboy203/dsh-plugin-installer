@@ -127,7 +127,7 @@
 > **构建标记格式**（`0.1.0 · YYYY-MM-DD HH:MM`，且 `/health` 不许写死）/ 客户端设置与热键入口 /
 > `settings.json` 归一化后逐字不变 / 等待确认任务的 staging 现场还在 / README 与交接文件里的
 > 断言数是否等于 `EXPECTED_ASSERTIONS`。**不碰宿主、不 spawn、不写盘**，只打印
-> 「接着跑 host_selfcheck（789）+ render-check（127）」。自洽检查现已 **142 项**。
+> 「接着跑 host_selfcheck（835）+ render-check（141）」。自洽检查现已 **155 项**。
 > 三层分工至此固定：**audit = 自洽，host_selfcheck = 行为，render-check = 界面**。
 > 线上实测：构建标签 `0.1.0 · 2026-10-20 19:45`、客户端 `r6.0`、`GET/POST /settings` 正常
 > （非法值当场夹取回默认）、`clientReport` 里有 360×658 的窄屏实例。
@@ -612,6 +612,55 @@ dsh-tools 钉子是否过期、最近一次启动失败（宿主崩溃 / 前端�
 
 ---
 
+## 2b. 换版本 = 两阶段（先卸后装，R27）
+
+**为什么不能原地换**：宿主 0.2.1 的 `pluginManager.installBundle` **按包名判已装** —— 对已在
+profile 依赖里的包名直接回 `already-installed`（原文：*uninstall it before installing another version*），
+一次 pnpm 都不跑。所以「升级」只有一条路：**先卸载旧版，再装新版**。
+
+**谁卸**：不是本插件自己。卸载的判据（谁声明依赖它 / 它现在会不会被加载 / 它是 `link:` 还是 npm /
+是不是宿主自带）全在「插件目录」（`dsh-plugin-catalog`）手里，所以那一步交给它，
+经 Cordis 服务 `pluginCatalog.removal`（`api: 1`）调用。这条依赖是**可选**的：
+
+| 协作方状态 | 升级会怎样 | 其它功能 |
+|---|---|---|
+| 可用（`pluginCatalog.removal` 在） | 走两阶段 | 不受影响 |
+| 没装 / 装了没启用 / 没激活 / 是旧版没这个能力 | **明确拒绝**并给原因与下一步（不会排一队必然失败的任务） | 安装、回滚、诊断、Skill 安装全部照常 |
+| 宿主没有 `removeBundle` | 同上 | 同上 |
+
+**顺序不可换**（`lib/pipeline.js` 的 `prepareAndRemoveForReplace`）：
+
+```
+快照（含旧 .tgz 备份）
+  → ① 先把新包备好（npm 记 spec；本地/下载先重打成 vendor/*.tgz）
+  → ② 请插件目录出计划（只读，5 分钟一次性 token）
+  → ③ 执行卸载（对面复核版本与依赖行；回执 applied 但依赖还在 = 没卸掉）
+  → ④ 安装新版 → ⑤ 诊断
+```
+
+为什么先打包再卸载：打包可能失败（读盘/写盘/文件数上限），而**卸载之后就只剩这条路**。
+先打包 = 失败时 profile 一点没变；先卸载 = 失败时插件已经没了。
+
+**失败会装回去**：新版装失败时自动按旧版本装回（npm 用精确版本号；本面板装的 `.tgz` 用快照里
+备份的那一份）。判据**只看 `node_modules/<name>/package.json` 的版本**，不看宿主回执
+—— 宿主对已存在的包名回 `already-installed` 是正常返回，拿它当成功就会写出「已装回 vX」而 profile 一字未改。
+回滚同理：换回旧版也要先卸载现在这版（否则必然 `already-installed`）。
+
+**中断与续跑**：每一步都落盘。宿主在「卸载之后、安装之前」重启时，任务被标成
+`upgrade-interrupted` 且 `upgrade.resumable=true`，面板给「继续升级（包装备好了，不会重新下载）」。
+**不自动装** —— 无人值守时装东西违背本插件的一贯纪律。若旧版还在（卸载没发生），同样给续跑入口。
+
+**四个拒绝**（`lib/upgrade.js` 的 `decideReplacement`，纯函数、一处定义）：
+
+| 情况 | 为什么拒 |
+|---|---|
+| 换 `dsh-plugin-installer` 自己 | 换版本要先卸载，而卸载它的正是它自己 —— 卸到一半面板就没了 |
+| 换 `dsh-plugin-catalog` 自己 | 它是卸载方；由它卸自己会把正在执行调用的运行时撕掉 |
+| `link:` 本机目录 | 改源码就是新版，不存在「装一个新版本」这个动作 |
+| `git:` / 无法识别的声明 | 硬换会先删掉再装回同一个地址（还是同一版）；认不出的声明不拿来做不可逆动作 |
+
+---
+
 ## 3. 信任模型（为什么它敢碰安装）
 
 ```
@@ -633,8 +682,9 @@ dsh-tools 钉子是否过期、最近一次启动失败（宿主崩溃 / 前端�
 
 ## 4. 快照 / 回滚（含两个本机专属的坑）
 
-回滚顺序：卸插件（`removeBundle`）→ 还原 profile 三件套 → 清掉悬空 `link:` 链接 →
-回滚技能（还原备份或删除）→ 再扫一次 dsh-tools。已完成的步骤如实报告，不假装全成功。
+回滚顺序：**换版本回滚 = 先卸掉现在这版、再装回旧版**（R27：不卸就只能回 `already-installed`；
+装回后按 `node_modules` 里的版本核对）；全新安装回滚 = 卸插件（`removeBundle`）→ 还原 profile 三件套 →
+清掉悬空 `link:` 链接 → 回滚技能（还原备份或删除）→ 再扫一次 dsh-tools。已完成的步骤如实报告，不假装全成功。
 
 ### 坑 A：pnpm 跑完，宿主会重启
 
@@ -667,7 +717,7 @@ dsh-tools 钉子是否过期、最近一次启动失败（宿主崩溃 / 前端�
 | 不在多个 profile 间让用户选 | 统一装当前/默认 profile（桌面端 `desktop`）；手机是同一实例的远程视图 |
 | 7z / rar / zip64 / 加密 zip 不解 | 魔数认得出，但明确回「请用 7-Zip 转成普通 zip」 |
 | 不自己写移动端适配 / 角标系统 | 用标准 `sidebar.panellist` + `main` 席位，窄屏由外壳决定抽屉；红点画在入口图标上 |
-| 不负责「管」（停用/卸载/分组） | 检测 `dsh-plugin-desk`/`dsh-skill-manage`/`dsh-skill-toggles` 等是否已装，装了就让它们管；本插件只负责「装」和「诊断」 |
+| 不负责「管」（停用/卸载/分组） | 检测 `dsh-plugin-desk`/`dsh-skill-manage`/`dsh-skill-toggles` 等是否已装，装了就让它们管；本插件只负责「装」和「诊断」。**R27 的唯一例外**：换版本时那一步「卸载旧版」由 `dsh-plugin-catalog` 执行（见 2b），本插件自己**不卸载别人的包** |
 
 ---
 
@@ -685,7 +735,7 @@ dsh-tools 钉子是否过期、最近一次启动失败（宿主崩溃 / 前端�
 | GET | `/plugin-installer/inventory` | **已装清单**（本地读 profile，30 秒缓存；四类来源分开标）+ 最近一次检查更新的结果 |
 | GET | `/plugin-installer/skills` | **已装 Skill**（R14）：磁盘技能目录 × 宿主 `ctx.skills.list()` 对账 —— 宿主没认 / 重名 / 备份残留 / 不会自动调用；30 秒缓存，`?fresh=1` 绕过缓存 |
 | GET | `/plugin-installer/activation` | **激活视图**（R13）：逐行 `enabled`/`fiberPhase` + 缺 inject 明细 + 一句话结论；`?inject=0` 跳过源码扫描（快） |
-| POST | `/plugin-installer/action` | `{action,id}`：`confirm`/`skip-review`/`cancel`/`ack`/`rollback`/`review`/`rediagnose`/`check-updates`/`approve-builds`/`exempt-version`/`repair`/`fix-landmine`/`integrations`/`park-skill-backup`（把备份目录移到 `data/parked-skills/`，不删除；只认技能根下一层的 `.bak*`，**不暴露给模型**）/`fix-skill-frontmatter`（把非法 YAML 的 frontmatter 就地改成块标量；先备份、原子写、三道自检，**不暴露给模型**） |
+| POST | `/plugin-installer/action` | `{action,id}`：`confirm`/`skip-review`/`cancel`/`ack`/`rollback`/`review`/`rediagnose`/`check-updates`/`approve-builds`/`exempt-version`/**`resume-upgrade`（R27：续跑「卸载后中断」的换版本）**/`repair`/`fix-landmine`/`integrations`/`park-skill-backup`（把备份目录移到 `data/parked-skills/`，不删除；只认技能根下一层的 `.bak*`，**不暴露给模型**）/`fix-skill-frontmatter`（把非法 YAML 的 frontmatter 就地改成块标量；先备份、原子写、三道自检，**不暴露给模型**） |
 | POST | `/plugin-installer/upload` | 原始字节 + `x-file-name`，落到 staging 后立即提交 |
 | POST | `/plugin-installer/ai` | `{message}` → 搜索 → 推荐（结构化） |
 | GET | `/plugin-installer/ai-status` | AI 通道可用性与当前默认模型 |
@@ -701,7 +751,7 @@ dsh-tools 钉子是否过期、最近一次启动失败（宿主崩溃 / 前端�
 ```bash
 # ① 自洽体检（最快，不碰宿主、不重启；换会话先跑这条）
 node DSH-Plugin/dsh-plugin-installer/dev/audit.mjs
-#   142 项：默认档冻结快照 / 5 个工具的 output 契约 / 构建标记形如「0.1.0 · 2026-10-22 02:40」/
+#   155 项：默认档冻结快照 / 5 个工具的 output 契约 / 构建标记形如「0.1.0 · 2026-10-22 02:40」/
 #   契约扫描与 profile 体检是否真的接着线 / 失败分诊与批准闭环是否接线 / 版本豁免是否三处一起接 /
 #   staging 是否保住「等确认」的现场 / 状态工具的「环境注意」行 / 「批准」与「授权」都没暴露给模型 /
 #   已装清单四类来源是否分开判 / 宿主自带包是否被排除在升级外 / check-updates 是否只挂在动作上（不在轮询里）/
@@ -714,8 +764,11 @@ node DSH-Plugin/dsh-plugin-installer/dev/audit.mjs
 
 #   R26：升级回滚走「装回旧版」（npm 重装 / 本地旧包还原 / link 只还原声明）、批量升级队列一次一单、
 #   版本跨度与 80 条折叠提示、Skill「来自插件包/内置」一行
+#   R27：换版本是**两阶段**（先打包 → 请「插件目录」卸载旧版并复核 → 再装），安装器自己不再卸载；
+#   换版本判据只在 lib/upgrade.js（自己换自己 / link / git 一律拒）；装失败自动装回旧版并**按版本核对**；
+#   中断可续跑（只对「卸载后/旧版还在」）；协作方是可选服务（没有就明确拒绝，不排无效队列）
 #
-# ② 789 项确定性自检（解包围栏 / 识别短路 / 扫描与密度 / 快照回滚 / 重打包 / prune 保鲜 / 地雷 /
+# ② 835 项确定性自检（解包围栏 / 识别短路 / 扫描与密度 / 快照回滚 / 重打包 / prune 保鲜 / 地雷 /
 #   契约扫描 / profile 体检与修复 / 已装版本对照 / 已装清单判据 / registry 最新版比对（打桩 fetch）/
 #   设置归一化与审核三档 / 红点与跳过审核门禁 / 热键 / 7z 往返与围栏 / 搜索缓存 / 工具契约 /
 #   pnpm 失败分诊 / allowBuilds 解析 / 批准重装 / 版本豁免读写与回读确认 / 兼容降级口径 /
@@ -726,9 +779,10 @@ node DSH-Plugin/dsh-plugin-installer/dev/audit.mjs
 #   同一份字节即使 stale 也是 error / 动作只给 npm 来源 / 全重建时改口成「重启一次」））
 host_selfcheck({ plugin: "dsh-plugin-installer" })
 
-# ③ 无头渲染自检（微型 React 真的渲染一遍；127 项：诊断卡 / 预检卡 / 审查卡 / 设置面板 /
+# ③ 无头渲染自检（微型 React 真的渲染一遍；141 项：诊断卡 / 预检卡 / 审查卡 / 设置面板 /
 #   跳过审核按钮 / 安装脚本批准卡（默认态 + 二次确认态）/ 版本不兼容卡（三态 + 旧豁免失效）/
-#   已装清单（折叠态 / 展开态 / 可升级按钮 / 读不到 / 空 profile）/
+#   **换版本卡（先卸后装 / 中断续跑 / 被拒的两条口径，R27）** /
+#   已装清单（折叠态 / 展开态 / 可升级按钮 / **协作方可用与不可用两态** / 读不到 / 空 profile）/
 #   已装 Skill（折叠态 / 展开态 / 三种标签 / 读不到 / 空根 / 对账不了）/
 #   发现卡动作按钮（文字 / 是主按钮且可点 / 没有动作时不留空容器））
 node DSH-Plugin/dsh-plugin-installer/dev/render-check.cjs
@@ -785,7 +839,7 @@ DSH 每次启动换随机端口（`dsh-desktop-host` 里写死 `--port 0`），�
 
 | 场景 | 结果 |
 |---|---|
-| 确定性自检 | **789/789 通过**（`dev/hosttest.mjs`，含 zip/tar 构造、穿越与软链接拒绝、比例炸弹、5 种识别分支、快照还原、重打包往返、prune 引用保护、地雷处置、契约扫描、profile 体检与修复、设置归一化、审核三档、热键、pnpm 失败分诊、allowBuilds 解析、批准重装与三道闸、落盘串行、版本豁免读写与回读确认、兼容降级口径、预检「已授权不再阻断」回归、staging 生命周期、环境注意、运行中代码指纹、已装清单四类来源、registry 比对与缓存、npm: 前缀、**inject 六种写法与边界、激活失败分诊、fiberPhase 判据、SKILL.md 三种 frontmatter 形态、YAML 硬错误判据、技能备份识别与磁盘×宿主对账、指纹两栏（宿主/客户端）、备份处置的越权拒绝与真实搬运、frontmatter 改写的三道自检与真实修复、崩溃分诊两类日志与已知签名、崩溃结论的新鲜度（stale）、崩溃处置的来源判据（link:/tgz/git/npm）与两张新签名（prepare / lossless JSON）、YAML 三类新硬错误（Tab 缩进 / 重复键 / 引号没闭合）与「不可自动改写」分流、搜索结果影子包警戒（官方 @deepseek-ai/* 同名但不全等）、客户端包 rev 对账（真机向量 / combo 守卫 / same·rebuilt·unknown 与「同一份字节即使 stale 也报 error」/ 动作只给 npm 来源）、升级回滚四种模式与旧 .tgz 往返、批量队列去重/暂停/坏 spec 跳过、版本跨度三档**）；另 **127 项**无头渲染 + **138 项**自洽体检 |
+| 确定性自检 | **835/835 通过**（`dev/hosttest.mjs`，含 zip/tar 构造、穿越与软链接拒绝、比例炸弹、5 种识别分支、快照还原、重打包往返、prune 引用保护、地雷处置、契约扫描、profile 体检与修复、设置归一化、审核三档、热键、pnpm 失败分诊、allowBuilds 解析、批准重装与三道闸、落盘串行、版本豁免读写与回读确认、兼容降级口径、预检「已授权不再阻断」回归、staging 生命周期、环境注意、运行中代码指纹、已装清单四类来源、registry 比对与缓存、npm: 前缀、**inject 六种写法与边界、激活失败分诊、fiberPhase 判据、SKILL.md 三种 frontmatter 形态、YAML 硬错误判据、技能备份识别与磁盘×宿主对账、指纹两栏（宿主/客户端）、备份处置的越权拒绝与真实搬运、frontmatter 改写的三道自检与真实修复、崩溃分诊两类日志与已知签名、崩溃结论的新鲜度（stale）、崩溃处置的来源判据（link:/tgz/git/npm）与两张新签名（prepare / lossless JSON）、YAML 三类新硬错误（Tab 缩进 / 重复键 / 引号没闭合）与「不可自动改写」分流、搜索结果影子包警戒（官方 @deepseek-ai/* 同名但不全等）、客户端包 rev 对账（真机向量 / combo 守卫 / same·rebuilt·unknown 与「同一份字节即使 stale 也报 error」/ 动作只给 npm 来源）、升级回滚四种模式与旧 .tgz 往返、批量队列去重/暂停/坏 spec 跳过、版本跨度三档、换版本判据（自己 / link / git / 无声明四类拒绝）、装回旧版按版本核对、中断续跑只给一种现场、协作方五种状态、更新结果按版本对账**）；另 **141 项**无头渲染 + **155 项**自洽体检 |
 | 已装 Skill（R14 实测，本机） | 技能根 `.dsh/skills` 下 **59 个目录 = 55 个技能 + 4 个备份残留**；上线第一分钟抓出 **3 个 frontmatter 不是合法 YAML** 的技能（`github-private-backup` / `win-desktop-automation` / `windows-disk-reclaim`，PyYAML 复核：`mapping values are not allowed here`）→ 宿主读不出 name、整条跳过；用 `.tools/fix-skill-frontmatter.py --apply`（写前备份、写后 PyYAML 复核）改成块标量后，宿主重扫即认到 —— **`hostVisible` 55/55、`yamlBroken` 0、`notVisible` 0**；`domain-modeling` / `grill-me` / `grill-with-docs` / `grilling` 各有一份 `.bak-mp20261017-1350` 同名备份（尚未清）；11 个技能的 description 是 `>` 折叠块，旧解析把它们读成「>」 |
 | 激活失败的真实样本（R13 实测） | `dsh-imgops` 两次任务：①宿主返回 `application:"failed" / stage:"enable" / diagnostic:"1 entry did not activate … cannot get property \"tools\" without inject"`（pnpm exit 0、包已落地）→ 新分诊判 `activation-failed`，标题点名缺 `tools`，处置给出 `export const inject = ['tools']`；② `already-installed` → 判 noop + 照常诊断。同机 4 个健康插件（本插件 / dsh-screenshot / dsh-diag / dsh-ops）静态扫描**零误报**（canvas 的 `ctx.fillRect` 不计入） |
 | 重装静默无效（R13 第二个 bug） | 修好 `dsh-imgops` 并升到 0.1.1 重新提交，宿主仍回 `already-installed`（实测 `changed:false`、`elapsedMs:11`、pnpm 没跑）—— 判据是依赖行的 spec 字符串，不含版本文件名就永远是同一个 spec。修法：`pkg-<名字>-<版本>.tgz` + 只收「没人引用的旧包」 |
@@ -845,13 +899,15 @@ lib/updates.js           R12：registry 最新版比对（失败逐条隔离 / 3
 lib/inject.js            R13：服务声明静态扫描（入口函数体里用了 ctx.X 但 inject 没声明 → 激活必失败）
 lib/activation.js        R13：激活判据唯一来源（enabled+fiberPhase≠active / 缺 inject），诊断·体检·状态·路由共用
 lib/skills.js            R14：已装 Skill —— 磁盘扫技能根 × 宿主 ctx.skills.list() 对账（没被认/重名/备份/不会自动调用）
+lib/collaborator.js      R27：换版本的**可选**协作方探测（插件目录的 removal 服务；五种状态各有说法）
+lib/upgrade.js           R27：换版本判据（要不要换/能不能换/旧版怎么装回），纯函数、一处定义
 dev/verify-r13.mjs       R13：端到端验收器（运行中代码 / 提交 / ⑧ 回执 / ⑨ 诊断 / 体检），逐条 PASS/FAIL
 lib/tools.js             五个宿主工具定义（含 output 契约）
-dev/hosttest.mjs         789 项确定性自检（宿主进程跑）
+dev/hosttest.mjs         835 项确定性自检（宿主进程跑）
 dev/probe-crash.mjs      R17：不进宿主、只读真实崩溃日志，看分诊判据（改 lib 后立刻能验）
 dev/probe-rev.mjs        R24：算法固定向量 + 最近一份 web-boot 日志里那份 client 包还在不在（`--full` 连体检结论）
-dev/render-check.cjs     127 项无头渲染自检（诊断卡 / 预检卡 / 审查卡 / 设置面板 / 跳过审核 / 批准卡 / 兼容卡 / **已装清单（含队列、跨度与 80 条折叠）/ 已装 Skill（含移出与修复确认态、不可自动改写态、来自插件包/内置）/ 窄屏结构契约 / 发现卡动作按钮 / 搜索卡「已装」分来源与本机插件提示**）
-dev/audit.mjs            142 项自洽体检（不碰宿主；换会话先跑这个）
+dev/render-check.cjs     141 项无头渲染自检（诊断卡 / 预检卡 / 审查卡 / 设置面板 / 跳过审核 / 批准卡 / 兼容卡 / **换版本卡（R27）** / **已装清单（含队列、跨度、80 条折叠、协作方两态）/ 已装 Skill（含移出与修复确认态、不可自动改写态、来自插件包/内置）/ 窄屏结构契约 / 发现卡动作按钮 / 搜索卡「已装」分来源与本机插件提示**）
+dev/audit.mjs            155 项自洽体检（不碰宿主；换会话先跑这个）
 dev/probe-inject.mjs     手动探针：拿本机真实插件验 inject 扫描会不会误报（R13）
 dev/quarantine-dshtools.mjs  手动兜底：把埋下的 dsh-tools 挪进备份（薄壳，复用 lib/landmine.js）
 dev/restore-vendor-tarball.mjs 手动兜底：把断掉的 file: 依赖补回来（薄壳，复用 lib/repair.js）

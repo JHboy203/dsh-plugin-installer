@@ -188,7 +188,10 @@ function makeFaces(ctx) {
 		get skills() { return svc(ctx, "skills"); },
 		get pluginManager() { return svc(ctx, "pluginManager"); },
 		get webApp() { return svc(ctx, "webApp"); },
-		get remoteAccess() { return svc(ctx, "remoteAccess"); }
+		get remoteAccess() { return svc(ctx, "remoteAccess"); },
+		/* R27：**可选**协作方（dsh-plugin-catalog）—— 只在换版本时用来卸载旧版。
+		   取不到不是错误：整个安装/回滚/诊断链路都不依赖它，只是升级会明确拒绝。 */
+		get pluginCatalog() { return svc(ctx, "pluginCatalog"); }
 	};
 }
 
@@ -255,7 +258,9 @@ export async function apply(ctx) {
 						tools: names,
 						landmine,
 						clientReport: lastClientState,
-						inject: { pluginManager: Boolean(svc(ctx, "pluginManager")), skills: Boolean(svc(ctx, "skills")), llm: Boolean(svc(ctx, "llm")) }
+						/* R27：换版本的卸载协作方（插件目录）在不在 —— 与 /state 同一份结论 */
+						collaborator: await installer.collaboratorInfo(),
+						inject: { pluginManager: Boolean(svc(ctx, "pluginManager")), skills: Boolean(svc(ctx, "skills")), llm: Boolean(svc(ctx, "llm")), pluginCatalog: Boolean(svc(ctx, "pluginCatalog")) }
 					});
 				}
 
@@ -338,6 +343,14 @@ export async function apply(ctx) {
 					else if (action === "rollback") result = await installer.rollback(id);
 					else if (action === "review") result = await installer.review(id);
 					else if (action === "rediagnose") result = await installer.rediagnose(id);
+					else if (action === "resume-upgrade") {
+						/* R27：宿主在「卸载旧版之后、安装新版之前」重启 → 一键续跑。
+						   只有这一种中断可续；其它中断仍按原样报失败（不自动装东西）。 */
+						if (typeof installer.resumeUpgrade !== "function") {
+							return json(res, 503, { ok: false, error: "宿主还没重启：中断续跑是新代码（lib/pipeline.js 不热重载）" });
+						}
+						result = await installer.resumeUpgrade(id);
+					}
 					else if (action === "check-updates") {
 						/* R12：联网比对 registry 最新版。只在人点「检查更新」时走这条 ——
 						   绑到 /state 轮询上等于每 2.5 秒打一轮 npm。 */

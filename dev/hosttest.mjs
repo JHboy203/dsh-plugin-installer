@@ -38,7 +38,10 @@ import { backupVendorTarball, createSnapshot, fileSpecPath, restoreProfileFiles,
 import { buildReviewInput } from "../lib/ai.js";
 import { estimateReviewTokens, reviewWorthIt } from "../lib/ai.js";
 import { packPluginTarball } from "../lib/pack.js";
-import { stagingRefsFromManifest, stagingKeepNames, rollbackPlan, splitUpgradeTargets, upgradeStalled, Installer } from "../lib/pipeline.js";
+import { stagingRefsFromManifest, stagingKeepNames, rollbackPlan, splitUpgradeTargets, upgradeStalled, Installer, compactCollaborator } from "../lib/pipeline.js";
+/* R27：换版本 = 先卸后装 —— 判据（升级/降级/装回）与协作方探测都要能被单测喂对象 */
+import { SELF_PACKAGE, decideReplacement, replacementReason, restoreTarget, summarizeReplacement } from "../lib/upgrade.js";
+import { describeCollaboratorLine, describeRemovalProvider, pickRemovalProvider } from "../lib/collaborator.js";
 import { buildStamp } from "../lib/hostinfo.js";
 import { normalizeNpmSpec } from "../lib/download.js";
 import {
@@ -1352,7 +1355,10 @@ async function main() {
 
 	/* ⑱ R5.1：构建标记 / 未完成任务保鲜 / 已装版本对照 */
 	const build = await buildStamp(true);
-	ok("build: 标签带包版本", String(build.label).startsWith("0.1.0"), build.label);
+	/* ★ 版本号从 package.json 读，别写死：抬版本是正常动作，写死会让「改版本」变成红自检
+	   （R27 抬到 0.2.0 时这条就红了一次 —— 断言该钉「标签带包版本」，不是「版本是 0.1.0」）。 */
+	const pkgVersion = JSON.parse(await readFile(join(pluginRoot, "package.json"), "utf8")).version;
+	ok("build: 标签带包版本", String(build.label).startsWith(pkgVersion), { label: build.label, pkgVersion });
 	ok("build: 不再写死 p2-pack", !/p2-pack/.test(build.label), build.label);
 	ok("build: 标签带源码时间（改代码它就变）", /\d{4}-\d{2}-\d{2} \d{2}:\d{2}/.test(build.label), build.label);
 	eq("build: 第二次读缓存拿到同一标签", (await buildStamp()).label, build.label);
@@ -2690,6 +2696,110 @@ async function main() {
 	ok("skill: 面板组件真的接进 Panel", /h\(Skills\)/.test(clientSrcR14));
 	ok("skill: 面板列出备份 / 宿主没认 / 不会自动调用", clientSrcR14.includes("备份残留") && clientSrcR14.includes("宿主没认") && clientSrcR14.includes("不会自动调用"));
 	ok("skill: 面板有读不到时的兜底", clientSrcR14.includes("读不到技能清单") && clientSrcR14.includes("重试"));
+
+	/* ═══════════════════════════════════════════════════════════════════
+	 * R27：换版本 = 先卸后装（跨插件协作）
+	 *
+	 * 宿主 0.2.1 的 installBundle 按**包名**判已装，对已存在的包名一律回
+	 * already-installed（正常返回，不是异常）。所以「升级」只有一条路：
+	 * 先让「插件目录」把旧版卸掉（它掌握依赖者/加载态判据），再装新版。
+	 * 这一组钉三件事：判据（要不要换/能不能换/怎么装回）、协作方探测、
+	 * 以及**独立性**（没有协作方时明确拒绝，而不是排一队必然失败的任务）。
+	 * ═══════════════════════════════════════════════════════════════════ */
+	const instOk = { name: "dsh-ffmpeg", version: "0.5.0", spec: "^0.5.0" };
+	const detNew = { name: "dsh-ffmpeg", version: "0.6.0" };
+	const baseInput = { name: "dsh-ffmpeg", detected: detNew, installedBefore: instOk, source: { type: "npm", spec: "npm:dsh-ffmpeg@0.6.0" } };
+
+	eq("换版本：没装过 → 不需要（reason=no-installed）", [decideReplacement({ detected: detNew }).needed, decideReplacement({ detected: detNew }).reason], [false, "no-installed"]);
+	eq("换版本：同版本重装 → 不需要", decideReplacement({ ...baseInput, installedBefore: { ...instOk, version: "0.6.0" } }).reason, "same-version");
+	eq("换版本：缺目标版本 → 不下结论", decideReplacement({ ...baseInput, targetVersion: "", detected: { name: "dsh-ffmpeg" } }).reason, "no-target-version");
+	const up = decideReplacement(baseInput);
+	eq("换版本：0.5.0→0.6.0 需要（upgrade/npm）", [up.needed, up.direction, up.kind], [true, "upgrade", "npm"]);
+	eq("换版本：0.6.0→0.5.0 是降级（也走两阶段）", decideReplacement({ ...baseInput, installedBefore: { ...instOk, version: "0.6.0" }, detected: { name: "dsh-ffmpeg", version: "0.5.0" } }).direction, "downgrade");
+	eq("换版本：自己换自己被拒（code=self-replace）", decideReplacement({ ...baseInput, name: SELF_PACKAGE, detected: { name: SELF_PACKAGE, version: "9.9.9" } }).blocked.code, "self-replace");
+	eq("换版本：link 来源被拒（本机目录没有「新版本」）", decideReplacement({ ...baseInput, installedBefore: { ...instOk, spec: "link:D:/src/x" } }).blocked.code, "link-source");
+	eq("换版本：git 来源被拒", decideReplacement({ ...baseInput, installedBefore: { ...instOk, spec: "github:o/r" } }).blocked.code, "git-source");
+	eq("换版本：没有依赖声明 → 被拒（不拿没评估过的形态动手）", decideReplacement({ ...baseInput, installedBefore: { ...instOk, spec: "" } }).blocked.code, "unknown-source");
+	ok("换版本：被拒也带大白话与处置步骤", Boolean(decideReplacement({ ...baseInput, installedBefore: { ...instOk, spec: "link:D:/x" } }).blocked.plain && decideReplacement({ ...baseInput, installedBefore: { ...instOk, spec: "link:D:/x" } }).blocked.fix.length >= 1));
+
+	eq("装回：npm 来源按精确旧版本装回", restoreTarget({ name: "dsh-x", installedBefore: { version: "0.5.0", spec: "^0.5.0" } }), { ok: true, type: "npm", spec: "npm:dsh-x@0.5.0", version: "0.5.0", why: "按旧版本号从 registry 装回" });
+	const fileRestore = restoreTarget({ name: "dsh-x", installedBefore: { version: "1.0.0", spec: "file:D:/v/pkg-x.tgz" }, vendorBackup: { copy: "D:/snap/pkg-x.tgz" } });
+	eq("装回：本面板 .tgz 用快照里备份的那一份（不是旧路径）", [fileRestore.ok, fileRestore.spec, fileRestore.type], [true, "D:/snap/pkg-x.tgz", "file"]);
+	eq("装回：旧 .tgz 没备份 → 明说只能按原路径试", restoreTarget({ name: "dsh-x", installedBefore: { version: "1.0.0", spec: "file:D:/v/pkg-x.tgz" } }).ok, false);
+	eq("装回：不知道旧版本号 → 拒绝（不猜）", restoreTarget({ name: "dsh-x", installedBefore: { version: "", spec: "^1.0.0" } }).ok, false);
+
+	const reasonBlocked = replacementReason(up, { ok: false, reason: "没装「插件目录」" });
+	ok("换版本理由：缺协作方时是 block 并写出原因", reasonBlocked.level === "block" && /插件目录/.test(reasonBlocked.detail), reasonBlocked);
+	const reasonOk = replacementReason(up, { ok: true, label: "「插件目录」 v0.31.0" });
+	ok("换版本理由：协作方可用时是 warn（停下来确认）", reasonOk.level === "warn" && /先卸载旧版/.test(reasonOk.text), reasonOk);
+	ok("换版本摘要：带方向与版本对", /升级 0\.5\.0 → 0\.6\.0/.test(summarizeReplacement(up)), summarizeReplacement(up));
+
+	/* 协作方探测：可用 / 版本太旧 / 装了没启用 / 没激活 / 没装 —— 五种状态各有话说 */
+	const goodService = { name: "dsh-plugin-catalog", version: "0.31.0", removal: { api: 1, plan: async () => ({}), apply: async () => ({}) } };
+	const goodCtx = { get: (key) => (key === "pluginCatalog" ? goodService : undefined) };
+	const picked = pickRemovalProvider(goodCtx);
+	ok("协作方：取到插件目录且可用（带标签）", picked.ok === true && /0\.31\.0/.test(picked.label), picked);
+	eq("协作方：可用时一行摘要写「可用」", describeCollaboratorLine(picked).includes("可用"), true);
+	const oldCtx = { get: (key) => (key === "pluginCatalog" ? { name: "dsh-plugin-catalog", removal: { api: 0, plan: async () => ({}), apply: async () => ({}) } } : undefined) };
+	eq("协作方：契约版本太旧 → unsupported", pickRemovalProvider(oldCtx).state, "unsupported");
+	const throwingCtx = { get: () => { throw new Error("no service"); } };
+	const missing = await describeRemovalProvider(throwingCtx);
+	eq("协作方：ctx.get 抛错时当没装（不把异常带出去）", missing.state, "missing");
+	ok("协作方：没装时给两步处置", missing.fix.length >= 1 && /dsh-plugin-catalog/.test(missing.reason), missing);
+	const disabledProvider = await describeRemovalProvider({ get: () => undefined, pluginManager: { listPlugins: async () => [{ moduleName: "dsh-plugin-catalog", enabled: false, fiberPhase: null }] } });
+	eq("协作方：装了但停用 → disabled（不是「没装」）", disabledProvider.state, "disabled");
+	const pendingProvider = await describeRemovalProvider({ get: () => undefined, pluginManager: { listPlugins: async () => [{ moduleName: "dsh-plugin-catalog", enabled: true, fiberPhase: "pending" }] } });
+	eq("协作方：装了但没激活 → installed-not-active", pendingProvider.state, "installed-not-active");
+	const noApiProvider = await describeRemovalProvider({ get: () => undefined, pluginManager: { listPlugins: async () => [{ moduleName: "dsh-plugin-catalog", enabled: true, fiberPhase: "active" }] } });
+	eq("协作方：旧版没有卸载能力 → no-service", noApiProvider.state, "no-service");
+
+	const compacted = compactCollaborator(picked);
+	eq("协作方：进 state 的只有字段（服务对象与函数不进 JSON）", typeof compacted.removal === "undefined" && compacted.ok === true, true);
+	ok("协作方：一行结论随 state 一起给", /可用/.test(compacted.line), compacted.line);
+	eq("协作方：空值 → null（面板据此不渲染）", compactCollaborator(null), null);
+
+	/* 独立性：没有协作方时，换版本必须**明确拒绝**，且不动 profile */
+	const bareInstaller = new Installer({ ctx: {}, options: {} });
+	await throwsCode("换版本：没有协作方就抛 needs-collaborator（不静默跳过）",
+		() => bareInstaller.prepareAndRemoveForReplace({ id: "job-x", replacement: { needed: true, name: "dsh-x", from: "1.0.0", to: "2.0.0", kind: "npm", blocked: null } }, {}, { source: { type: "npm", spec: "npm:dsh-x@2.0.0" } }),
+		"needs-collaborator");
+	await throwsCode("换版本：计划被拒时抛 replace-blocked（不碰旧版）",
+		() => bareInstaller.prepareAndRemoveForReplace({ id: "job-y", replacement: { needed: true, name: SELF_PACKAGE, from: "1.0.0", to: "2.0.0", blocked: { code: "self-replace", text: "不能自己换自己", fix: [{ text: "用官方管理器" }] } } }, {}, {}),
+		"replace-blocked");
+	eq("换版本：不是换版本时直接返回 null（不打扰普通安装）", await bareInstaller.prepareAndRemoveForReplace({ id: "job-z", replacement: { needed: false } }, {}, {}), null);
+
+	/* installPlugin 接受「已备好的包」：两阶段升级不会在卸载之后再打一次包 */
+	let preparedSpec = "";
+	const fakePmPrepared = { installBundle: async (spec) => { preparedSpec = spec; return { changed: true, application: "applied", stage: "install", target: "dsh-x" }; } };
+	const installedWithPrepared = await installPlugin({ pluginManager: fakePmPrepared, detected: { payload: { manifest: { name: "dsh-x", version: "2.0.0" } } }, prepared: { spec: "D:/vendor/pkg-dsh-x-2.0.0.tgz" } });
+	eq("换版本：installPlugin 直接用已备好的 spec（不重新打包）", [preparedSpec, installedWithPrepared.spec], ["D:/vendor/pkg-dsh-x-2.0.0.tgz", "D:/vendor/pkg-dsh-x-2.0.0.tgz"]);
+	eq("换版本：已备好的包也能正确识别 bundleName", installedWithPrepared.bundleName, "dsh-x");
+
+	/* 更新结果按版本对账（装/卸之后 30 分钟缓存还在，别显示过期的「可升级」） */
+	const staleUpdate = { items: [{ name: "dsh-x", localVersion: "1.0.0", relation: "outdated", latestVersion: "2.0.0" }] };
+	eq("更新对账：清单版本变了 → 丢掉旧结论", mergeUpdates([{ name: "dsh-x", localVersion: "2.0.0" }], staleUpdate)[0].update, null);
+	eq("更新对账：版本一致 → 保留", mergeUpdates([{ name: "dsh-x", localVersion: "1.0.0" }], staleUpdate)[0].update.latestVersion, "2.0.0");
+	eq("更新对账：一边没有版本 → 不判（不猜）", mergeUpdates([{ name: "dsh-x", localVersion: null }], staleUpdate)[0].update.latestVersion, "2.0.0");
+
+	/* 接线（静态）：三条独立性必须能从源码读出来 */
+	const upgradeSrc = await readFile(join(pluginRoot, "lib", "upgrade.js"), "utf8");
+	const collabSrc = await readFile(join(pluginRoot, "lib", "collaborator.js"), "utf8");
+	const pipelineSrcR27 = await readFile(join(pluginRoot, "lib", "pipeline.js"), "utf8");
+	const indexSrcR27 = await readFile(join(pluginRoot, "index.js"), "utf8");
+	ok("换版本：安装器只有**回滚全新安装**一处 removeBundle（换版本一律走协作方）",
+		(pipelineSrcR27.match(/\.removeBundle\(/g) || []).length === 1,
+		{ count: (pipelineSrcR27.match(/\.removeBundle\(/g) || []).length });
+	ok("换版本：协作方走可选服务 ctx.get（不是 inject 硬依赖）", /ctx\.get\(key\)/.test(collabSrc) && !/pluginCatalog/.test((indexSrcR27.match(/export const inject = \[[^\]]*\]/) || [""])[0]));
+	ok("换版本：预检把「先卸后装」写进理由并强制确认", /replacementReason\(/.test((await readFile(join(pluginRoot, "lib", "precheck.js"), "utf8"))) && /replaceApproved !== true/.test((await readFile(join(pluginRoot, "lib", "precheck.js"), "utf8"))));
+	ok("换版本：两条阶段都有（⑦b 卸载 / ⑧ 安装）", /key: "replace"/.test(pipelineSrcR27) && /key: "install"/.test(pipelineSrcR27));
+	ok("换版本：中断续跑只在「卸载后/旧版还在」时给", /upgrade-interrupted/.test(pipelineSrcR27) && /upgrade\.resumable = true/.test(pipelineSrcR27));
+	ok("换版本：装回旧版按 node_modules 的版本核对（不信回执）", /installedPluginInfo\(name\)/.test(pipelineSrcR27) && /String\(now\.version\) === String\(upgrade\.from\)/.test(pipelineSrcR27));
+	ok("回滚：换回旧版也先卸载现在这版（否则必然 already-installed）",
+		/async removeForRollback/.test(pipelineSrcR27) && /needRemove && !\(removal && removal\.ok\)/.test(pipelineSrcR27));
+	ok("回滚：装回结果按版本核对，空转不再记成功",
+		/String\(got\) === String\(want\)/.test(pipelineSrcR27) && /装完版本是/.test(pipelineSrcR27));
+	ok("换版本：批量升级先查协作方（不可用就不排队）", /needsCollaborator: true/.test(pipelineSrcR27));
+	ok("换版本：判据是纯函数文件（可被 tool 与 pipeline 共用）", /export function decideReplacement/.test(upgradeSrc) && /export function restoreTarget/.test(upgradeSrc));
 
 	await rm(root, { recursive: true, force: true });
 

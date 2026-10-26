@@ -45,10 +45,10 @@ export const FROZEN_DEFAULTS = {
 };
 
 /** 文档里声明的自检项数（改断言就先跑一次 host_selfcheck，再同步这个数）。 */
-export const EXPECTED_ASSERTIONS = 789;
+export const EXPECTED_ASSERTIONS = 835;
 
 /** 界面自检项数（dev/render-check.cjs）。同样是「文档对表」的一半。 */
-const EXPECTED_RENDER_ASSERTIONS = 127;
+const EXPECTED_RENDER_ASSERTIONS = 141;
 
 /** 期望注册的宿主工具（漏一个 = 模型看不见一项能力）。 */
 const EXPECTED_TOOLS = [
@@ -323,6 +323,46 @@ async function main() {
 	ok("已装清单：超过 80 条不再静默截断", clientSrc.includes("只显示前 80 个") && clientSrc.includes("showAll"));
 	ok("已装 Skill：说明「来自插件包/内置」的那批",
 		/来自插件包\/内置/.test(skillsSrc || "") && clientSrc.includes("counts.hostOnly > 0"));
+
+	/* ⑤l R27：换版本 = 先卸后装（跨插件协作）——
+	   这一组的价值是「把三条独立性钉在源码上」：安装器不再自己卸载、两边都不硬依赖、
+	   判据只在 lib/upgrade.js 一处。 */
+	const upgradeSrc = (await readText("lib\\upgrade.js")) || "";
+	const collabSrc = (await readText("lib\\collaborator.js")) || "";
+	ok("换版本：判据是纯函数、且只有一处（lib/upgrade.js）",
+		/export function decideReplacement/.test(upgradeSrc) && /export function restoreTarget/.test(upgradeSrc) &&
+		!/decideReplacement/.test(pipelineSrc.split("import")[0] || ""));
+	const replaceBody = (pipelineSrc.split("async prepareAndRemoveForReplace(")[1] || "").split("async restoreAfterFailedUpgrade(")[0] || "";
+	ok("换版本：安装器自己**不再**卸载（换版本方法体里没有 removeBundle）",
+		replaceBody.length > 200 && !/removeBundle\(/.test(replaceBody) && /provider\.removal\.apply\(/.test(replaceBody));
+	const packAt = replaceBody.indexOf("preparePluginTarball({ detected, packDir })");
+	const removeAt = replaceBody.indexOf("provider.removal.apply(");
+	ok("换版本：先打包再卸载（换版本方法体里 prepare 在 removal.apply 之前）",
+		packAt > 0 && removeAt > 0 && packAt < removeAt, { packAt, removeAt });
+	ok("换版本：卸载走两段式（plan 拿 token → apply 带 confirm）",
+		/provider\.removal\.plan\(\{ name: rep\.name/.test(pipelineSrc) &&
+		/provider\.removal\.apply\(\{ token: planned\.token, confirm: true/.test(pipelineSrc));
+	ok("换版本：每一步都落盘（中断后能判现场）",
+		/phase: "prepared"/.test(pipelineSrc) && /phase = "removing"/.test(pipelineSrc) && /phase = job\.upgrade\.removal\.ok \? "removed"/.test(pipelineSrc));
+	ok("换版本：装失败会装回旧版，且按版本核对（不信回执）",
+		/restoreAfterFailedUpgrade/.test(pipelineSrc) && /String\(now\.version\) === String\(upgrade\.from\)/.test(pipelineSrc));
+	ok("换版本：中断可续跑，但只对「卸载后/旧版还在」这一种",
+		/async resumeUpgrade/.test(pipelineSrc) && /upgrade\.phase !== "interrupted"/.test(pipelineSrc) &&
+		/action === "resume-upgrade"/.test(indexSrc2));
+	ok("换版本：协作方是**可选**服务（ctx.get，不在 inject 里）",
+		/ctx\.get\(key\)/.test(collabSrc) && !/export const inject = .*pluginCatalog/.test(indexSrc2));
+	ok("换版本：没有协作方就明确拒绝（不排无效队列）",
+		/code: "needs-collaborator"/.test(pipelineSrc) && /needsCollaborator: true/.test(pipelineSrc));
+	ok("换版本：两个包不许自己换自己（本插件 / 卸载方）",
+		/self-replace/.test(upgradeSrc) && /entry\.name === SELF_PACKAGE/.test(pipelineSrc) &&
+		/entry\.name === "dsh-plugin-catalog"/.test(pipelineSrc));
+	ok("换版本：界面把协作方状态、先卸后装、续跑都渲染出来",
+		clientSrc.includes("UpgradeCard") && clientSrc.includes("继续升级") &&
+		clientSrc.includes("卸载协作") && clientSrc.includes("需要「插件目录」才能升级"));
+	ok("换版本：工具面也说清「宿主不支持原地换版本」",
+		toolsSrc.includes("already-installed") && toolsSrc.includes("卸载由「插件目录」"));
+	ok("更新结果按版本对账（装/卸之后不显示过期的「可升级」）",
+		/String\(found\.localVersion\) === String\(item\.localVersion\)/.test((await readText("lib\\updates.js")) || ""));
 
 	/* ⑥ 数据目录：设置文件是否与运行时会一致（手改过就会出现差异） */
 	const settingsFile = join(dataDir(), "settings.json");

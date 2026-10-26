@@ -175,7 +175,7 @@ function textOf(node, acc) {
  * 正常不执行，所以**数源码不等于数断言**（实测 103 处、只跑 80 条）。真正的判据只能是
  * 「这次实际跑了几条」，所以由脚本自己报总数、并由自己比对。
  */
-const EXPECTED_TOTAL = 127;
+const EXPECTED_TOTAL = 141;
 
 let failed = 0;
 let passed = 0;
@@ -608,6 +608,61 @@ if (typeof t.CompatExemptCard === "function") {
 	check("__test 暴露了 CompatExemptCard", false);
 }
 
+/* R27：换版本卡（先卸后装）—— 面板必须能说清「为什么必须卸、由谁卸、中断了能不能续」 */
+if (typeof t.UpgradeCard === "function") {
+	const upgradeJob = {
+		id: "job-up",
+		replacement: { needed: true, direction: "upgrade", from: "0.5.0", to: "0.6.0", name: "dsh-ffmpeg", kind: "npm", blocked: null },
+		collaborator: { ok: true, label: "「插件目录」 v0.31.0" },
+		upgrade: {
+			phase: "interrupted",
+			resumable: true,
+			prepared: { type: "npm", spec: "npm:dsh-ffmpeg@0.6.0" },
+			from: "0.5.0",
+			to: "0.6.0",
+			removal: { ok: true, application: "applied" },
+			removalPlan: { ok: true, warnings: [{ code: "loaded", text: "它现在**会被加载**（bundle）" }] }
+		},
+		stages: [],
+		error: { code: "upgrade-interrupted", message: "宿主在卸载之后重启了", hint: "点继续升级" }
+	};
+	resetHooks();
+	let upgradeText = "";
+	try {
+		upgradeText = textOf(t.UpgradeCard({ job: upgradeJob, busy: null, act: () => {} })).join(" | ");
+		check("换版本卡：标题写明「先卸后装」", upgradeText.includes("先卸后装"), upgradeText.slice(0, 120));
+		check("换版本卡：给出 从 → 到", upgradeText.includes("0.5.0") && upgradeText.includes("0.6.0"), upgradeText.slice(0, 160));
+		check("换版本卡：点名卸载由「插件目录」执行", upgradeText.includes("插件目录"), upgradeText.slice(0, 240));
+		check("换版本卡：说明装失败会装回旧版", upgradeText.includes("装回旧版"), upgradeText.slice(0, 300));
+		check("换版本卡：中断后可一键续跑", upgradeText.includes("继续升级"), upgradeText.slice(0, 400));
+		check("换版本卡：把卸载前的提醒摊开", upgradeText.includes("会被加载"), upgradeText.slice(0, 500));
+	} catch (e) {
+		check("换版本卡：渲染不抛异常", false, String((e && e.message) || e));
+	}
+	/* 两个「不许换」的口径：自己换自己 / 缺协作方 —— 都不能只灰按钮 */
+	resetHooks();
+	let blockedText = "";
+	try {
+		blockedText = textOf(t.UpgradeCard({
+			job: {
+				id: "job-block",
+				replacement: { needed: true, direction: "upgrade", from: "0.1.0", to: "0.2.0", name: "dsh-plugin-installer", kind: "npm", blocked: { code: "self-replace", text: "不能由面板换「插件安装」自己的版本", plain: "大白话", fix: [{ text: "用官方插件管理器升级" }] } },
+				upgrade: null,
+				stages: []
+			},
+			busy: null,
+			act: () => {}
+		})).join(" | ");
+		check("换版本卡：被拒时点名原因", blockedText.includes("不能由面板换"), blockedText.slice(0, 160));
+		check("换版本卡：被拒时给处置步骤", blockedText.includes("官方插件管理器"), blockedText.slice(0, 300));
+		check("换版本卡：被拒时不给续跑按钮", !blockedText.includes("继续升级"), blockedText.slice(0, 300));
+	} catch (e) {
+		check("换版本卡：被拒态渲染不抛异常", false, String((e && e.message) || e));
+	}
+} else {
+	check("__test 暴露了 UpgradeCard", false);
+}
+
 /* R12：已装清单 —— 折叠态只说规模、展开态才逐条列；「能不能升级」必须在这一层就说清来源 */
 if (typeof t.Inventory === "function") {
 	const savedLocal = t.store.local;
@@ -637,7 +692,15 @@ if (typeof t.Inventory === "function") {
 		]
 	};
 
-	/* ① 折叠态（默认）：只说规模，不把 44 行铺开 */
+	/* ① 折叠态（默认）：只说规模，不把 44 行铺开。
+	   R27：换版本要「插件目录」配合卸载 —— 这一组夹具默认给一个可用的协作方，
+	   没有它的话「升级到 X」按设计不会出现（下面另有一组不可用的对照）。 */
+	const savedDataC = t.store.data;
+	const collabOkFixture = {
+		ok: true, state: "available", name: "dsh-plugin-catalog", version: "0.31.0",
+		label: "「插件目录」 v0.31.0", reason: "", fix: [], line: "「插件目录」 v0.31.0 可用"
+	};
+	t.store.data = Object.assign({}, savedDataC || {}, { collaborator: collabOkFixture });
 	t.store.local = { inventory: invFixture };
 	resetHooks();
 	let collapsed = "";
@@ -668,9 +731,30 @@ if (typeof t.Inventory === "function") {
 		check("已装清单：跨度写明跨几个版本（R26）", expanded.includes("跨 1 个小版本"), expanded.slice(0, 400));
 		check("已装清单：没落地的行被点名", expanded.includes("声明了但没落地") && expanded.includes("dsh-missing"));
 		check("已装清单：收起入口", expanded.includes("收起"));
+		/* R27：升级不再是「原地换版本」，面板要说清先卸载 */
+		check("已装清单：升级说明「先卸载旧版」（R27）", expanded.includes("先卸载旧版"), expanded.slice(0, 400));
+		check("已装清单：点名卸载由「插件目录」执行（R27）", expanded.includes("插件目录"), expanded.slice(0, 400));
 	} catch (e) {
 		check("已装清单：展开态渲染不抛异常", false, String((e && e.message) || e));
 	}
+
+	/* ②c R27：协作方不可用时，升级入口要**消失并说清原因**（而不是点下去必失败） */
+	t.store.data = Object.assign({}, savedDataC || {}, {
+		collaborator: { ok: false, state: "missing", name: "dsh-plugin-catalog", version: "", label: "", reason: "没装「插件目录」（dsh-plugin-catalog）", fix: [{ text: "在面板里搜 dsh-plugin-catalog 装上" }], line: "卸载协作：不可用 —— 没装「插件目录」" }
+	});
+	t.store.local = { inventory: invFixture };
+	resetHooks();
+	hooks[2] = true;
+	let noCollab = "";
+	try {
+		noCollab = textOf(t.Inventory({})).join(" | ");
+		check("已装清单：协作方不可用时不画「升级到」按钮（R27）", !noCollab.includes("升级到 0.6.0"), noCollab.slice(0, 300));
+		check("已装清单：协作方不可用时说清原因（R27）", noCollab.includes("没装「插件目录」"), noCollab.slice(0, 400));
+		check("已装清单：协作方不可用时给下一步（R27）", noCollab.includes("搜 dsh-plugin-catalog"), noCollab.slice(0, 500));
+	} catch (e) {
+		check("已装清单：不可用态渲染不抛异常", false, String((e && e.message) || e));
+	}
+	t.store.data = savedDataC;
 
 	/* ②b R26：批量升级队列与 80 条折叠提示 */
 	const savedDataQ = t.store.data;

@@ -23,7 +23,7 @@ window.__ModuleLoader__.load({
 		/* 客户端 build 号（R5.1）：改 client.js 就提一位。
 		   client 会热重载、但没人保证「当前页面跑的是哪一版」—— 这个号随 client-state
 		   一起上报，宿主 /health 的 clientReport.build 就是答案（宿主侧另有 mtime 标签）。 */
-		const BUILD = "r26.3";
+		const BUILD = "r27.0";
 
 		/* ── 迷你 store（模块级，面板关着时图标也在用）──────────────────── */
 
@@ -1046,6 +1046,65 @@ window.__ModuleLoader__.load({
 			);
 		}
 
+		/* R27：换版本（先卸后装）—— 面板上要能看见「为什么必须卸、由谁卸、中断了能不能续」。
+		   判据全在宿主（job.replacement / job.upgrade / job.collaborator），客户端不重算。 */
+		const UPGRADE_PHASE_TEXT = {
+			prepared: "新包已备好（还没动旧版）",
+			removing: "正在卸载旧版",
+			removed: "旧版已卸载，准备装新版",
+			"remove-failed": "卸载失败（profile 未变）",
+			interrupted: "中断：等续跑",
+			done: "完成"
+		};
+		function UpgradeCard(props) {
+			const job = props.job;
+			const busy = props.busy;
+			const act = props.act;
+			const rep = job && job.replacement;
+			if (!rep || !rep.needed) return null;
+			const up = job.upgrade || null;
+			const collab = job.collaborator || null;
+			const canResume = Boolean(job.error && job.error.code === "upgrade-interrupted" && up &&
+				(up.resumable === true || (up.phase === "interrupted" && up.prepared)));
+			const removal = up && up.removal ? up.removal : null;
+			const restore = up && up.restore ? up.restore : null;
+			return h("div", { className: "dpi-card" },
+				h("div", { className: "dpi-card-head" },
+					h("strong", null, rep.direction === "downgrade" ? "降级（先卸后装）" : "换版本（先卸后装）"),
+					h("span", { className: "dpi-muted" }, (rep.from || "?") + " → " + (rep.to || "?"))),
+				rep.blocked
+					? h("div", { className: "dpi-error" },
+						h("b", null, rep.blocked.text),
+						rep.blocked.plain ? h("div", { className: "dpi-detail" }, rep.blocked.plain) : null,
+						rep.blocked.fix && rep.blocked.fix.length > 0 ? h(FixSteps, { steps: rep.blocked.fix }) : null)
+					: h("div", { className: "dpi-muted" },
+						collab && collab.ok
+							? "会先卸载旧版（由 " + (collab.label || "「插件目录」") + " 执行并复核依赖行），再装新版。装失败会尝试装回旧版；新版本要下次启动 DSH 才加载。"
+							: "升级需要「插件目录」执行卸载：" + ((collab && collab.reason) || "协作方未知")),
+				up && up.phase
+					? h("div", { className: "dpi-muted" },
+						"阶段：" + (UPGRADE_PHASE_TEXT[up.phase] || up.phase) +
+						(removal ? " · 卸载" + (removal.ok ? "成功" : "失败：" + (removal.error || removal.code || "?")) : "") +
+						(restore ? " · 装回" + (restore.ok ? "成功（v" + (restore.current || "?") + "）" : "没成功：" + (restore.error || restore.why || "?")) : ""))
+					: null,
+				canResume
+					? h("div", { className: "dpi-actions" },
+						h("button", {
+							className: "dpi-btn dpi-btn-primary",
+							disabled: busy !== null,
+							onClick: () => act("resume-upgrade")
+						}, busy === "resume-upgrade" ? "续跑中…" : "继续升级（装 " + (up.to || "新版") + "）"),
+						h("span", { className: "dpi-muted" }, "包已备好，不会重新下载；只做「安装」这一步。"))
+					: null,
+				up && up.removalPlan && up.removalPlan.warnings && up.removalPlan.warnings.length > 0
+					? h("details", { className: "dpi-hits" },
+						h("summary", null, "「插件目录」卸载前的提醒（" + up.removalPlan.warnings.length + " 条）"),
+						h("ul", { className: "dpi-list dpi-list-info" },
+							up.removalPlan.warnings.map((w, i) => h("li", { key: "upw" + i }, w.text))))
+					: null
+			);
+		}
+
 		/* 一个任务的全部细节 */
 		function JobDetail(props) {
 			const job = props.job;
@@ -1098,6 +1157,9 @@ window.__ModuleLoader__.load({
 
 				/* R10：版本不兼容 —— 面板上直接给「授权精确版本豁免并重试」 */
 				h(CompatExemptCard, { job, busy, act }),
+
+				/* R27：换版本（先卸后装）—— 为什么必须卸、由谁卸、中断了能不能续 */
+				h(UpgradeCard, { job, busy, act }),
 
 				detected ? h("div", { className: "dpi-meta" },
 					detected.description ? h("div", null, detected.description) : null,
@@ -1443,6 +1505,9 @@ window.__ModuleLoader__.load({
 			const [showAll, setShowAll] = useState(false);
 			const busy = s.local.invBusy;
 			const queue = (s.data && s.data.queue) || null;
+			/* R27：换版本要「插件目录」配合卸载 —— 不在就没法升级（宿主按包名判已装） */
+			const collab = (s.data && s.data.collaborator) || null;
+			const collabOk = Boolean(collab && collab.ok);
 			const load = () => {
 				api("/inventory")
 					.then((r) => {
@@ -1486,11 +1551,17 @@ window.__ModuleLoader__.load({
 			const upgradeAll = (includeRisky) => {
 				const targets = sorted.filter((item) => item.update && item.update.relation === "outdated");
 				if (!targets.length) return;
+				if (!collabOk) {
+					toast("批量升级需要「插件目录」卸载旧版 —— " + ((collab && collab.reason) || "它当前不可用"));
+					return;
+				}
 				if (includeRisky !== true) {
 					const ok = typeof window !== "undefined" && window.confirm
-						? window.confirm("把可升级的 " + targets.length + " 个 npm 包排进队列，逐个安装？\n\n" +
-							"· 每个都会先做安全预检与安装前快照\n" +
-							"· 中途需要确认的会停下来等你\n" +
+						? window.confirm("把可升级的 " + targets.length + " 个 npm 包排进队列，逐个换版本？\n\n" +
+							"· 每个都是「先卸载旧版（由「插件目录」执行并复核）→ 再装新版」\n" +
+							"· 卸载到装回之间，那个插件不可用；新版本要下次启动 DSH 才加载\n" +
+							"· 装失败会自动尝试装回旧版\n" +
+							"· 每个都会先做安全预检与安装前快照；需要确认的会停下来等你\n" +
 							"· 宿主重启后队列不自动续跑\n" +
 							"· 跨大版本 / 0.x 小版本的会单独再问你一次\n" +
 							"· 本地 .tgz / Git / link 来源不排队（需要时按单条「升级」走）")
@@ -1507,6 +1578,14 @@ window.__ModuleLoader__.load({
 						}
 						const n = (r.queued || []).length;
 						const risky = (r.needsAttention || []);
+						const startedInfo = r.started || null;
+						/* R27：一单已经装完不会再自动开下一单（busy / awaiting-confirm / empty）——
+						   以前一律说「第一个已开始」，而宿主可能根本没开始（独立审计的 P1-5）。 */
+						const startNote = startedInfo && startedInfo.started
+							? "第一个已开始"
+							: startedInfo && startedInfo.reason
+								? "第一个没有开始（" + ({ busy: "已有任务在跑", "awaiting-confirm": "有一单在等你确认", empty: "队列是空的" }[startedInfo.reason] || startedInfo.reason) + "）"
+								: "排队完成";
 						if (risky.length > 0) {
 							/* 第二次确认：只把「跨越较大的版本」摆出来，让人明确知道要跨过什么 */
 							const list = risky.slice(0, 5).map((x) => "· " + x.name + " " + (x.from || "?") + " → " + x.to + (x.gap ? "（" + x.gap + "）" : "")).join("\n");
@@ -1524,7 +1603,7 @@ window.__ModuleLoader__.load({
 							return;
 						}
 						toast(n > 0
-							? "已排队 " + n + " 个（第一个已开始，后面的自动接着跑）"
+							? "已排队 " + n + " 个（" + startNote + "，后面的自动接着跑）"
 							: (includeRisky === true ? "没有可排队的升级" : "没有可排队的升级（跨版本的需单独确认）"));
 					})
 					.catch((e) => toast("排队失败：" + String((e && e.message) || e)))
@@ -1566,8 +1645,10 @@ window.__ModuleLoader__.load({
 					outdated.length > 0
 						? h("button", {
 							className: "dpi-btn dpi-btn-sm",
-							disabled: busy,
-							title: "把可升级的 npm 包排进队列，逐个安装（跨大版本的会单独再问你一次；需要确认的仍会停下来等你）",
+							disabled: busy || !collabOk,
+							title: collabOk
+								? "把可升级的 npm 包排进队列，逐个换版本（每个都是先卸载旧版再由「插件目录」复核；跨大版本的会单独再问你一次）"
+								: "需要「插件目录」才能升级：" + ((collab && collab.reason) || "它当前不可用"),
 							onClick: () => upgradeAll(false)
 						}, "全部升级 " + outdated.length)
 						: null,
@@ -1587,6 +1668,16 @@ window.__ModuleLoader__.load({
 				problems.length > 0 && !open
 					? h("div", { className: "dpi-muted" }, "· " + problems.length + " 个依赖「声明了但没落地」（展开看，或用环境体检细查）")
 					: null,
+				/* R27：换版本的卸载协作方（插件目录）—— 它决定了「升级」可不可点。
+				   说清"为什么不可用 / 怎么解决"，而不是把按钮灰掉就完事。 */
+				collab
+					? h("div", { className: "dpi-muted", style: collabOk ? null : { color: "var(--dsw-alias-state-warning-primary)" } },
+						h("span", null, collab.line || (collabOk ? "卸载协作：可用" : "卸载协作：不可用")),
+						collabOk
+							? null
+							: h("span", null, " —— " + (collab.reason || "原因未知") +
+								(collab.fix && collab.fix.length > 0 ? "；" + collab.fix[0].text : "")))
+					: null,
 				queue && queue.count > 0
 					? h("div", { className: "dpi-muted" },
 						"队列：" + queue.count + " 个待装（" + queue.items.slice(0, 3).map((q) => q.name || q.raw).join("、") +
@@ -1595,8 +1686,9 @@ window.__ModuleLoader__.load({
 					: null,
 				outdated.length > 0
 					? h("div", { className: "dpi-muted" },
-						"⚠ 宿主 0.2.1 的 installBundle 对已存在的包名回 already-installed：这里的「升级」不会真的换版本。",
-						"真升级要先卸载再装；重启面板后（R26.3）这条会明确报成失败，不再显示成已完成。")
+						collabOk
+							? "升级 = 先卸载旧版（由「插件目录」执行并复核依赖行）→ 再装新版。宿主按包名判已装，所以不能原地换版本；新版本要重启 DSH 才加载。"
+							: "⚠ 这批升级暂时做不了：宿主按包名判已装，换版本必须先卸载，而卸载要「插件目录」配合 —— 它当前不可用（见上一行）。")
 					: null,
 				inv && inv.ok === false
 					? h("div", { className: "dpi-actions dpi-actions-tight" },
@@ -1636,10 +1728,14 @@ window.__ModuleLoader__.load({
 								!item.installed ? h("span", { className: "dpi-tag dpi-tag-high" }, "声明了但没落地") : null),
 							item.update && item.update.relation === "outdated"
 								? h("div", { className: "dpi-actions dpi-actions-tight" },
-									h("button", {
-										className: "dpi-btn dpi-btn-primary dpi-btn-sm",
-										onClick: () => submitInput("npm:" + (item.registryName || item.name) + "@" + item.update.latestVersion)
-									}, "升级到 " + item.update.latestVersion))
+									collabOk
+										? h("button", {
+											className: "dpi-btn dpi-btn-primary dpi-btn-sm",
+											title: "会先卸载 v" + (item.localVersion || "?") + "（由「插件目录」执行并复核）再装 v" + item.update.latestVersion +
+												"；确认后才会动手，装失败会尝试装回旧版",
+											onClick: () => submitInput("npm:" + (item.registryName || item.name) + "@" + item.update.latestVersion)
+										}, "升级到 " + item.update.latestVersion)
+										: h("span", { className: "dpi-muted", title: (collab && collab.reason) || "" }, "需要「插件目录」才能升级"))
 								: null,
 							h("div", { className: "dpi-detail" }, item.spec + (item.checkable ? "" : " · " + item.why)))))
 					: null,
@@ -2467,6 +2563,8 @@ window.__ModuleLoader__.load({
 			BuildApprovalCard,
 			/* R10：版本不兼容卡（同上） */
 			CompatExemptCard,
+			/* R27：换版本卡（先卸后装 / 中断续跑）—— 无头渲染要能验「为什么必须卸、能不能续」 */
+			UpgradeCard,
 			/* R12：已装清单 + 检查更新（无头渲染要能验折叠/可升级行/空态） */
 			Inventory,
 			/* R25：AI 推荐 / 只搜索卡片（无头渲染要能验「已装」分来源与「本机插件」提示） */
