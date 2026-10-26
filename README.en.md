@@ -2,6 +2,13 @@
 
 [中文](README.md)
 
+![Plugin / Skill Install panel](docs/panel.png)
+
+> **Where to open it after installing**: restart DSH, then look in the left sidebar for a **rounded square with a
+> downward arrow** (label "插件安装"), listed among your other panel icons. Click it and the main area switches to this panel.
+> If you cannot find it: sidebar **Settings → Plugins**, search `dsh-plugin-installer`, and make sure it is enabled —
+> the plugin tree is read at startup, so **DSH must be restarted once after installing**.
+> To run a self-check on any page: `Ctrl+Alt+D` (rebindable or disable in Settings).
 
 One icon in the sidebar opens the "Plugin / Skill Install" panel: drop in a GitHub link, a Release page, a direct `.tgz`/`.zip` link, or a local archive/directory, and the panel handles **download → unpack → identify → security precheck → snapshot → install → diagnose → (on demand) rollback** on its own.
 
