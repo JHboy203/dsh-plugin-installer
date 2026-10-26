@@ -793,6 +793,9 @@ node DSH-Plugin/dsh-plugin-installer/dev/probe-rev.mjs --full
 # ④b 跨插件契约探针（R27）：真的 CatalogService ↔ installer 的字段契约（假宿主，不真卸载；协作方不在就 SKIP）
 node DSH-Plugin/dsh-plugin-installer/dev/probe-bridge.mjs
 
+# ④c 现在能不能真升级（R27 收尾）：只读三个 GET，端口取 DSH_WEB_URL（每次重启会变，别写死）
+node DSH-Plugin/dsh-plugin-installer/dev/probe-live-upgrade.mjs
+
 # 环境体检：只读 → 修（幂等：挪 dsh-tools、从 node_modules 重打包补回 .tgz）
 install_hub_doctor({})
 install_hub_doctor({ apply: true })

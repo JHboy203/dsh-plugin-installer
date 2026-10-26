@@ -31,6 +31,13 @@ function arg(name, fallback = null) {
 const dryRun = Boolean(arg("dry-run", false));
 const push = Boolean(arg("push", false));
 const msgFile = arg("message-file", resolve(REPO, "..", "..", ".tools", "installer-commit-msg.txt"));
+/* ★ 只提交点名的路径（逗号分隔，相对仓库根）。用途：工作区里还有**别的会话**未提交的改动时，
+   自己那几件（探针/脚本）照样能单独落盘，不用把别人的半成品一起提交。
+   不传 = 老行为（git add -A）。 */
+const onlyPaths = String(arg("paths", ""))
+	.split(",")
+	.map((item) => item.trim())
+	.filter(Boolean);
 
 function git(args, opts = {}) {
 	return execFileSync("git", ["-c", "core.quotepath=false", ...args], {
@@ -76,7 +83,28 @@ if (dryRun) {
 }
 
 if (lines.length > 0) {
-	git(["add", "-A"]);
+	if (onlyPaths.length > 0) {
+		/* 选择性提交：先确认每个路径都真的有改动，避免把拼错的路径静默忽略。
+		   ★ 不用 porcelain 文本解析（前导空格 / 重命名的 `old -> new` 都能让人栽跟头），
+		     直接问 git 两个明确的问题：相对 HEAD 改了哪些、有哪些未跟踪。 */
+		const changed = new Set(
+			[
+				...git(["diff", "--name-only", "HEAD"]).split(/\r?\n/),
+				...git(["ls-files", "--others", "--exclude-standard"]).split(/\r?\n/),
+			]
+				.map((line) => line.trim())
+				.filter(Boolean),
+		);
+		const missing = onlyPaths.filter((path) => !changed.has(path));
+		if (missing.length > 0) {
+			say("FAIL --paths 里有不存在的改动：" + missing.join(", ") + "（现有：" + [...changed].slice(0, 20).join(", ") + "）");
+			process.exit(2);
+		}
+		say("selective: 只提交 " + onlyPaths.join(", "));
+		git(["add", "--", ...onlyPaths]);
+	} else {
+		git(["add", "-A"]);
+	}
 	try {
 		execFileSync(
 			"git",
