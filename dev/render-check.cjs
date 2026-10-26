@@ -175,7 +175,7 @@ function textOf(node, acc) {
  * 正常不执行，所以**数源码不等于数断言**（实测 103 处、只跑 80 条）。真正的判据只能是
  * 「这次实际跑了几条」，所以由脚本自己报总数、并由自己比对。
  */
-const EXPECTED_TOTAL = 141;
+const EXPECTED_TOTAL = 150;
 
 let failed = 0;
 let passed = 0;
@@ -1025,6 +1025,70 @@ check("窄屏：设置面板宽度流体 + 内部可滚动 + 有高度上限",
 	/\.dpi-settings\{[^}]*max-height:/.test(cssText));
 check("窄屏：没有超过 320px 的固定宽度（360 宽下必溢出）",
 	!/\.dpi-[\w-]+\{[^}]*\bwidth:\s*(?:3[3-9]\d|[4-9]\d\d|\d{4,})px/.test(cssText));
+
+/* ── R30：界面打磨（两行历史 / 状态胶囊 / 空态 / 展开边界 / 自绘图标）──────────────
+   这一组钉的是「公开之前的观感契约」：它们不改变任何判据，但改坏了用户第一眼就看得出来，
+   而静态审计与行为自检都不管这一层。 */
+if (typeof t.History === "function") {
+	const savedData = t.store.data;
+	const savedLocal = t.store.local;
+	const jobFixture = {
+		id: "job-r30-1",
+		status: "failed",
+		title: "dsh-ffmpeg · DSH 插件",
+		createdAt: "2026-10-26T08:25:03.000Z",
+		updatedAt: "2026-10-26T08:25:09.000Z",
+		detected: { version: "0.5.1", kind: "bundle" },
+		installedBefore: { version: "0.5.0" },
+		error: { code: "upgrade-stalled", message: "升级没有发生：宿主拒绝原地换版本（0.5.0 → 0.5.1）" },
+		stages: []
+	};
+
+	t.store.data = { jobs: [jobFixture], active: null, host: {} };
+	t.store.local = savedLocal;
+	resetHooks();
+	const histTree = t.History({});
+	const histText = textOf(histTree).join(" ");
+	const pills = findNodes(histTree, (props) => typeof props.className === "string" && props.className.indexOf("dpi-status") === 0);
+	check("R30 历史：状态是一颗粒（不是 7px 裸点，失败一眼认得出）",
+		pills.length === 1 && /is-failed/.test(pills[0].props.className || ""),
+		{ count: pills.length, classes: pills.map((node) => node.props.className) });
+	check("R30 历史：第二行同时给版本跨度与失败原因",
+		/0\.5\.0 → 0\.5\.1/.test(histText) && /宿主拒绝原地换版本/.test(histText));
+	check("R30 历史：展开箭头是自绘 SVG（不是 ▸ 字符冒充图标）",
+		findNodes(histTree, (props) => Boolean(props && props.viewBox === "0 0 24 24")).length >= 1);
+	check("R30 历史：次要行单行省略（nowrap + ellipsis，行高才不会忽高忽低）",
+		/\.dpi-hist-meta\{[^}]*white-space:nowrap/.test(cssText) && /\.dpi-hist-meta\{[^}]*text-overflow:ellipsis/.test(cssText));
+
+	/* 空态：公开之后第一次打开看到的就是这里 */
+	t.store.data = { jobs: [], active: null, host: {} };
+	resetHooks();
+	const emptyTree = t.History({});
+	check("R30 空态：一条记录都没有时给「怎么开始」而不是一片空白",
+		/还没有安装记录/.test(textOf(emptyTree).join(" ")) &&
+		findNodes(emptyTree, (props) => typeof props.className === "string" && props.className.indexOf("dpi-empty") === 0).length === 1);
+
+	/* 展开态：hooks[2] 是上一段 useStore + useState 之后的 openId */
+	t.store.data = { jobs: [jobFixture], active: null, host: {} };
+	resetHooks();
+	hooks[2] = jobFixture.id;
+	const openTree = t.History({});
+	check("R30 历史：展开内容包在 .dpi-hist-detail 里（有边界，不铺在卡片底色上）",
+		findNodes(openTree, (props) => typeof props.className === "string" && props.className.indexOf("dpi-hist-detail") === 0).length === 1);
+	check("R30 历史：展开时不再把标题重复一遍（hideHead 传进详情）",
+		findNodes(openTree, (props) => typeof props.className === "string" && props.className === "dpi-job-head").length === 0);
+
+	t.store.data = savedData;
+	t.store.local = savedLocal;
+} else {
+	check("__test 暴露了 History", false);
+}
+
+/* 头部品牌块与图标集 */
+check("R30 头部：有版本胶囊 .dpi-ver，且号取自 host.build（公开后第一件要能回答「我装的是哪一版」）",
+	/className: "dpi-ver"/.test(code) && /String\(host\.build\)\.split/.test(code) && /\.dpi-ver\{/.test(cssText));
+check("R30 图标：自绘 SVG 图标集（同一套描边 1.7，不用 unicode 冒充）",
+	typeof t.Glyph === "function" && /function Glyph/.test(code) && /strokeWidth: 1\.7/.test(code));
 
 /* 条数自对表：断言被删/被加都会在这里当场红（数源码不可靠，见 EXPECTED_TOTAL 的注释） */
 if (passed !== EXPECTED_TOTAL) {

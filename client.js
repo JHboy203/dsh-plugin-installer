@@ -23,7 +23,7 @@ window.__ModuleLoader__.load({
 		/* 客户端 build 号（R5.1）：改 client.js 就提一位。
 		   client 会热重载、但没人保证「当前页面跑的是哪一版」—— 这个号随 client-state
 		   一起上报，宿主 /health 的 clientReport.build 就是答案（宿主侧另有 mtime 标签）。 */
-		const BUILD = "r27.0";
+		const BUILD = "r30.0";
 
 		/* ── 迷你 store（模块级，面板关着时图标也在用）──────────────────── */
 
@@ -596,6 +596,56 @@ window.__ModuleLoader__.load({
 			);
 		}
 
+		/**
+		 * 小图标集（R30）：一律自绘 SVG、同一套描边（1.7 / round），不用 unicode 字符冒充图标。
+		 * 只收面板真的用得到的几个 —— 设置 / 刷新 / 安装 / 信息 / 展开箭头。
+		 */
+		function Glyph(props) {
+			const name = (props && props.name) || "info";
+			const size = (props && props.size) || 14;
+			const common = {
+				fill: "none",
+				stroke: "currentColor",
+				strokeWidth: 1.7,
+				strokeLinecap: "round",
+				strokeLinejoin: "round"
+			};
+			const shapes = {
+				sliders: [
+					h("path", { key: "a", d: "M4 7h16M4 12h16M4 17h16", ...common }),
+					h("circle", { key: "b", cx: 9, cy: 7, r: 2, ...common, fill: "var(--dpi-surface,transparent)" }),
+					h("circle", { key: "c", cx: 15, cy: 12, r: 2, ...common, fill: "var(--dpi-surface,transparent)" }),
+					h("circle", { key: "d", cx: 8, cy: 17, r: 2, ...common, fill: "var(--dpi-surface,transparent)" })
+				],
+				refresh: [
+					h("path", { key: "a", d: "M19 12a7 7 0 1 1-2.1-5", ...common }),
+					h("path", { key: "b", d: "M19.4 4.6v4.2h-4.2", ...common })
+				],
+				install: [
+					h("path", { key: "a", d: "M12 4v9.4", ...common }),
+					h("path", { key: "b", d: "M8 10l4 3.4 4-3.4", ...common }),
+					h("path", { key: "c", d: "M4.8 19.2h14.4", ...common })
+				],
+				chevron: [h("path", { key: "a", d: "M9.5 6.5 15 12l-5.5 5.5", ...common })],
+				info: [
+					h("circle", { key: "a", cx: 12, cy: 12, r: 8.2, ...common }),
+					h("path", { key: "b", d: "M12 11v5.2", ...common }),
+					h("path", { key: "c", d: "M12 7.9v.2", ...common })
+				]
+			};
+			return h(
+				"svg",
+				{
+					width: size,
+					height: size,
+					viewBox: "0 0 24 24",
+					"aria-hidden": true,
+					style: { display: "block", pointerEvents: "none" }
+				},
+				shapes[name] || shapes.info
+			);
+		}
+
 		function SidebarEntry(props) {
 			const s = useStore();
 			const dot = Boolean(s.data && s.data.attention && s.data.attention.dot);
@@ -1131,18 +1181,22 @@ window.__ModuleLoader__.load({
 			return h(
 				"div",
 				{ className: "dpi-job" },
-				h(
-					"div",
-					{ className: "dpi-job-head" },
-					h(Pill, { tone: job.status === "failed" ? "error" : job.status === "done" ? "ok" : job.status === "awaiting-confirm" ? "warn" : "idle" },
-						STATUS_TEXT[job.status] || job.status),
-					h("span", { className: "dpi-job-title" }, job.title || (job.input && job.input.raw) || job.id),
-					detected && detected.kind
-						? h("span", { className: "dpi-tag dpi-tag-kind" }, detected.kind === "bundle" ? "插件" : detected.kind === "skill" ? "Skill" : detected.kind)
-						: null,
-					detected && detected.version ? h("span", { className: "dpi-muted" }, "v" + detected.version) : null,
-					h("span", { className: "dpi-muted dpi-right" }, ago(job.updatedAt || job.createdAt))
-				),
+				/* R30：历史里展开的那一条**已经在行里**写了状态/标题/时间 —— 详情再写一遍就是重复。
+				   `hideHead` 只由 History 传（顶层「正在跑」的那张卡仍然需要自己的头）。 */
+				props.hideHead
+					? null
+					: h(
+						"div",
+						{ className: "dpi-job-head" },
+						h(Pill, { tone: job.status === "failed" ? "error" : job.status === "done" ? "ok" : job.status === "awaiting-confirm" ? "warn" : "idle" },
+							STATUS_TEXT[job.status] || job.status),
+						h("span", { className: "dpi-job-title" }, job.title || (job.input && job.input.raw) || job.id),
+						detected && detected.kind
+							? h("span", { className: "dpi-tag dpi-tag-kind" }, detected.kind === "bundle" ? "插件" : detected.kind === "skill" ? "Skill" : detected.kind)
+							: null,
+						detected && detected.version ? h("span", { className: "dpi-muted" }, "v" + detected.version) : null,
+						h("span", { className: "dpi-muted dpi-right" }, ago(job.updatedAt || job.createdAt))
+					),
 
 				job.error
 					? h("div", { className: "dpi-error" },
@@ -1367,14 +1421,19 @@ window.__ModuleLoader__.load({
 				}),
 				h("div", { className: "dpi-composer-row" },
 					h("button", { className: "dpi-btn dpi-btn-primary", disabled: busy || !text.trim(), onClick: send },
+						h(Glyph, { name: "install", size: 14 }),
 						busy ? "处理中…" : "安装"),
 					h("button", { className: "dpi-btn", disabled: busy || !text.trim(), onClick: () => { const t = text.trim(); setText(""); setLocal({ ai: { reply: "搜索中…", recommendations: [] }, aiBusy: true });
 						api("/search", { method: "POST", body: JSON.stringify({ query: t }) }).then((r) => {
 							setLocal({ ai: { reply: "搜索：" + t + "（" + ((r.items || []).length) + " 条）", recommendations: (r.items || []).map((x) => ({ ...x, why: x.description })), localOnly: r.localOnly || null, searchOnly: true }, aiBusy: false });
 						}).catch((e) => setLocal({ ai: { reply: "搜索失败：" + String((e && e.message) || e), recommendations: [] }, aiBusy: false })); }
-					}, "只搜索"),
-					h("span", { className: "dpi-muted dpi-hint" }, "网盘链接不自动下载；只给名字会先搜候选")
+					}, "只搜索")
 				),
+				/* 提示从「按钮行右端」挪到自己一行：右端那一坨在窄屏会被整块藏掉，
+				   而它说的正是「哪些链接不处理」，属于应该在的地方。 */
+				h("div", { className: "dpi-composer-note" },
+					h(Glyph, { name: "info", size: 13 }),
+					h("span", null, "网盘链接不自动下载（自己下好再拖进来）；只给名字会先搜候选。全程只有确定性的下载 / 解包 / 预检 / 安装 —— 唯一会花 token 的是下面的 AI 推荐。")),
 				dragging ? h("div", { className: "dpi-drop-veil" }, "松手：我会把它交给宿主解包识别") : null
 			);
 		}
@@ -1459,6 +1518,30 @@ window.__ModuleLoader__.load({
 			);
 		}
 
+		/**
+		 * 一条历史行里能说得出口的「次要事实」：版本怎么变、为什么失败、诊断结论。
+		 * R30 之前这些都埋在展开后的详情里 —— 只装过一次的人不需要展开，只想一眼看出「上次怎么挂的」。
+		 * 只留最有判别力的两条：版本跨度 + 失败原因（或诊断结论）。再多就变成噪音。
+		 */
+		function historyMeta(job) {
+			const parts = [];
+			const before = job.installedBefore && job.installedBefore.version;
+			const target = job.detected && job.detected.version;
+			/* 失败原因优先：它通常自带版本跨度（「…（0.5.0 → 0.5.1）」），再补一个 vX 就是同一件事说两遍。 */
+			if (job.error && job.error.message) {
+				const msg = String(job.error.message).replace(/\s+/g, " ").trim();
+				parts.push(msg.slice(0, 58) + (msg.length > 58 ? "…" : ""));
+			} else if (before && target && String(before) !== String(target)) {
+				parts.push(before + " → " + target);
+			} else if (target) {
+				parts.push("v" + target);
+			}
+			if (!job.error && job.diagnosis && job.diagnosis.verdict && job.diagnosis.verdict !== "ok") {
+				parts.push("诊断 " + job.diagnosis.verdict);
+			}
+			return parts;
+		}
+
 		function History(props) {
 			const s = useStore();
 			const [openId, setOpenId] = useState(null);
@@ -1467,24 +1550,49 @@ window.__ModuleLoader__.load({
 			const limit = currentSettings().historyLimit;
 			const all = jobs.filter((job) => job.id !== activeId);
 			const past = all.slice(0, limit);
-			if (past.length === 0) return null;
+			/* 一条都没有：公开之后第一次打开看到的就是这里 —— 给一句「怎么开始」，而不是一片空白 */
+			if (past.length === 0) {
+				if (jobs.length > 0) return null;
+				return h(
+					"div",
+					{ className: "dpi-card dpi-history-card" },
+					h("div", { className: "dpi-card-head" },
+						h("strong", null, "历史"),
+						h("span", { className: "dpi-count" }, "0 条")),
+					h("div", { className: "dpi-empty" },
+						h("b", null, "还没有安装记录"),
+						h("span", null, "把 GitHub 链接、.tgz 直链或包名粘到上面的输入框，回车就开始。装完这一条会留在这里；失败也能一键回滚到安装前。")));
+			}
 			return h(
 				"div",
-				{ className: "dpi-card" },
+				{ className: "dpi-card dpi-history-card" },
 				h("div", { className: "dpi-card-head" },
 					h("strong", null, "历史"),
-					h("span", { className: "dpi-muted" }, past.length + (all.length > past.length ? " / " + all.length : "") + " 条")),
-				past.map((job) =>
-					h("div", { key: job.id, className: "dpi-history" },
-						h("button", {
-							className: "dpi-history-row",
-							onClick: () => setOpenId(openId === job.id ? null : job.id)
-						},
-							h("i", { className: "dpi-dot-static is-" + job.status }),
-							h("span", { className: "dpi-history-title" }, job.title || (job.input && job.input.raw) || job.id),
-							h("span", { className: "dpi-muted" }, (STATUS_TEXT[job.status] || job.status) + " · " + ago(job.updatedAt || job.createdAt)),
-							h("span", { className: "dpi-chev" }, openId === job.id ? "▾" : "▸")),
-						openId === job.id ? h(JobDetail, { job }) : null)
+					h("span", { className: "dpi-count" }, past.length + (all.length > past.length ? " / " + all.length : "") + " 条"),
+					h("span", { className: "dpi-head-spacer" }),
+					h("span", { className: "dpi-muted" }, "点开看每一阶段")),
+				h("div", { className: "dpi-history" },
+					past.map((job) => {
+						const open = openId === job.id;
+						const meta = historyMeta(job);
+						return h(
+							"div",
+							{ key: job.id, className: "dpi-history-item" },
+							h("button", {
+								className: "dpi-history-row" + (open ? " is-open" : ""),
+								onClick: () => setOpenId(open ? null : job.id)
+							},
+								h("span", { className: "dpi-status is-" + job.status }, STATUS_TEXT[job.status] || job.status),
+								h("span", { className: "dpi-hist-main" },
+									h("span", { className: "dpi-history-title" }, job.title || (job.input && job.input.raw) || job.id),
+									meta.length > 0
+										? h("span", { className: "dpi-hist-meta", title: meta.join(" · ") }, meta.join(" · "))
+										: null),
+								h("span", { className: "dpi-hist-right" },
+									h("span", { className: "dpi-hist-when" }, ago(job.updatedAt || job.createdAt)),
+									h("span", { className: "dpi-chev" + (open ? " is-open" : "") }, h(Glyph, { name: "chevron", size: 11 })))),
+							open ? h("div", { className: "dpi-hist-detail" }, h(JobDetail, { job, hideHead: true })) : null);
+					})
 				)
 			);
 		}
@@ -1854,15 +1962,19 @@ window.__ModuleLoader__.load({
 						"⚠ " + counts.notVisible + " 个技能宿主没认 —— 文件在，但用不上（展开看是哪些）")
 					: null,
 				/* R26：磁盘之外的那批（插件包内置 / 宿主自带）。不写这一句，人会以为
-				   「55 + 12 = 67」全是自己装的，然后去技能根里找一个根本不存在的目录。 */
+				   「55 + 12 = 67」全是自己装的，然后去技能根里找一个根本不存在的目录。
+				   R30：这一行原本是一段两行的长句（点名 8 个 + 来源），公开版里读起来像调试输出 ——
+				   收进 details，默认只留一句「另有 N 个」，展开才是名单。 */
 				counts && counts.hostOnly > 0
-					? h("div", { className: "dpi-muted" },
-						"另有 " + counts.hostOnly + " 个来自插件包/内置（不在技能根，所以这里删不掉）：",
+					? h("details", { className: "dpi-hostonly" },
+						h("summary", null, "另有 " + counts.hostOnly + " 个来自插件包/内置（不在技能根，所以这里删不掉）"),
 						hostOnly.length > 0
-							? " " + hostOnly.slice(0, 8).map((entry) => entry.name).join("、") +
-								(counts.hostOnly > 8 ? " 等" : "") +
-								(hostOnly.some((entry) => entry.source) ? "（来源：" + hostOnly.filter((entry) => entry.source).slice(0, 4).map((entry) => entry.name + " ← " + entry.source).join("；") + "）" : "")
-							: "")
+							? h("div", { className: "dpi-hostonly-list" },
+								hostOnly.slice(0, 24).map((entry, hi) =>
+									h("span", { key: "ho" + hi, className: "dpi-tag", title: entry.source ? "来源：" + entry.source : null },
+										entry.name + (entry.source ? " ← " + entry.source : ""))),
+								counts.hostOnly > 24 ? h("span", { className: "dpi-muted" }, "等 " + counts.hostOnly + " 个") : null)
+							: null)
 					: null,
 				view && view.ok === false
 					? h("div", { className: "dpi-actions dpi-actions-tight" },
@@ -2250,15 +2362,23 @@ window.__ModuleLoader__.load({
 				{ className: "dpi-panel" },
 				h("header", { className: "dpi-header" },
 					h("div", { className: "dpi-brand" },
-						h("span", { className: "dpi-brand-icon" }, h(InstallIcon, { size: 22 })),
-						h("div", null,
-							h("div", { className: "dpi-title" }, "插件 / Skill 安装"),
+						h("span", { className: "dpi-brand-icon" }, h(InstallIcon, { size: 20 })),
+						h("div", { style: { minWidth: 0 } },
+							h("div", { className: "dpi-title-row" },
+								h("div", { className: "dpi-title" }, "插件 / Skill 安装"),
+								/* R30：版本胶囊 —— 公开之后第一件要能回答的事是「我装的是哪一版」 */
+								host.build
+									? h("span", { className: "dpi-ver", title: "本插件构建（值来自源码最后修改时间）" },
+										"v" + String(host.build).split("·")[0].trim())
+									: null),
 							h("div", { className: "dpi-muted" },
 								"DSH " + (host.dsh || "?") + " · " + (host.profile || "?") + " 档 · 安装不花 token"
 								+ (attention.count > 0 ? " · " + attention.count + " 条待处理" + (attention.dot ? "" : "（红点已关）") : "")))),
 					h("div", { className: "dpi-header-actions" },
-						h("button", { className: "dpi-btn dpi-btn-ghost dpi-btn-sm", onClick: () => setLocal({ settingsOpen: true }) }, "设置"),
-						h("button", { className: "dpi-btn dpi-btn-ghost dpi-btn-sm", onClick: () => refresh() }, "刷新"),
+						h("button", { className: "dpi-btn dpi-btn-ghost dpi-btn-sm", onClick: () => setLocal({ settingsOpen: true }) },
+							h(Glyph, { name: "sliders", size: 13 }), "设置"),
+						h("button", { className: "dpi-btn dpi-btn-ghost dpi-btn-sm", onClick: () => refresh() },
+							h(Glyph, { name: "refresh", size: 13 }), "刷新"),
 						attention.dot ? h("button", { className: "dpi-btn dpi-btn-ghost dpi-btn-sm", onClick: () => api("/action", { method: "POST", body: JSON.stringify({ action: "ack" }) }).then((r) => r.state && setStore({ data: r.state })) }, "清除红点") : null)),
 
 				s.error ? h("div", { className: "dpi-error" }, "面板读不到状态：" + s.error + "（宿主半边可能还没重启）") : null,
@@ -2309,40 +2429,103 @@ window.__ModuleLoader__.load({
 .dpi-entry{position:relative;display:inline-flex;align-items:center;justify-content:center;line-height:0}
 .dpi-entry .dpi-dot{position:absolute;top:-3px;right:-4px;width:8px;height:8px;border-radius:50%;
   background:var(--dsw-alias-state-error-primary,#e5484d);box-shadow:0 0 0 2px var(--dsw-specific-sidebar-fill,transparent)}
-.dpi-panel{box-sizing:border-box;height:100%;overflow:auto;padding:20px 22px 40px;
-  color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-base)}
+.dpi-panel{box-sizing:border-box;height:100%;overflow:auto;padding:22px 24px 40px;
+  color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-base);
+  /* 面板自己的节奏量：间距 / 圆角 / 表面色只在这里定义一次，下面所有规则引用它。 */
+  --dpi-gap:12px;--dpi-r:12px;--dpi-r-sm:8px;--dpi-r-xs:6px;
+  --dpi-surface:var(--dsw-alias-bg-layer-1);--dpi-surface-2:var(--dsw-alias-bg-layer-2);
+  --dpi-line:var(--dsw-alias-border-l1);--dpi-line-strong:var(--dsw-alias-border-l2);
+  --dpi-muted:var(--dsw-alias-label-secondary);--dpi-accent:var(--dsw-alias-brand-primary);
+  --dpi-shadow:0 1px 2px rgba(0,0,0,.14),0 10px 26px -20px rgba(0,0,0,.55);
+  font-size:13px;line-height:1.5;-webkit-font-smoothing:antialiased;
+  scrollbar-width:thin;scrollbar-color:color-mix(in srgb,var(--dpi-muted) 34%,transparent) transparent}
 .dpi-panel *{box-sizing:border-box}
-.dpi-header{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:16px}
-.dpi-brand{display:flex;gap:10px;align-items:center;min-width:0}
-.dpi-brand-icon{display:flex;align-items:center;justify-content:center;width:34px;height:34px;border-radius:10px;
-  color:var(--dsw-alias-brand-primary);background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l1)}
-.dpi-title{font-size:15px;font-weight:600;line-height:1.3}
-.dpi-muted{color:var(--dsw-alias-label-secondary);font-size:12px;line-height:1.5}
-.dpi-header-actions{display:flex;gap:6px;flex-shrink:0}
-.dpi-composer{position:relative;border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);
-  border-radius:12px;padding:10px;margin-bottom:14px}
-.dpi-composer.is-drag{border-color:var(--dsw-alias-brand-primary);box-shadow:0 0 0 2px color-mix(in srgb,var(--dsw-alias-brand-primary) 22%,transparent)}
-.dpi-drop-veil{position:absolute;inset:0;border-radius:12px;display:flex;align-items:center;justify-content:center;
-  background:color-mix(in srgb,var(--dsw-alias-brand-primary) 12%,transparent);font-size:13px;pointer-events:none}
+.dpi-panel ::selection{background:color-mix(in srgb,var(--dpi-accent) 30%,transparent);color:inherit}
+.dpi-panel ::-webkit-scrollbar{width:10px;height:10px}
+.dpi-panel ::-webkit-scrollbar-thumb{background:color-mix(in srgb,var(--dpi-muted) 30%,transparent);
+  border-radius:99px;border:3px solid transparent;background-clip:padding-box}
+.dpi-panel ::-webkit-scrollbar-thumb:hover{background:color-mix(in srgb,var(--dpi-muted) 46%,transparent);
+  background-clip:padding-box}
+.dpi-panel ::-webkit-scrollbar-track{background:transparent}
+.dpi-panel :focus-visible{outline:2px solid color-mix(in srgb,var(--dpi-accent) 58%,transparent);
+  outline-offset:2px;border-radius:var(--dpi-r-xs)}
+/* 一次编排好的入场：卡片依次浮起 6px，做完就停，不参与后续重渲染。 */
+@keyframes dpi-rise{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+.dpi-panel > *{animation:dpi-rise .24s cubic-bezier(.22,.68,.2,1) both}
+.dpi-panel > :nth-child(2){animation-delay:.02s}
+.dpi-panel > :nth-child(3){animation-delay:.04s}
+.dpi-panel > :nth-child(4){animation-delay:.06s}
+.dpi-panel > :nth-child(5){animation-delay:.08s}
+.dpi-panel > :nth-child(6){animation-delay:.1s}
+.dpi-panel > :nth-child(n+7){animation-delay:.12s}
+@media (prefers-reduced-motion:reduce){
+  .dpi-panel > *{animation:none}
+  .dpi-btn,.dpi-history-row,.dpi-switch i{transition:none}
+}
+.dpi-header{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;margin-bottom:18px}
+.dpi-brand{display:flex;gap:11px;align-items:center;min-width:0}
+.dpi-brand-icon{display:flex;align-items:center;justify-content:center;width:36px;height:36px;border-radius:11px;
+  color:var(--dpi-accent);background:color-mix(in srgb,var(--dpi-accent) 12%,var(--dpi-surface-2));
+  border:1px solid color-mix(in srgb,var(--dpi-accent) 22%,var(--dpi-line));flex-shrink:0}
+.dpi-title{font-size:15.5px;font-weight:600;line-height:1.28;letter-spacing:.005em}
+.dpi-title-row{display:flex;align-items:center;gap:7px;flex-wrap:wrap;min-width:0}
+.dpi-ver{font-size:10.5px;line-height:1;padding:3px 6px;border-radius:99px;color:var(--dpi-muted);
+  border:1px solid var(--dpi-line);background:var(--dpi-surface-2);font-variant-numeric:tabular-nums}
+.dpi-muted{color:var(--dpi-muted);font-size:12px;line-height:1.5}
+.dpi-header-actions{display:flex;gap:7px;flex-shrink:0;align-items:center}
+.dpi-composer{position:relative;border:1px solid var(--dpi-line);border-radius:14px;padding:12px 12px 10px;
+  margin-bottom:14px;background:linear-gradient(180deg,
+    color-mix(in srgb,var(--dpi-accent) 5%,var(--dpi-surface)),var(--dpi-surface));
+  box-shadow:var(--dpi-shadow);transition:border-color .15s ease,box-shadow .15s ease}
+.dpi-composer:focus-within{border-color:color-mix(in srgb,var(--dpi-accent) 45%,var(--dpi-line));
+  box-shadow:0 0 0 3px color-mix(in srgb,var(--dpi-accent) 12%,transparent),var(--dpi-shadow)}
+.dpi-composer.is-drag{border-color:var(--dpi-accent);box-shadow:0 0 0 2px color-mix(in srgb,var(--dpi-accent) 22%,transparent)}
+.dpi-drop-veil{position:absolute;inset:0;border-radius:14px;display:flex;align-items:center;justify-content:center;
+  background:color-mix(in srgb,var(--dpi-accent) 12%,transparent);font-size:13px;pointer-events:none;
+  backdrop-filter:blur(1px)}
 .dpi-input{width:100%;border:none;outline:none;resize:vertical;background:transparent;color:inherit;
-  font:inherit;font-size:13px;line-height:1.6;min-height:44px}
-.dpi-input-line{min-height:34px;border:1px solid var(--dsw-alias-border-l1);border-radius:8px;padding:6px 10px;
-  background:var(--dsw-alias-bg-layer-2);flex:1}
-.dpi-composer-row{display:flex;gap:8px;align-items:center;margin-top:6px;flex-wrap:wrap}
+  font:inherit;font-size:13.5px;line-height:1.6;min-height:46px;padding:2px 2px 0}
+.dpi-input::placeholder{color:color-mix(in srgb,var(--dpi-muted) 88%,transparent)}
+.dpi-input-line{min-height:34px;border:1px solid var(--dpi-line);border-radius:var(--dpi-r-sm);padding:6px 10px;
+  background:var(--dpi-surface-2);flex:1;transition:border-color .15s ease,box-shadow .15s ease}
+.dpi-input-line:focus{border-color:color-mix(in srgb,var(--dpi-accent) 50%,var(--dpi-line));
+  box-shadow:0 0 0 3px color-mix(in srgb,var(--dpi-accent) 12%,transparent)}
+.dpi-composer-row{display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap}
+.dpi-composer-note{margin-top:8px;display:flex;align-items:flex-start;gap:6px;
+  font-size:11.5px;line-height:1.5;color:var(--dpi-muted)}
+.dpi-composer-note svg{flex-shrink:0;margin-top:1px;opacity:.75}
 .dpi-hint{margin-left:auto}
-.dpi-btn{border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-2);color:inherit;
-  border-radius:8px;padding:6px 12px;font-size:12.5px;cursor:pointer;line-height:1.4}
-.dpi-btn:hover:not(:disabled){border-color:var(--dsw-alias-border-l2)}
-.dpi-btn:disabled{opacity:.5;cursor:default}
-.dpi-btn-primary{background:var(--dsw-alias-brand-primary);border-color:transparent;
-  color:var(--dsw-alias-bg-base);font-weight:500}
+.dpi-btn{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--dpi-line);
+  background:var(--dpi-surface-2);color:inherit;border-radius:var(--dpi-r-sm);padding:6px 12px;
+  font:inherit;font-size:12.5px;cursor:pointer;line-height:1.4;
+  transition:background .12s ease,border-color .12s ease,color .12s ease,transform .06s ease}
+.dpi-btn:hover:not(:disabled){border-color:var(--dpi-line-strong);
+  background:color-mix(in srgb,var(--dpi-muted) 8%,var(--dpi-surface-2))}
+.dpi-btn:active:not(:disabled){transform:translateY(.5px)}
+.dpi-btn:disabled{opacity:.45;cursor:default}
+.dpi-btn svg{flex-shrink:0}
+.dpi-btn-primary{background:var(--dpi-accent);border-color:transparent;
+  color:var(--dsw-alias-bg-base);font-weight:600;
+  box-shadow:0 1px 2px rgba(0,0,0,.18),0 6px 16px -12px var(--dpi-accent)}
+.dpi-btn-primary:hover:not(:disabled){background:color-mix(in srgb,var(--dpi-accent) 88%,#000);
+  border-color:transparent}
 .dpi-btn-ghost{background:transparent}
+.dpi-btn-ghost:hover:not(:disabled){background:color-mix(in srgb,var(--dpi-muted) 10%,transparent)}
 .dpi-btn-sm{padding:4px 9px;font-size:12px}
-.dpi-mini{border:1px solid var(--dsw-alias-border-l1);background:transparent;color:var(--dsw-alias-label-secondary);
-  border-radius:6px;padding:2px 7px;font-size:11px;cursor:pointer;flex-shrink:0}
-.dpi-card{border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);border-radius:12px;
-  padding:12px 14px;margin-bottom:12px}
-.dpi-card-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px;font-size:13px}
+.dpi-mini{border:1px solid var(--dpi-line);background:transparent;color:var(--dpi-muted);
+  border-radius:var(--dpi-r-xs);padding:2px 7px;font-size:11px;cursor:pointer;flex-shrink:0;
+  transition:color .12s ease,border-color .12s ease}
+.dpi-mini:hover{color:var(--dsw-alias-label-primary);border-color:var(--dpi-line-strong)}
+.dpi-card{border:1px solid var(--dpi-line);background:var(--dpi-surface);border-radius:var(--dpi-r);
+  padding:14px 15px;margin-bottom:var(--dpi-gap);box-shadow:var(--dpi-shadow)}
+.dpi-card-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px;
+  font-size:13px;min-height:22px}
+.dpi-card-head strong{font-weight:600;letter-spacing:.005em}
+/* 段落标题右端那一小簇动作 / 计数：统一成同一颗胶囊形状，避免每张卡各写一种。 */
+.dpi-count{font-size:11px;line-height:1;padding:4px 7px;border-radius:99px;color:var(--dpi-muted);
+  background:var(--dpi-surface-2);border:1px solid var(--dpi-line);font-variant-numeric:tabular-nums}
+.dpi-card-head .dpi-btn,.dpi-card-head .dpi-mini{margin-left:0}
+.dpi-head-spacer{margin-left:auto}
 /* R9：安装脚本待批准 / 需要用户点头的卡片 */
 .dpi-card-warn{border-color:var(--dsw-alias-state-warn-primary)}
 .dpi-active{border-color:var(--dsw-alias-border-l2)}
@@ -2428,17 +2611,49 @@ window.__ModuleLoader__.load({
   display:flex;flex-direction:column;gap:5px;background:var(--dsw-alias-bg-layer-1)}
 .dpi-purpose-head{display:flex;gap:8px;align-items:center;font-size:12.5px;flex-wrap:wrap}
 .dpi-link{font-size:12px;color:var(--dsw-alias-brand-primary);text-decoration:none}
-.dpi-history{display:flex;flex-direction:column}
-.dpi-history-row{display:flex;gap:8px;align-items:center;width:100%;background:transparent;border:none;color:inherit;
-  padding:6px 4px;cursor:pointer;text-align:left;font:inherit;font-size:12.5px;border-radius:6px}
-.dpi-history-row:hover{background:var(--dsw-alias-bg-layer-2)}
-.dpi-history-title{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.dpi-chev{color:var(--dsw-alias-label-secondary);font-size:11px}
+/* 历史：两行一条（名字 + 状态，下面一行是版本/失败原因/阶段），比原来「一行塞满」可扫得多。
+   失败的那几条是用户最需要一眼认出来的 —— 所以状态做成一颗粒，而不是一个 7px 的小点。 */
+.dpi-history{display:flex;flex-direction:column;gap:3px;margin:0 -7px}
+.dpi-history-item{border-radius:var(--dpi-r-sm);overflow:hidden}
+.dpi-history-row{display:grid;grid-template-columns:auto 1fr auto;gap:2px 9px;align-items:center;width:100%;
+  background:transparent;border:1px solid transparent;color:inherit;padding:8px 9px;cursor:pointer;
+  text-align:left;font:inherit;font-size:12.5px;border-radius:var(--dpi-r-sm);
+  transition:background .12s ease,border-color .12s ease}
+.dpi-history-row:hover{background:var(--dpi-surface-2);border-color:var(--dpi-line)}
+.dpi-history-row.is-open{background:var(--dpi-surface-2);border-color:var(--dpi-line)}
+.dpi-hist-main{min-width:0;display:flex;flex-direction:column;gap:2px}
+.dpi-history-title{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:500}
+.dpi-hist-meta{font-size:11.5px;line-height:1.5;color:var(--dpi-muted);display:block;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%}
+.dpi-hist-meta i{font-style:normal;opacity:.5}
+.dpi-hist-right{display:flex;align-items:center;gap:9px;flex-shrink:0}
+.dpi-hist-when{font-size:11.5px;color:var(--dpi-muted);font-variant-numeric:tabular-nums;white-space:nowrap}
+.dpi-chev{display:flex;color:var(--dpi-muted);font-size:10px;transition:transform .16s ease}
+.dpi-chev.is-open{transform:rotate(90deg)}
+/* 展开的详情：从「一行」变成「一张内嵌的纸」，而不是让内容直接铺在卡片底色上。 */
+.dpi-hist-detail{margin:2px 0 8px;padding:10px 12px 12px;border-top:1px solid var(--dpi-line);
+  background:color-mix(in srgb,var(--dpi-surface-2) 60%,transparent);border-radius:0 0 var(--dpi-r-sm) var(--dpi-r-sm)}
+.dpi-hist-detail .dpi-job{display:flex;flex-direction:column;gap:4px}
+.dpi-status{display:inline-flex;align-items:center;gap:5px;font-size:11px;line-height:1;padding:4px 8px;
+  border-radius:99px;border:1px solid transparent;white-space:nowrap;font-weight:500}
+.dpi-status::before{content:"";width:5px;height:5px;border-radius:50%;background:currentColor;flex-shrink:0}
+.dpi-status.is-done{color:var(--dsw-alias-state-success-primary);
+  background:color-mix(in srgb,var(--dsw-alias-state-success-primary) 12%,transparent)}
+.dpi-status.is-failed{color:var(--dsw-alias-state-error-primary);
+  background:color-mix(in srgb,var(--dsw-alias-state-error-primary) 12%,transparent)}
+.dpi-status.is-awaiting-confirm,.dpi-status.is-warn{color:var(--dsw-alias-state-warn-primary);
+  background:color-mix(in srgb,var(--dsw-alias-state-warn-primary) 13%,transparent)}
+.dpi-status.is-running{color:var(--dpi-accent);background:color-mix(in srgb,var(--dpi-accent) 13%,transparent)}
+.dpi-status.is-idle,.dpi-status.is-cancelled{color:var(--dpi-muted);background:var(--dpi-surface-2)}
+.dpi-empty{display:flex;flex-direction:column;gap:5px;align-items:flex-start;padding:16px;
+  border:1px dashed var(--dpi-line);border-radius:var(--dpi-r);color:var(--dpi-muted);font-size:12.5px;
+  line-height:1.55;background:color-mix(in srgb,var(--dpi-surface-2) 50%,transparent)}
+.dpi-empty b{color:var(--dsw-alias-label-primary);font-size:13px;font-weight:600}
 .dpi-dot-static{width:7px;height:7px;border-radius:50%;background:var(--dsw-alias-state-idle-primary);flex-shrink:0}
 .dpi-dot-static.is-done{background:var(--dsw-alias-state-success-primary)}
 .dpi-dot-static.is-failed{background:var(--dsw-alias-state-error-primary)}
 .dpi-dot-static.is-awaiting-confirm{background:var(--dsw-alias-state-warn-primary)}
-.dpi-dot-static.is-running{background:var(--dsw-alias-brand-primary)}
+.dpi-dot-static.is-running{background:var(--dpi-accent)}
 .dpi-footer{display:flex;flex-direction:column;gap:2px;margin-top:18px;padding-top:10px;
   border-top:1px solid var(--dsw-alias-border-l1);font-size:11px;color:var(--dsw-alias-label-secondary);word-break:break-all}
 .dpi-toast{margin-top:6px;color:var(--dsw-alias-brand-primary)}
@@ -2456,17 +2671,33 @@ window.__ModuleLoader__.load({
 /* R14：两张大清单展开后会有 44 / 59 行（本机实测 4494px 高）—— 卡片自己滚，
    别把下面的体检卡和页脚顶出视口；首行永远是「有问题」的那几条（排序保证）。 */
 .dpi-inventory .dpi-list,.dpi-skills .dpi-list{max-height:480px;overflow:auto;padding-right:4px}
+/* R30：磁盘之外的那批技能 —— 收进 details，默认一行，展开是名单 */
+.dpi-hostonly{margin-top:7px;font-size:12px;color:var(--dpi-muted)}
+.dpi-hostonly summary{cursor:pointer;list-style:none;display:flex;align-items:center;gap:7px;line-height:1.5}
+.dpi-hostonly summary::-webkit-details-marker{display:none}
+.dpi-hostonly summary::before{content:"";width:0;height:0;border-left:4.5px solid currentColor;
+  border-top:3.5px solid transparent;border-bottom:3.5px solid transparent;opacity:.7;
+  transition:transform .15s ease;flex-shrink:0}
+.dpi-hostonly[open] summary::before{transform:rotate(90deg)}
+.dpi-hostonly summary:hover{color:var(--dsw-alias-label-primary)}
+.dpi-hostonly-list{display:flex;flex-wrap:wrap;gap:5px;margin-top:8px}
 
 /* ── 设置（R6）───────────────────────────────────────────────────── */
 .dpi-overlay{position:fixed;inset:0;z-index:60;background:rgba(0,0,0,.42);
-  display:flex;align-items:flex-start;justify-content:center;padding:48px 16px;overflow:auto}
+  display:flex;align-items:flex-start;justify-content:center;padding:48px 16px;overflow:auto;
+  backdrop-filter:blur(1.5px)}
 .dpi-settings{width:min(620px,100%);max-height:calc(100vh - 96px);overflow:auto;box-sizing:border-box;
   background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);border-radius:14px;
-  border:1px solid var(--dsw-alias-border-l1);padding:16px 18px 18px;box-shadow:0 18px 48px rgba(0,0,0,.35)}
-.dpi-set-body{display:flex;flex-direction:column;gap:14px;margin-top:10px}
-.dpi-set-section{display:flex;flex-direction:column;gap:8px;padding:10px 0 2px;border-top:1px solid var(--dsw-alias-border-l1)}
-.dpi-set-section-title{font-size:12px;letter-spacing:.06em;color:var(--dsw-alias-label-secondary)}
-.dpi-set-row{display:flex;align-items:center;gap:14px;justify-content:space-between}
+  border:1px solid var(--dpi-line);padding:16px 18px 18px;
+  box-shadow:0 24px 64px -28px rgba(0,0,0,.6),0 2px 8px rgba(0,0,0,.18);
+  scrollbar-width:thin;scrollbar-color:color-mix(in srgb,var(--dpi-muted) 34%,transparent) transparent}
+/* 设置项之间用「组」分隔，而不是每一项都画一条线 —— 二十来项时后者会变成一堵表格墙。 */
+.dpi-set-body{display:flex;flex-direction:column;gap:2px;margin-top:6px}
+.dpi-set-section{display:flex;flex-direction:column;gap:6px;padding:13px 0 6px;border-top:1px solid var(--dpi-line)}
+.dpi-set-section:first-child{border-top:none;padding-top:2px}
+.dpi-set-section-title{font-size:11.5px;letter-spacing:.07em;color:var(--dpi-muted);font-weight:600}
+.dpi-set-row{display:flex;align-items:center;gap:14px;justify-content:space-between;padding:5px 0}
+.dpi-set-row-col{flex-direction:column;align-items:stretch;gap:8px}
 .dpi-set-row-col{flex-direction:column;align-items:stretch;gap:8px}
 .dpi-set-label{display:flex;flex-direction:column;gap:3px;font-size:13px;min-width:0}
 .dpi-set-hint{font-size:11.5px;line-height:1.5}
@@ -2565,6 +2796,10 @@ window.__ModuleLoader__.load({
 			CompatExemptCard,
 			/* R27：换版本卡（先卸后装 / 中断续跑）—— 无头渲染要能验「为什么必须卸、能不能续」 */
 			UpgradeCard,
+			/* R30：界面打磨 —— 顶部品牌块 / 历史两行 / 空态 / 自绘图标（无头渲染要能验） */
+			History,
+			Glyph,
+			historyMeta,
 			/* R12：已装清单 + 检查更新（无头渲染要能验折叠/可升级行/空态） */
 			Inventory,
 			/* R25：AI 推荐 / 只搜索卡片（无头渲染要能验「已装」分来源与「本机插件」提示） */
