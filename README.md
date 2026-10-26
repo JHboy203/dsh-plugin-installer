@@ -127,7 +127,7 @@
 > **构建标记格式**（`0.1.0 · YYYY-MM-DD HH:MM`，且 `/health` 不许写死）/ 客户端设置与热键入口 /
 > `settings.json` 归一化后逐字不变 / 等待确认任务的 staging 现场还在 / README 与交接文件里的
 > 断言数是否等于 `EXPECTED_ASSERTIONS`。**不碰宿主、不 spawn、不写盘**，只打印
-> 「接着跑 host_selfcheck（835）+ render-check（141）」。自洽检查现已 **155 项**。
+> 「接着跑 host_selfcheck（835）+ render-check（141）」。自洽检查现已 **171 项**。
 > 三层分工至此固定：**audit = 自洽，host_selfcheck = 行为，render-check = 界面**。
 > 线上实测：构建标签 `0.1.0 · 2026-10-20 19:45`、客户端 `r6.0`、`GET/POST /settings` 正常
 > （非法值当场夹取回默认）、`clientReport` 里有 360×658 的窄屏实例。
@@ -659,6 +659,35 @@ profile 依赖里的包名直接回 `already-installed`（原文：*uninstall it
 | `link:` 本机目录 | 改源码就是新版，不存在「装一个新版本」这个动作 |
 | `git:` / 无法识别的声明 | 硬换会先删掉再装回同一个地址（还是同一版）；认不出的声明不拿来做不可逆动作 |
 
+### 2c. profile 的 pnpm 世代 + 「这次是谁改的」（R29）
+
+面板能回答「我这次装了什么」，但回答不了两个更基本的问题。R29 把这两件事做成了判据（`lib/profilestate.js`，纯函数 + 薄 fs 层，零依赖）。
+
+**① 这个 profile 的 pnpm 状态还说得通吗？** 三方对账：`package.json` 声明 × `pnpm-lock.yaml` 的 importers 段 × `node_modules/<包>/package.json` 的实际版本，外加 `node_modules/.modules.yaml` 的 `prunedAt`（「上一次 pnpm 真的重建 node_modules」是哪一刻，比 mtime 硬）。
+
+本机实测（2026-10-26 夜）：`package.json` 45 个依赖、lockfile 只记 35 条 —— **9 处 specifier 对不上、16 个 `link:` 依赖在 lockfile 里出现 0 次、6 个已卸载的还留着、7 个锁的版本与实际装的不一致**，而 lockfile 与 `.modules.yaml` 都停在 10-25 13:53。**面板在这之前一个字都不说。**
+
+后果不是洁癖：宿主正常安装走 `pnpm add <spec>`（会按 package.json 重算整棵树），而**安装出现 warning 后的自动修复走 `pnpm install --frozen-lockfile`**（profile 原本有 lockfile 就带这个旗标）—— 在上面那个状态下它必然 `OUTDATED_LOCKFILE`。
+
+两条纪律写在代码里：
+
+- **读不到 ≠ 通过**：lockfile 或 `.modules.yaml` 任一份读不懂 → `readable:false` + 单独一条 `pnpm-generation-unreadable`，文案直说「判不了」。静默当成「没问题」是本项目反复踩的那一类失效。
+- **只报不修**：本插件**永不自己跑 pnpm**（那一步可能埋下 `dsh-tools` 覆盖）。所以没有修复动作，只有「下一步怎么做」+ 一条能复制给人跑的命令。
+- 不误报：lockfile 自己声明 `excludeLinksFromLockfile: true` 时，`link:` 缺失不算漂移；依赖分类复用 `inventory.classifyDepSpec`（与「已装清单」「升级」同一套词）。
+
+**② profile 是被谁改的？** `data/profilestate.json` 记依赖清单的签名（名字排序后 `{spec, kind, version}` 的 sha1 前 16 位）。三个时机观察：宿主启动、本面板任务收尾、人点状态（`install_hub_status`）。只有真的变了才追加事件；`reason` 只有两种语义 —— `job:<任务id>` 算「本面板干的」，其余（`startup` / `observe`）**不能归因给本面板**，体检会出一条 info：「profile 依赖在 … 前后变过 N 项，不是本面板做的」。
+
+本机为什么需要它：改 profile 的路有三条 —— 本面板、别的会话、`.tools/dsh-plugin-install.cjs` / `dsh_plugin_update` 这类手工工具。实测 20:13 那批 7 个包是**原地解包覆盖**升上去的（包内文件 mtime 一半 10-14、一半 20:13，`node_modules/.pnpm` 里没有条目），任务账本里没有任何记录 —— 面板历史完全看不见。
+
+工具面新增两行（都只读）：
+
+```
+· profile pnpm：上一次 pnpm 是 10-25 13:53，而 package.json 比它新 1.3 天：9 处版本对不上 · 16 个依赖没记录（其中 16 个本机 link:） · 6 个已卸的还留着 · 7 个锁的版本与实际装的不一致
+· profile 变更：10-26 22:16 前后 ~1（dsh-plugin-botwatch 0.25.1→0.26.0） —— 不是本面板做的
+```
+
+离线探针：`node dev/probe-pnpmstate.mjs`（只读；五个问题一次回答 —— 世代 / 规模 / 样本 / 结论 / 归因）。
+
 ---
 
 ## 3. 信任模型（为什么它敢碰安装）
@@ -751,7 +780,7 @@ profile 依赖里的包名直接回 `already-installed`（原文：*uninstall it
 ```bash
 # ① 自洽体检（最快，不碰宿主、不重启；换会话先跑这条）
 node DSH-Plugin/dsh-plugin-installer/dev/audit.mjs
-#   155 项：默认档冻结快照 / 5 个工具的 output 契约 / 构建标记形如「0.1.0 · 2026-10-22 02:40」/
+#   171 项：默认档冻结快照 / 5 个工具的 output 契约 / 构建标记形如「0.1.0 · 2026-10-22 02:40」/
 #   契约扫描与 profile 体检是否真的接着线 / 失败分诊与批准闭环是否接线 / 版本豁免是否三处一起接 /
 #   staging 是否保住「等确认」的现场 / 状态工具的「环境注意」行 / 「批准」与「授权」都没暴露给模型 /
 #   已装清单四类来源是否分开判 / 宿主自带包是否被排除在升级外 / check-updates 是否只挂在动作上（不在轮询里）/
@@ -768,7 +797,7 @@ node DSH-Plugin/dsh-plugin-installer/dev/audit.mjs
 #   换版本判据只在 lib/upgrade.js（自己换自己 / link / git 一律拒）；装失败自动装回旧版并**按版本核对**；
 #   中断可续跑（只对「卸载后/旧版还在」）；协作方是可选服务（没有就明确拒绝，不排无效队列）
 #
-# ② 835 项确定性自检（解包围栏 / 识别短路 / 扫描与密度 / 快照回滚 / 重打包 / prune 保鲜 / 地雷 /
+# ② 880 项确定性自检（解包围栏 / 识别短路 / 扫描与密度 / 快照回滚 / 重打包 / prune 保鲜 / 地雷 /
 #   契约扫描 / profile 体检与修复 / 已装版本对照 / 已装清单判据 / registry 最新版比对（打桩 fetch）/
 #   设置归一化与审核三档 / 红点与跳过审核门禁 / 热键 / 7z 往返与围栏 / 搜索缓存 / 工具契约 /
 #   pnpm 失败分诊 / allowBuilds 解析 / 批准重装 / 版本豁免读写与回读确认 / 兼容降级口径 /
@@ -845,7 +874,7 @@ DSH 每次启动换随机端口（`dsh-desktop-host` 里写死 `--port 0`），�
 
 | 场景 | 结果 |
 |---|---|
-| 确定性自检 | **835/835 通过**（`dev/hosttest.mjs`，含 zip/tar 构造、穿越与软链接拒绝、比例炸弹、5 种识别分支、快照还原、重打包往返、prune 引用保护、地雷处置、契约扫描、profile 体检与修复、设置归一化、审核三档、热键、pnpm 失败分诊、allowBuilds 解析、批准重装与三道闸、落盘串行、版本豁免读写与回读确认、兼容降级口径、预检「已授权不再阻断」回归、staging 生命周期、环境注意、运行中代码指纹、已装清单四类来源、registry 比对与缓存、npm: 前缀、**inject 六种写法与边界、激活失败分诊、fiberPhase 判据、SKILL.md 三种 frontmatter 形态、YAML 硬错误判据、技能备份识别与磁盘×宿主对账、指纹两栏（宿主/客户端）、备份处置的越权拒绝与真实搬运、frontmatter 改写的三道自检与真实修复、崩溃分诊两类日志与已知签名、崩溃结论的新鲜度（stale）、崩溃处置的来源判据（link:/tgz/git/npm）与两张新签名（prepare / lossless JSON）、YAML 三类新硬错误（Tab 缩进 / 重复键 / 引号没闭合）与「不可自动改写」分流、搜索结果影子包警戒（官方 @deepseek-ai/* 同名但不全等）、客户端包 rev 对账（真机向量 / combo 守卫 / same·rebuilt·unknown 与「同一份字节即使 stale 也报 error」/ 动作只给 npm 来源）、升级回滚四种模式与旧 .tgz 往返、批量队列去重/暂停/坏 spec 跳过、版本跨度三档、换版本判据（自己 / link / git / 无声明四类拒绝）、装回旧版按版本核对、中断续跑只给一种现场、协作方五种状态、更新结果按版本对账**）；另 **141 项**无头渲染 + **155 项**自洽体检 |
+| 确定性自检 | **880/880 通过**（`dev/hosttest.mjs`，含 zip/tar 构造、穿越与软链接拒绝、比例炸弹、5 种识别分支、快照还原、重打包往返、prune 引用保护、地雷处置、契约扫描、profile 体检与修复、设置归一化、审核三档、热键、pnpm 失败分诊、allowBuilds 解析、批准重装与三道闸、落盘串行、版本豁免读写与回读确认、兼容降级口径、预检「已授权不再阻断」回归、staging 生命周期、环境注意、运行中代码指纹、已装清单四类来源、registry 比对与缓存、npm: 前缀、**inject 六种写法与边界、激活失败分诊、fiberPhase 判据、SKILL.md 三种 frontmatter 形态、YAML 硬错误判据、技能备份识别与磁盘×宿主对账、指纹两栏（宿主/客户端）、备份处置的越权拒绝与真实搬运、frontmatter 改写的三道自检与真实修复、崩溃分诊两类日志与已知签名、崩溃结论的新鲜度（stale）、崩溃处置的来源判据（link:/tgz/git/npm）与两张新签名（prepare / lossless JSON）、YAML 三类新硬错误（Tab 缩进 / 重复键 / 引号没闭合）与「不可自动改写」分流、搜索结果影子包警戒（官方 @deepseek-ai/* 同名但不全等）、客户端包 rev 对账（真机向量 / combo 守卫 / same·rebuilt·unknown 与「同一份字节即使 stale 也报 error」/ 动作只给 npm 来源）、升级回滚四种模式与旧 .tgz 往返、批量队列去重/暂停/坏 spec 跳过、版本跨度三档、换版本判据（自己 / link / git / 无声明四类拒绝）、装回旧版按版本核对、中断续跑只给一种现场、协作方五种状态、更新结果按版本对账、**profile 的 pnpm 世代三方对账（lockfile v9 importers × node_modules 实际版本 × `.modules.yaml` 的 prunedAt）、读不到≠通过（`pnpm-generation-unreadable` 单独成条）、`excludeLinksFromLockfile` 不误报、只报不修（动作表里没有「修 pnpm」的入口）、带外改动签名差分与归因台账（三个记账时机 / 只有终态才记 / 事件上限 / 首次只落基线不记噪声事件）**）；另 **141 项**无头渲染 + **171 项**自洽体检 |
 | 已装 Skill（R14 实测，本机） | 技能根 `.dsh/skills` 下 **59 个目录 = 55 个技能 + 4 个备份残留**；上线第一分钟抓出 **3 个 frontmatter 不是合法 YAML** 的技能（`github-private-backup` / `win-desktop-automation` / `windows-disk-reclaim`，PyYAML 复核：`mapping values are not allowed here`）→ 宿主读不出 name、整条跳过；用 `.tools/fix-skill-frontmatter.py --apply`（写前备份、写后 PyYAML 复核）改成块标量后，宿主重扫即认到 —— **`hostVisible` 55/55、`yamlBroken` 0、`notVisible` 0**；`domain-modeling` / `grill-me` / `grill-with-docs` / `grilling` 各有一份 `.bak-mp20261017-1350` 同名备份（尚未清）；11 个技能的 description 是 `>` 折叠块，旧解析把它们读成「>」 |
 | 激活失败的真实样本（R13 实测） | `dsh-imgops` 两次任务：①宿主返回 `application:"failed" / stage:"enable" / diagnostic:"1 entry did not activate … cannot get property \"tools\" without inject"`（pnpm exit 0、包已落地）→ 新分诊判 `activation-failed`，标题点名缺 `tools`，处置给出 `export const inject = ['tools']`；② `already-installed` → 判 noop + 照常诊断。同机 4 个健康插件（本插件 / dsh-screenshot / dsh-diag / dsh-ops）静态扫描**零误报**（canvas 的 `ctx.fillRect` 不计入） |
 | 重装静默无效（R13 第二个 bug） | 修好 `dsh-imgops` 并升到 0.1.1 重新提交，宿主仍回 `already-installed`（实测 `changed:false`、`elapsedMs:11`、pnpm 没跑）—— 判据是依赖行的 spec 字符串，不含版本文件名就永远是同一个 spec。修法：`pkg-<名字>-<版本>.tgz` + 只收「没人引用的旧包」 |
@@ -909,11 +938,12 @@ lib/collaborator.js      R27：换版本的**可选**协作方探测（插件目
 lib/upgrade.js           R27：换版本判据（要不要换/能不能换/旧版怎么装回），纯函数、一处定义
 dev/verify-r13.mjs       R13：端到端验收器（运行中代码 / 提交 / ⑧ 回执 / ⑨ 诊断 / 体检），逐条 PASS/FAIL
 lib/tools.js             五个宿主工具定义（含 output 契约）
-dev/hosttest.mjs         835 项确定性自检（宿主进程跑）
+dev/hosttest.mjs         880 项确定性自检（宿主进程跑）
 dev/probe-crash.mjs      R17：不进宿主、只读真实崩溃日志，看分诊判据（改 lib 后立刻能验）
 dev/probe-rev.mjs        R24：算法固定向量 + 最近一份 web-boot 日志里那份 client 包还在不在（`--full` 连体检结论）
 dev/render-check.cjs     141 项无头渲染自检（诊断卡 / 预检卡 / 审查卡 / 设置面板 / 跳过审核 / 批准卡 / 兼容卡 / **换版本卡（R27）** / **已装清单（含队列、跨度、80 条折叠、协作方两态）/ 已装 Skill（含移出与修复确认态、不可自动改写态、来自插件包/内置）/ 窄屏结构契约 / 发现卡动作按钮 / 搜索卡「已装」分来源与本机插件提示**）
-dev/audit.mjs            155 项自洽体检（不碰宿主；换会话先跑这个）
+dev/audit.mjs            171 项自洽体检（不碰宿主；换会话先跑这个）
+dev/probe-pnpmstate.mjs  R29 只读探针：profile 的 pnpm 世代（世代/规模/样本/结论/归因），不写盘、不跑 pnpm
 dev/probe-inject.mjs     手动探针：拿本机真实插件验 inject 扫描会不会误报（R13）
 dev/quarantine-dshtools.mjs  手动兜底：把埋下的 dsh-tools 挪进备份（薄壳，复用 lib/landmine.js）
 dev/restore-vendor-tarball.mjs 手动兜底：把断掉的 file: 依赖补回来（薄壳，复用 lib/repair.js）

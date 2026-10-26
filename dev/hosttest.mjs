@@ -42,6 +42,24 @@ import { stagingRefsFromManifest, stagingKeepNames, rollbackPlan, splitUpgradeTa
 /* R27：换版本 = 先卸后装 —— 判据（升级/降级/装回）与协作方探测都要能被单测喂对象 */
 import { SELF_PACKAGE, decideReplacement, replacementReason, restoreTarget, summarizeReplacement } from "../lib/upgrade.js";
 import { describeCollaboratorLine, describeRemovalProvider, pickRemovalProvider } from "../lib/collaborator.js";
+/* R29：profile 的 pnpm 世代对账 + 带外改动归因 */
+import {
+	MAX_EVENTS,
+	appendEvent,
+	attributionFinding,
+	baseVersion,
+	compareProfile,
+	diffSignatures,
+	driftFinding,
+	judgePnpmState,
+	noteProfileState,
+	parseLockfile,
+	parseModulesManifest,
+	readAttribution,
+	readJournal,
+	signatureOf,
+	splitHoistedKey
+} from "../lib/profilestate.js";
 import { buildStamp } from "../lib/hostinfo.js";
 import { normalizeNpmSpec } from "../lib/download.js";
 import {
@@ -2800,6 +2818,184 @@ async function main() {
 		/String\(got\) === String\(want\)/.test(pipelineSrcR27) && /装完版本是/.test(pipelineSrcR27));
 	ok("换版本：批量升级先查协作方（不可用就不排队）", /needsCollaborator: true/.test(pipelineSrcR27));
 	ok("换版本：判据是纯函数文件（可被 tool 与 pipeline 共用）", /export function decideReplacement/.test(upgradeSrc) && /export function restoreTarget/.test(upgradeSrc));
+
+	/* ══════════════════ R29：profile 的 pnpm 世代对账 + 带外改动归因 ══════════════════ */
+
+	/* ① 解析 lockfile（v9 importers 段，行扫描、零依赖） */
+	const lockSample = [
+		"lockfileVersion: '9.0'",
+		"",
+		"settings:",
+		"  autoInstallPeers: false",
+		"  excludeLinksFromLockfile: false",
+		"",
+		"importers:",
+		"",
+		"  .:",
+		"    dependencies:",
+		"      '@scope/alpha':",
+		"        specifier: ^1.2.0",
+		"        version: 1.2.3(@deepseek-ai/dsh-tools@0.2.1-rc.3)",
+		"      beta:",
+		"        specifier: 0.4.1",
+		"        version: 0.4.1",
+		"",
+		"packages:",
+		"",
+		"  beta@0.4.1:",
+		"    resolution: {integrity: sha512-x}"
+	].join("\n");
+	const parsedLock = parseLockfile(lockSample);
+	ok("R29 lockfile：认出 v9 importers 段", parsedLock.ok === true && parsedLock.lockfileVersion === "9.0");
+	eq("R29 lockfile：作用域包与普通包都取到（引号被剥掉）", Object.keys(parsedLock.deps).sort(), ["@scope/alpha", "beta"]);
+	eq("R29 lockfile：带 peer 后缀的版本原样保留（比对时再剥）", parsedLock.deps["@scope/alpha"].version, "1.2.3(@deepseek-ai/dsh-tools@0.2.1-rc.3)");
+	ok("R29 lockfile：excludeLinksFromLockfile 被单独读出来（不把 link 缺失一律算漂移）",
+		parseLockfile(lockSample.replace("excludeLinksFromLockfile: false", "excludeLinksFromLockfile: true")).excludeLinks === true);
+	ok("R29 lockfile：v6 形态（顶层 specifiers）→ ok:false 并说明只认 v9", (() => {
+		const legacy = parseLockfile("lockfileVersion: '6.0'\nspecifiers:\n  beta: 0.4.1\ndependencies:\n  beta: 0.4.1\n");
+		return legacy.ok === false && /v9/.test(String(legacy.error));
+	})());
+	ok("R29 lockfile：空文本不算通过（有 error）", (() => {
+		const empty = parseLockfile("");
+		return empty.ok === false && Boolean(empty.error);
+	})());
+
+	/* ② 版本归一 */
+	eq("R29 baseVersion：剥掉 peer 后缀", baseVersion("1.2.3(@a@1)(@b@2)"), "1.2.3");
+	eq("R29 baseVersion：file: / link: 不算版本", [baseVersion("link:../x"), baseVersion("")], [null, null]);
+	eq("R29 splitHoistedKey：作用域包", JSON.stringify(splitHoistedKey("@scope/name@1.2.3(peer@4)")), JSON.stringify({ name: "@scope/name", version: "1.2.3" }));
+	eq("R29 splitHoistedKey：嵌套 peer 组也能剥", JSON.stringify(splitHoistedKey("a@1.0.0(x@2(y@3))(z@4)")), JSON.stringify({ name: "a", version: "1.0.0" }));
+	ok("R29 splitHoistedKey：file: 形态给 name、版本 null", (() => {
+		const parsed = splitHoistedKey("bot@file:../x.tgz");
+		return parsed && parsed.name === "bot" && parsed.version === null;
+	})());
+
+	/* ③ 解析 .modules.yaml（它能回答「上一次 pnpm 是哪一刻」= prunedAt） */
+	const modulesSample = JSON.stringify({
+		nodeLinker: "hoisted",
+		layoutVersion: 5,
+		packageManager: "pnpm@11.28.5",
+		prunedAt: "Wed, 21 Oct 2026 18:53:02 GMT",
+		pendingBuilds: [],
+		allowBuilds: { a: false },
+		hoistedLocations: { "beta@0.4.1": ["p1"], "@scope/alpha@1.2.3(x@1)": ["p2"] }
+	});
+	const parsedModules = parseModulesManifest(modulesSample);
+	ok("R29 .modules.yaml：解析成功且带 nodeLinker / pnpm 版本", parsedModules.ok === true && parsedModules.nodeLinker === "hoisted" && parsedModules.packageManager === "pnpm@11.28.5");
+	ok("R29 .modules.yaml：prunedAt 变成时间戳（「上一次 pnpm」的硬证据）", Number.isFinite(parsedModules.prunedAtMs));
+	eq("R29 .modules.yaml：hoistedLocations 归一成 名字→版本", Object.keys(parsedModules.hoisted).sort(), ["@scope/alpha", "beta"]);
+	ok("R29 .modules.yaml：不是 JSON → ok:false（读不懂不算通过）", parseModulesManifest("not json at all").ok === false);
+
+	/* ④ 三方对账（声明 × lockfile × 实际装的） */
+	const cmp = compareProfile({
+		declared: { alpha: "^1.0.0", beta: "0.4.1", gamma: "link:../gamma", delta: "^2.0.0" },
+		locked: {
+			alpha: { specifier: "^0.9.0", version: "0.9.9" },
+			beta: { specifier: "0.4.1", version: "0.4.0" },
+			delta: { specifier: "^1.0.0", version: "1.0.0" },
+			epsilon: { specifier: "1.0.0", version: "1.0.0" }
+		},
+		installed: { alpha: "1.0.1", beta: "0.4.1", delta: "1.0.0" }
+	});
+	eq("R29 对账：specifier 对不上算两处（alpha / delta）", cmp.counts.specMismatch, 2);
+	eq("R29 对账：声明了但 lockfile 没有 —— link 与 npm 分开数", [cmp.counts.missingInLock, cmp.counts.missingLinks, cmp.counts.missingNpm], [1, 1, 0]);
+	eq("R29 对账：lockfile 里多出来的（已卸的还留着）", cmp.counts.extraInLock, 1);
+	eq("R29 对账：锁的版本 vs 实际装的（alpha / beta）", cmp.counts.versionMismatch, 2);
+	ok("R29 对账：有任何一项就 ok:false", cmp.ok === false);
+	ok("R29 对账：完全一致时 ok:true", compareProfile({
+		declared: { a: "^1.0.0" },
+		locked: { a: { specifier: "^1.0.0", version: "1.0.0" } },
+		installed: { a: "1.0.0" }
+	}).ok === true);
+	ok("R29 对账：excludeLinksFromLockfile=true 时 link 缺失不算漂移", (() => {
+		const result = compareProfile({ declared: { g: "link:../g" }, locked: {}, installed: {}, excludeLinks: true });
+		return result.counts.missingInLock === 0 && result.ok === true;
+	})());
+
+	/* ⑤ 判定与发现：★读不到 ≠ 通过 */
+	const judged = judgePnpmState({
+		declared: { a: "^1.0.0" },
+		installed: { a: "1.0.0" },
+		lock: parseLockfile("lockfileVersion: '9.0'\nimporters:\n\n  .:\n    dependencies:\n      a:\n        specifier: ^1.0.0\n        version: 1.0.0\n"),
+		modules: parseModulesManifest(modulesSample)
+	});
+	ok("R29 judge：两份记录都读到且对得上 → ok:true / readable:true", judged.ok === true && judged.readable === true);
+	const unreadable = judgePnpmState({ declared: {}, installed: {}, lock: { ok: false, error: "没有 pnpm-lock.yaml" }, modules: null });
+	ok("R29 judge：读不到时 readable:false 且 ok:false", unreadable.readable === false && unreadable.ok === false);
+	ok("R29 judge：读不到时 reasons 里有具体原因（不是一句「没问题」）", unreadable.reasons.some((reason) => /pnpm-lock\.yaml/.test(reason)));
+	ok("R29 finding：读不到 → 单独一条 unreadable（不是静默 null）",
+		driftFinding(unreadable) && driftFinding(unreadable).code === "pnpm-generation-unreadable");
+	ok("R29 finding：一致 → 不报", driftFinding(judged) === null);
+	ok("R29 finding：漂移 → drift 那条，带大白话 + 至少两步处置 + 不声称可自动修", (() => {
+		const found = driftFinding(judgePnpmState({
+			declared: { a: "^1.0.0" },
+			installed: { a: "1.0.0" },
+			lock: parseLockfile("lockfileVersion: '9.0'\nimporters:\n\n  .:\n    dependencies:\n      a:\n        specifier: ^0.9.0\n        version: 0.9.0\n"),
+			modules: parseModulesManifest(modulesSample)
+		}));
+		return found && found.code === "pnpm-generation-drift" && /大白话/.test(found.plain) &&
+			found.fix.length >= 2 && found.fixable === false && found.severity === "warn";
+	})());
+	ok("R29 finding：处置里写明「本插件不会替你跑 pnpm」", (() => {
+		const found = driftFinding(judgePnpmState({
+			declared: { a: "^1.0.0" },
+			installed: { a: "1.0.0" },
+			lock: parseLockfile("lockfileVersion: '9.0'\nimporters:\n\n  .:\n    dependencies:\n      a:\n        specifier: ^0.9.0\n        version: 0.9.0\n"),
+			modules: parseModulesManifest(modulesSample)
+		}));
+		return found.fix.some((step) => /不会替你跑/.test(step.text));
+	})());
+
+	/* ⑥ 签名 / 差分 / 台账（归因的地基） */
+	const sigA = signatureOf({ declared: { a: "^1.0.0", b: "link:../b" }, installed: { a: "1.0.0" } });
+	const sigB = signatureOf({ declared: { a: "^1.0.0", b: "link:../b" }, installed: { a: "1.0.0" } });
+	const sigC = signatureOf({ declared: { a: "^1.0.0", b: "link:../b" }, installed: { a: "1.0.1" } });
+	ok("R29 签名：同输入同 hash、长度 16", sigA.hash === sigB.hash && sigA.hash.length === 16);
+	ok("R29 签名：装上的版本变了 hash 就变", sigA.hash !== sigC.hash);
+	const diffFixture = diffSignatures(
+		{ deps: { keep: { spec: "1.0.0", version: "1.0.0", kind: "npm" }, gone: { spec: "1.0.0", version: "1.0.0", kind: "npm" }, bump: { spec: "^1.0.0", version: "1.0.0", kind: "npm" } } },
+		{ deps: { keep: { spec: "1.0.0", version: "1.0.0", kind: "npm" }, bump: { spec: "^1.0.0", version: "1.1.0", kind: "npm" }, added: { spec: "link:../x", version: null, kind: "link" } } }
+	);
+	eq("R29 差分：新增 / 移除 / 改版本各识别一条", [diffFixture.added.length, diffFixture.removed.length, diffFixture.changed.length], [1, 1, 1]);
+	ok("R29 差分：没变时 empty:true", diffSignatures(sigA, sigB).empty === true);
+	let journal = appendEvent({ version: 1, seenAt: null, signature: null, events: [] }, diffFixture, { reason: "observe", at: "2026-10-26T20:13:00.000Z" });
+	ok("R29 台账：事件带 items（名字与 from→to）",
+		journal.events[0].items.changed[0] === "bump 1.0.0→1.1.0" && journal.events[0].added === 1);
+	journal = appendEvent(journal, diffFixture, { reason: "job:j1", jobId: "j1", at: "2026-10-26T21:00:00.000Z" });
+	const attribution = readAttribution(journal, { now: Date.parse("2026-10-26T22:13:00.000Z") });
+	ok("R29 归因：job: 事件不算外部改动（跳过它，取上一条）",
+		attribution && attribution.reason === "observe" && attribution.ageHours === 2);
+	ok("R29 归因：只有 job 事件时返回 null", readAttribution({ events: [{ at: "2026-10-26T20:00:00.000Z", reason: "job:x", added: 1 }] }) === null);
+	ok("R29 归因：计数为 0 的事件不出发现",
+		attributionFinding({ at: "2026-10-26T20:00:00.000Z", reason: "observe", added: 0, removed: 0, changed: 0 }) === null);
+	ok("R29 归因：有变化 → info 级，标题写明「不是本面板做的」", (() => {
+		const found = attributionFinding(attribution);
+		return found && found.code === "profile-changed-outside" && found.severity === "info" && /不是本面板做的/.test(found.title);
+	})());
+	ok("R29 台账：事件数有上限（不会无限长）", (() => {
+		let grown = { events: [] };
+		for (let i = 0; i < MAX_EVENTS + 5; i += 1) grown = appendEvent(grown, diffFixture, { reason: "observe", at: "2026-10-26T20:00:00.000Z" });
+		return grown.events.length === MAX_EVENTS;
+	})());
+
+	/* ⑦ 真目录记账：第一次只落基线；变了记一条；没变不重复记 */
+	const r29Profile = join(root, "r29-profile");
+	await mkdir(join(r29Profile, "node_modules", "alpha"), { recursive: true });
+	await writeFile(join(r29Profile, "package.json"), JSON.stringify({ name: "p", dependencies: { alpha: "^1.0.0" } }, null, 2), "utf8");
+	await writeFile(join(r29Profile, "node_modules", "alpha", "package.json"), JSON.stringify({ name: "alpha", version: "1.0.0" }), "utf8");
+	const r29JournalPath = join(root, "r29-journal.json");
+	const note1 = await noteProfileState({ profileDir: r29Profile, journalPath: r29JournalPath, reason: "startup" });
+	ok("R29 记账：第一次只落基线（不记事件）", note1.ok === true && note1.recorded === null);
+	const journalOnDisk = JSON.parse(await readFile(r29JournalPath, "utf8"));
+	ok("R29 记账：台账落盘且带签名", Boolean(journalOnDisk.signature && journalOnDisk.signature.hash) && journalOnDisk.events.length === 0);
+	await writeFile(join(r29Profile, "package.json"), JSON.stringify({ name: "p", dependencies: { alpha: "^1.0.0", beta: "link:../beta" } }, null, 2), "utf8");
+	const note2 = await noteProfileState({ profileDir: r29Profile, journalPath: r29JournalPath, reason: "observe" });
+	ok("R29 记账：依赖变了就记一条（+1）", note2.ok === true && Boolean(note2.recorded) && note2.recorded.added.length === 1);
+	const note3 = await noteProfileState({ profileDir: r29Profile, journalPath: r29JournalPath, reason: "observe" });
+	ok("R29 记账：没有变化时不重复记事件", note3.ok === true && note3.recorded === null);
+	const attributionOnDisk = readAttribution(await readJournal(r29JournalPath), { now: Date.now() });
+	ok("R29 记账：从磁盘读回来能看到那条 observe（+1）", Boolean(attributionOnDisk) && attributionOnDisk.added === 1);
+	ok("R29 记账：读不到 profile 时如实失败（不是静默成功）", (await noteProfileState({ profileDir: join(root, "no-such-profile"), journalPath: join(root, "x.json") })).ok === false);
 
 	await rm(root, { recursive: true, force: true });
 

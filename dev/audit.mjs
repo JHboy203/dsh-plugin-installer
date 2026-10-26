@@ -27,6 +27,7 @@ import { DEFAULTS, describeSettings, normalizeSettings } from "../lib/settings.j
 import { buildInstallerTools } from "../lib/tools.js";
 import { buildStamp, dataDir, profileDir } from "../lib/hostinfo.js";
 import { stagingKeepNames } from "../lib/pipeline.js";
+import { compareProfile, judgePnpmState } from "../lib/profilestate.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, "..");
@@ -45,7 +46,7 @@ export const FROZEN_DEFAULTS = {
 };
 
 /** 文档里声明的自检项数（改断言就先跑一次 host_selfcheck，再同步这个数）。 */
-export const EXPECTED_ASSERTIONS = 835;
+export const EXPECTED_ASSERTIONS = 880;
 
 /** 界面自检项数（dev/render-check.cjs）。同样是「文档对表」的一半。 */
 const EXPECTED_RENDER_ASSERTIONS = 141;
@@ -377,6 +378,41 @@ async function main() {
 		(pipelineSrc.match(/this\.noteCatalogVerdict\(/g) || []).length === 4);
 	ok("R28 装完核对：判定为「装上了但不加载」要抬成 warn 并给出写回入口",
 		/severity: "warn"/.test(pipelineSrc) && /写回 dsh\.profile\.bundles/.test(pipelineSrc));
+
+	/* ⑤m R29：profile 的 pnpm 世代对账 + 带外改动归因。
+	   这一组钉四件事：判据只有一处（lib/profilestate.js）、**读不到 ≠ 通过**、
+	   只报不修（本插件永不自己跑 pnpm）、三个记账时机都接着线。 */
+	const stateSrc = (await readText("lib\\profilestate.js")) || "";
+	const healthSrc = (await readText("lib\\profilehealth.js")) || "";
+	ok("R29 世代对账：判据是独立模块，且纯函数与 fs 边界分开",
+		/export function parseLockfile/.test(stateSrc) && /export function compareProfile/.test(stateSrc) &&
+		/export function judgePnpmState/.test(stateSrc) && /export function driftFinding/.test(stateSrc) &&
+		/export async function inspectPnpmState/.test(stateSrc) && /export async function noteProfileState/.test(stateSrc));
+	ok("R29 世代对账：依赖分类复用 inventory.classifyDepSpec（不写第二套口径）",
+		/import \{ classifyDepSpec \} from "\.\/inventory\.js"/.test(stateSrc));
+	ok("R29 世代对账：体检里接着线（finding 进 findings，且真的读了 lockfile 与 .modules.yaml）",
+		/driftFinding\(pnpmState\)/.test(healthSrc) && /inspectPnpmState\(\{ profileDir, manifest \}\)/.test(healthSrc));
+	ok("R29 读不到 ≠ 通过：两份记录缺任一份都判 readable:false，并单独成一条发现",
+		judgePnpmState({ declared: {}, installed: {}, lock: { ok: false, error: "x" }, modules: { ok: true, hoisted: {} } }).readable === false &&
+		/pnpm-generation-unreadable/.test(stateSrc));
+	ok("R29 不误报：lockfile 自己声明 excludeLinksFromLockfile 时，link 缺失不算漂移",
+		compareProfile({ declared: { a: "link:../a" }, locked: {}, installed: {}, excludeLinks: true }).ok === true);
+	ok("R29 归因：体检只**读**台账（readJournal + readAttribution，不写盘）",
+		/readAttribution\(journal \|\| \{\}, \{\}\)/.test(healthSrc) && /attributionFinding\(attribution\)/.test(healthSrc) &&
+		!/writeJournal/.test(healthSrc));
+	ok("R29 归因：三个记账时机都在（启动 / 任务收尾 / 人点状态）",
+		/observeProfileState\(\{ reason: "startup" \}\)/.test(pipelineSrc) &&
+		/noteJobProfile\(job\)/.test(pipelineSrc) && /reason: "observe"/.test(toolsSrc));
+	ok("R29 归因：只有终态才记（等确认 / 运行中不记 —— 否则会把「装到一半」误报成外部改动）",
+		/job\.status !== "done" && job\.status !== "failed" && job\.status !== "cancelled"/.test(pipelineSrc));
+	ok("R29 工具面：状态里有一行 pnpm 世代 + 一行带外变更",
+		toolsSrc.includes("· profile pnpm：") && toolsSrc.includes("· profile 变更："));
+	const actionNamesR29 = Array.from(indexSrc2.matchAll(/action === "([a-z-]+)"/g)).map((m) => m[1]);
+	ok("R29 纪律：动作表里没有「修 pnpm / 改 lockfile」这类入口（本插件永不自己跑 pnpm）",
+		actionNamesR29.length > 5 && !actionNamesR29.some((name) => /pnpm|lockfile|install-dep|repair-deps/.test(name)),
+		{ actions: actionNamesR29 });
+	ok("R29 纪律：这个模块不 spawn、不 exec、不跑 pnpm",
+		!/child_process/.test(stateSrc) && !/runPnpm|execa|spawn\(/.test(stateSrc));
 
 	/* ⑥ 数据目录：设置文件是否与运行时会一致（手改过就会出现差异） */
 	const settingsFile = join(dataDir(), "settings.json");
