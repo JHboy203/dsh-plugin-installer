@@ -364,6 +364,20 @@ async function main() {
 	ok("更新结果按版本对账（装/卸之后不显示过期的「可升级」）",
 		/String\(found\.localVersion\) === String\(item\.localVersion\)/.test((await readText("lib\\updates.js")) || ""));
 
+	/* R28：契约 api 2 —— 能力协商 + 装完找目录核对（两个都是**可选**能力） */
+	ok("R28 契约：api 2 才算「有 inspect」，按函数在不在协商而不是按版本号猜",
+		/canInspect = api >= FULL_REMOVAL_API && typeof removal\.inspect === "function"/.test(collabSrc) && /degraded: api < FULL_REMOVAL_API/.test(collabSrc));
+	ok("R28 契约：旧 api（1）仍判可用并标 degraded（不因缺 inspect 就拒绝升级）",
+		/provider\.ok === true/.test(pipelineSrc) && /旧契约/.test(collabSrc));
+	ok("R28 装完核对：诊断后有一步找「插件目录」问「会不会被加载」",
+		/crossCheckCatalog/.test(pipelineSrc) && /noteCatalogVerdict/.test(pipelineSrc) &&
+		/installed-not-loaded/.test(collabSrc) === false /* 结论码由对面给，安装器不自己判 */ &&
+		(collabSrc.match(/pickRemovalProvider/g) || []).length >= 1);
+	ok("R28 装完核对：四处诊断收尾都接上（主路径 / 续跑 / 重诊 / 重启回填）",
+		(pipelineSrc.match(/this\.noteCatalogVerdict\(/g) || []).length === 4);
+	ok("R28 装完核对：判定为「装上了但不加载」要抬成 warn 并给出写回入口",
+		/severity: "warn"/.test(pipelineSrc) && /写回 dsh\.profile\.bundles/.test(pipelineSrc));
+
 	/* ⑥ 数据目录：设置文件是否与运行时会一致（手改过就会出现差异） */
 	const settingsFile = join(dataDir(), "settings.json");
 	let rawSettings = null;

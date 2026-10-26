@@ -58,22 +58,52 @@ if (!existsSync(join(CATALOG, "lib", "service.mjs"))) {
 
 	const service = {
 		name: "dsh-plugin-catalog",
-		version: "0.31.0-probe",
+		version: "0.33.0-probe",
+		capabilities: { removal: 2, inspect: 1 },
 		removal: {
-			api: 1,
+			api: 2,
 			describe: () => catalog.removalHost(),
 			plan: async (input) => await catalog.removalPlan(input),
 			apply: async (input) => await catalog.removalApply(input),
 			journal: async (limit) => await catalog.removalJournal(limit),
+			/* R28：装完核对（只读） */
+			inspect: async (input) => await catalog.inspectPackage(input),
 		},
 	};
 	const ctx = { get: (key) => (key === "pluginCatalog" ? service : key === "pluginManager" ? fakePluginManager : undefined) };
 
 	/* ① 探测：installer 认不认这个服务 */
 	const provider = pickRemovalProvider(ctx);
-	ok("契约：installer 认得出协作方（api=1 + plan/apply）", provider && provider.ok === true, JSON.stringify(provider && { ok: provider.ok, state: provider.state }));
+	ok("契约：installer 认得出协作方（api=2 + plan/apply）", provider && provider.ok === true, JSON.stringify(provider && { ok: provider.ok, state: provider.state }));
 	ok("契约：一行摘要能写出来（面板/工具直接用）", /可用/.test(describeCollaboratorLine(provider)), describeCollaboratorLine(provider));
-	ok("契约：服务名与版本对得上（面板会显示 v 版本）", provider && provider.name === "dsh-plugin-catalog" && /0\.31\.0/.test(provider.version), JSON.stringify(provider && { name: provider.name, version: provider.version }));
+	ok("契约：服务名与版本对得上（面板会显示 v 版本）", provider && provider.name === "dsh-plugin-catalog" && /0\.33\.0/.test(provider.version), JSON.stringify(provider && { name: provider.name, version: provider.version }));
+	ok("契约：api 2 时能力协商给出 inspect/restore（installer 按能力取用，不猜版本号）",
+		provider && provider.features && provider.features.inspect === true && provider.features.restore === true && provider.degraded === false,
+		JSON.stringify(provider && provider.features));
+
+	/* ①b R28：装完核对 —— 真 CatalogService 判「这个包会不会被加载」 */
+	if (provider && provider.features && provider.features.inspect === true) {
+		const inherited = await provider.removal.inspect({ name: "dsh-plugin-catalog" });
+		ok("契约：inspect 回 code/text/warnings/facts 四件（安装器只读 code 与 text）",
+			inherited && typeof inherited.code === "string" && typeof inherited.text === "string" && Array.isArray(inherited.warnings) && inherited.facts && inherited.facts.name === "dsh-plugin-catalog",
+			JSON.stringify(inherited && { code: inherited.code, facts: inherited.facts }));
+		ok("契约：自己那一包判 self（不冒充「会被加载」）", inherited && inherited.code === "self", inherited && inherited.code);
+		const unknown = await provider.removal.inspect({ name: "definitely-not-installed-pkg" });
+		ok("契约：没装的包判 not-installed 且 ok=false（安装器据此报「装上了却不在」）",
+			unknown && unknown.code === "not-installed" && unknown.ok === false,
+			JSON.stringify(unknown && { code: unknown.code, ok: unknown.ok }));
+	} else {
+		skip("契约：inspect 两态", "协作方没有 inspect");
+	}
+
+	/* ①c R28：旧契约必须还能用（只少装完核对，不炸） */
+	{
+		const oldApi1 = { name: "dsh-plugin-catalog", version: "0.31.0", removal: { api: 1, plan: async () => ({}), apply: async () => ({}), journal: async () => ({}) } };
+		const oldOne = pickRemovalProvider({ get: () => oldApi1 });
+		ok("契约：api 1（旧「插件目录」）仍判可用，但标明没有 inspect（降级而不是拒绝升级）",
+			oldOne && oldOne.ok === true && oldOne.api === 1 && oldOne.features.inspect === false && oldOne.degraded === true && /旧契约/.test(oldOne.label),
+			JSON.stringify(oldOne && { api: oldOne.api, features: oldOne.features, degraded: oldOne.degraded }));
+	}
 
 	/* ② 真走一遍 plan（用本机确实装着的包；只读，不卸载） */
 	const dir = profileDir();
