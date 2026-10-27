@@ -2431,7 +2431,7 @@ async function main() {
 		eq("repoKey: 认不出就 null（不猜）", repoKey(junk), null);
 	}
 
-	const localKnown = { kind: "link", kindLabel: "本机目录", spec: "link:D:/信息库/AI工作区/DSH-Plugin/dsh-imgops", localVersion: "0.4.0", repoKey: null };
+	const localKnown = { kind: "link", kindLabel: "本机目录", spec: "link:D:/ws/DSH-Plugin/dsh-imgops", localVersion: "0.4.0", repoKey: null };
 	const npmKnown = { kind: "npm", kindLabel: "npm", spec: "^1.2.0", localVersion: "1.2.0", repoKey: "github.com/a/dsh-x" };
 	const gitKnown = { kind: "git", kindLabel: "Git", spec: "github:b/dsh-y", localVersion: null, repoKey: "github.com/b/dsh-y" };
 	const tgzKnown = { kind: "tarball", kindLabel: ".tgz", spec: "file:D:/x.tgz", localVersion: "2.0.0", repoKey: null };

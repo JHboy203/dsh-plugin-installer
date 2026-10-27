@@ -29,7 +29,7 @@ function arg(name, fallback = null) {
 
 const port = arg("port", process.env.DPI_PORT || "47475");
 const base = "http://127.0.0.1:" + port + "/plugin-installer";
-const pluginPath = arg("path", "D:\\信息库\\AI工作区\\DSH-Plugin\\dsh-imgops");
+const pluginPath = arg("path", process.env.DSH_VERIFY_PLUGIN || "D:\\ws\\DSH-Plugin\\dsh-imgops");
 const autoYes = arg("yes", false) === true;
 const noInstall = arg("no-install", false) === true;
 

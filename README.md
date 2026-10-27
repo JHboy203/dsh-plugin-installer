@@ -2,6 +2,13 @@
 
 [English](README.en.md)
 
+> **状态：开发版，非最终版本。** 这是「边用边改」放出来的版本：功能与界面会**不定期更新**，
+> 安装流水线、配置项与数据目录都可能变。装之前请确认下一节的 DSH 版本区间。
+>
+> **Status: development build — not a final release.** Released as-is from daily use; features and UI
+> **change from time to time** (the install pipeline, settings and the data directory may change too).
+> Check the DSH version range below before installing.
+
 ![插件 / Skill 安装面板](docs/panel.png)
 
 > **装完在哪打开**：重启 DSH 之后，左侧栏会出现一个**方块里带向下箭头**的图标（文案「插件安装」，
@@ -408,7 +415,7 @@
 >    `value is not lossless JSON`（工具返回值不合法），各带大白话与两步处置。
 >
 > 真实数据（`dev/probe-crash.mjs`，00:27）：
-> `dsh-web-research 来自本机目录 D:/信息库/AI工作区/DSH-Plugin/dsh-web-research（link:）——
+> `dsh-web-research 来自本机目录 D:/<your-workspace>/DSH-Plugin/dsh-web-research（link:）——
 > 面板没有能替你重建的动作；去那个目录重新构建 client.js…`。
 >
 > 断言：hosttest **657 → 666**（+9：来源四类 5、新签名 4），render **108 → 108**，audit **101 → 101**。
@@ -991,20 +998,65 @@ dev/fixtures/            端到端夹具（selftest 技能 / probe bundle / fake
 > 方法层已经并进 skill `dsh-client-plugin-ops`（见其中「装/升级插件的三条硬约束」）。
 
 
+## 支持的 DSH 版本
+
+> 装之前先对一下版本。**版本不对时不会"凑合能用"**：轻则面板能打开但装不了东西，重则整个插件树加载失败。
+
+| 项 | 值 |
+|---|---|
+| 声明区间 | `>=0.2.1-rc.1 <0.3.0` —— 写在 `package.json` 的 `engines.dsh`，宿主按它判兼容 |
+| 实测通过 | `0.2.1-rc.2` / `0.2.1-rc.3`（Windows 11 · `desktop` profile · Node 24.21） |
+| 为什么不能更低 | 用到 `pluginManager.installBundle / removeBundle / setBundleEnabled`；且 DSH `0.2.1` 起 `ctx.tools.register()` 要求 `output` 契约、`installBundle` 按包名判已装（换版本只能"先卸再装"） |
+| `0.3.x` 及以上 | **未验证**。安装流水线与版本豁免判据都以 `0.2.1` 的契约为准，宿主升级后请先跑 `node dev/hosttest.mjs` |
+| Node | `>=20`（`engines.node`） |
+
 ## 适用 profile
 
 本插件面向 DSH 的 `desktop` profile（本机已在 `.dsh/profiles/desktop` 下加载）。
 插件包本身不含 profile 配置，profile 名可自行替换。
 
-## 安装（DSH 命令行）
+## 安装
+
+三步，跨平台，**不需要任何本机脚本**。`<profile>` 默认 `desktop`。
 
 ```bash
-# <profile> 换成你的 profile 名，本机为 desktop
-dsh plugin --profile desktop add <本目录或包名>
+# 0) 版本先对上（见上一节）
+dsh --version
+
+# 1) 克隆到**工作区**（不要直接克隆进 profile/node_modules）
+git clone https://github.com/JHboy203/dsh-plugin-installer.git "<你的工作区>/DSH-Plugin/dsh-plugin-installer"
+
+# 2) 链进 profile
+# macOS / Linux
+ln -s "<你的工作区>/DSH-Plugin/dsh-plugin-installer" ~/.dsh/profiles/<profile>/node_modules/dsh-plugin-installer
+# Windows（普通 cmd 即可）
+mklink /J "%USERPROFILE%\.dsh\profiles\<profile>\node_modules\dsh-plugin-installer" "<你的工作区>\DSH-Plugin\dsh-plugin-installer"
 ```
 
-等价方式：把本仓 `cordis.patch.yml` 的 `insert` 行追加到 profile 的 `cordis.patch.yml`。
-**改了 `cordis.patch.yml` 必须重启 DSH**（Desktop 不 watch patch 层）。
+3) 改 `<profile>/package.json` 两处，然后**完全退出并重启 DSH**：
+
+```jsonc
+{
+  "dependencies": {
+    "dsh-plugin-installer": "link:<你的工作区>/DSH-Plugin/dsh-plugin-installer"
+  },
+  "dsh": {
+    "profile": {
+      "bundles": [ /* …原有条目…, "dsh-plugin-installer" */ ]
+    }
+  }
+}
+```
+
+重启后左侧栏出现「插件安装」图标（方块里带向下箭头）即成功。
+
+> ⚠️ **不要用 `dsh plugin add` / `pnpm add` 装它。** `dsh plugin` 只是把参数原样转发给 pnpm；
+> pnpm 会重算整棵树、把 `@deepseek-ai/dsh-tools` 再 hoist 一份进 profile，那份会**遮蔽宿主的**，
+> 于是工具调用报 `Cannot read properties of undefined (reading 'prepare')`，或下次启动插件批量加载失败。
+>
+> 本仓自带的 `cordis.patch.yml` 是 **bundle patch**：只要包进了 `dsh.profile.bundles`，
+> 宿主会自己按 `dsh.bundle.patch` 读它、自动 `insert`，**不需要手工往 profile 的 patch 里抄一遍**
+> （抄了会重复挂载）。
 
 ## 外部依赖与权限
 

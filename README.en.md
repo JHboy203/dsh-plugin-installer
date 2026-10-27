@@ -2,6 +2,12 @@
 
 [中文](README.md)
 
+> **Status: development build — not a final release.** Released as-is from daily use; features and UI
+> **change from time to time** (the install pipeline, settings and the data directory may change too).
+> Check the DSH version range below before installing.
+>
+> **状态：开发版，非最终版本。** 功能与界面会不定期更新，安装流水线、配置项与数据目录都可能变。
+
 ![Plugin / Skill Install panel](docs/panel.png)
 
 > **Where to open it after installing**: restart DSH, then look in the left sidebar for a **rounded square with a
@@ -388,20 +394,67 @@ dev/fixtures/            End-to-end fixtures (selftest skill / probe bundle / fa
 > The method layer has been merged into the skill `dsh-client-plugin-ops` (see its "three hard constraints for installing/upgrading plugins").
 
 
+## Supported DSH versions
+
+> Check the version before installing. **A mismatched version does not "sort of work"**: at best the panel
+> opens but cannot install anything, at worst the whole plugin tree fails to load.
+
+| Item | Value |
+|---|---|
+| Declared range | `>=0.2.1-rc.1 <0.3.0` — `engines.dsh` in `package.json`; the host uses it for compatibility checks |
+| Tested | `0.2.1-rc.2` / `0.2.1-rc.3` (Windows 11 · `desktop` profile · Node 24.21) |
+| Why not lower | needs `pluginManager.installBundle / removeBundle / setBundleEnabled`; since DSH `0.2.1`, `ctx.tools.register()` requires the `output` contract and `installBundle` decides "already installed" by package name (changing versions means uninstall-then-install) |
+| `0.3.x` and above | **Not verified.** The install pipeline and version-exemption rules assume the `0.2.1` contracts; after a host upgrade run `node dev/hosttest.mjs` first |
+| Node | `>=20` (`engines.node`) |
+
 ## Applicable profile
 
 This plugin targets DSH's `desktop` profile (loaded on this machine under `.dsh/profiles/desktop`).
 The plugin package itself contains no profile configuration; the profile name can be replaced as you like.
 
-## Installation (DSH CLI)
+## Installation
+
+Three steps, cross-platform, **no local helper script required**. `<profile>` is `desktop` by default.
 
 ```bash
-# Replace <profile> with your profile name; on this machine it is desktop
-dsh plugin --profile desktop add <本目录或包名>
+# 0) check the host version against the range above
+dsh --version
+
+# 1) clone into your **workspace** (not into profile/node_modules)
+git clone https://github.com/JHboy203/dsh-plugin-installer.git "<your-workspace>/DSH-Plugin/dsh-plugin-installer"
+
+# 2) link into the profile
+# macOS / Linux
+ln -s "<your-workspace>/DSH-Plugin/dsh-plugin-installer" ~/.dsh/profiles/<profile>/node_modules/dsh-plugin-installer
+# Windows (plain cmd is enough)
+mklink /J "%USERPROFILE%\.dsh\profiles\<profile>\node_modules\dsh-plugin-installer" "<your-workspace>\DSH-Plugin\dsh-plugin-installer"
 ```
 
-Equivalent: append the `insert` row of this repo's `cordis.patch.yml` to the profile's `cordis.patch.yml`.
-**After changing `cordis.patch.yml` you must restart DSH** (Desktop doesn't watch the patch layer).
+3) Edit `<profile>/package.json` in two places, then **fully quit and restart DSH**:
+
+```jsonc
+{
+  "dependencies": {
+    "dsh-plugin-installer": "link:<your-workspace>/DSH-Plugin/dsh-plugin-installer"
+  },
+  "dsh": {
+    "profile": {
+      "bundles": [ /* …existing entries…, "dsh-plugin-installer" */ ]
+    }
+  }
+}
+```
+
+After the restart the "Plugin Installer" icon (a square with a down arrow) appears in the left sidebar.
+
+> ⚠️ **Do not install with `dsh plugin add` / `pnpm add`.** `dsh plugin` just forwards its arguments to pnpm;
+> pnpm recomputes the tree and hoists a second `@deepseek-ai/dsh-tools` into the profile, which **shadows the
+> host's copy** — tool calls then fail with `Cannot read properties of undefined (reading 'prepare')`, or the
+> next startup fails to load plugins.
+>
+> This repo's `cordis.patch.yml` is a **bundle patch**: once the package is in `dsh.profile.bundles`, the host
+> reads it via `dsh.bundle.patch` and applies the `insert` itself — **do not copy it into the profile patch as
+> well** (that would mount it twice).
 
 ## External dependencies and permissions
 

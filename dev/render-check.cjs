@@ -976,13 +976,13 @@ if (typeof t.AiBox === "function") {
 		ai: {
 			reply: "搜索：dsh-imgops（6 条）",
 			searchOnly: true,
-			localOnly: { name: "dsh-imgops", version: "0.4.0", kind: "link", kindLabel: "本机目录", spec: "link:D:/信息库/AI工作区/DSH-Plugin/dsh-imgops",
+			localOnly: { name: "dsh-imgops", version: "0.4.0", kind: "link", kindLabel: "本机目录", spec: "link:D:/ws/DSH-Plugin/dsh-imgops",
 				text: "「dsh-imgops」是本机已装的插件（本机目录），本机目录装的（link:），不会出现在 npm / GitHub 的检索结果里" },
 			recommendations: [
 				{
 					name: "dsh-imgops", source: "npm", spec: "dsh-imgops@0.4.0", version: "0.4.0", why: "同名但不同来源",
 					installedKnown: true, installed: "0.4.0", installedKindLabel: "本机目录",
-					installedSpec: "link:D:/信息库/AI工作区/DSH-Plugin/dsh-imgops", installedSource: "different",
+					installedSpec: "link:D:/ws/DSH-Plugin/dsh-imgops", installedSource: "different",
 					trust: { level: "community", badges: [], flags: [{ id: "name-collision", tone: "error",
 						text: "同名但来源不同：本机这份是本机目录（link:…），这条来自 npm —— 装它会把本机那份换掉" }], score: 40 }
 				},
