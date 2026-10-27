@@ -1050,7 +1050,7 @@ mklink /J "%USERPROFILE%\.dsh\profiles\<profile>\node_modules\dsh-plugin-install
 
 重启后左侧栏出现「插件安装」图标（方块里带向下箭头）即成功。
 
-> ⚠️ **不要用 `dsh plugin add` / `pnpm add` 装它。** `dsh plugin` 只是把参数原样转发给 pnpm；
+> ⚠️ **不要用 pnpm 系命令（`dsh plugin add` / `pnpm add`）装它。** `dsh plugin` 只是把参数原样转发给 pnpm；
 > pnpm 会重算整棵树、把 `@deepseek-ai/dsh-tools` 再 hoist 一份进 profile，那份会**遮蔽宿主的**，
 > 于是工具调用报 `Cannot read properties of undefined (reading 'prepare')`，或下次启动插件批量加载失败。
 >

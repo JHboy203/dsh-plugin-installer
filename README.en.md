@@ -447,7 +447,7 @@ mklink /J "%USERPROFILE%\.dsh\profiles\<profile>\node_modules\dsh-plugin-install
 
 After the restart the "Plugin Installer" icon (a square with a down arrow) appears in the left sidebar.
 
-> ⚠️ **Do not install with `dsh plugin add` / `pnpm add`.** `dsh plugin` just forwards its arguments to pnpm;
+> ⚠️ **Do not use pnpm-style commands (`dsh plugin add` / `pnpm add`).** `dsh plugin` just forwards its arguments to pnpm;
 > pnpm recomputes the tree and hoists a second `@deepseek-ai/dsh-tools` into the profile, which **shadows the
 > host's copy** — tool calls then fail with `Cannot read properties of undefined (reading 'prepare')`, or the
 > next startup fails to load plugins.
