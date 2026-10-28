@@ -33,7 +33,7 @@ import {
 	summarizeSkills
 } from "../lib/skills.js";
 import { scanTree, redact, detectPromptInjection } from "../lib/scan.js";
-import { precheck } from "../lib/precheck.js";
+import { precheck, describeCompatVersions as mCompatLine } from "../lib/precheck.js";
 import { backupVendorTarball, createSnapshot, fileSpecPath, restoreProfileFiles, backupSkillInSnapshot, readSnapshotMeta, restoreSkill, restoreVendorTarball } from "../lib/snapshot.js";
 import { buildReviewInput } from "../lib/ai.js";
 import { estimateReviewTokens, reviewWorthIt } from "../lib/ai.js";
@@ -93,6 +93,21 @@ import {
 	pendingBuildFinding
 } from "../lib/installfailure.js";
 import { judgePurpose } from "../lib/purpose.js";
+/* R31：本机目录直连安装（不走 pnpm）+ pnpm 供应链策略（trustPolicy） */
+import {
+	applyLinkInstall,
+	classifyEntry,
+	normalizePath,
+	parseLinkSpec,
+	planLinkInstall,
+	probeEntry,
+	samePath,
+	undoLinkInstall
+} from "../lib/linkinstall.js";
+import { addExclude, describePolicy, normalizeExclude, parsePolicy, readPolicy, splitExclude } from "../lib/trustpolicy.js";
+/* R32：非 DSH 资产的确定性分类（面板要能说「这是什么」）+ 只读探针的摘要 */
+import { classifyForeign, foreignLine } from "../lib/foreign.js";
+import { summarizeProbe } from "../lib/probe.js";
 import * as mExemptions from "../lib/exemptions.js";
 import * as mCompat from "../lib/compat.js";
 import * as mCodestamp from "../lib/codestamp.js";
@@ -1363,7 +1378,11 @@ async function main() {
 
 	/* 工具契约：数量、output 声明、搜索描述与真实源一致 */
 	const toolDefs = buildInstallerTools({ installer: {}, ctx: {} });
-	eq("tools: 注册五个宿主工具", toolDefs.length, 5);
+	eq("tools: 注册六个宿主工具（R32 起含只读探针）", toolDefs.length, 6);
+	ok("tools: 探针工具是只读的（描述里写清不安装、不动 profile）", (() => {
+		const probe = toolDefs.find((d) => d.name === "install_hub_probe_repo");
+		return Boolean(probe && /只读探针/.test(probe.description) && /不安装/.test(probe.description) && probe.output && probe.output.schema);
+	})());
 	ok("tools: 每个都声明 output 契约", toolDefs.every((d) => d.output && d.output.schema && typeof d.output.render === "function"));
 	ok(
 		"tools: 搜索工具描述写明 6 源（含商店）",
@@ -3020,6 +3039,339 @@ async function main() {
 		/* 空值先被滤掉：这一组里只有一条真任务，而它是终态 → dropped 1 / kept 0 */
 		return empty.dropped.length === 0 && empty.kept === 0 && mixed.dropped.length === 1 && mixed.kept === 0;
 	})());
+
+	/* Ⓝ R31：pnpm 供应链策略（trustPolicy）—— 读、解释、只加一条豁免 */
+	const wsReal = [
+		"packages:",
+		"  - .",
+		"",
+		"nodeLinker: hoisted",
+		"autoInstallPeers: false",
+		"trustPolicy: no-downgrade",
+		"",
+		"overrides:",
+		"  '@deepseek-ai/dsh-tools': 0.2.1-rc.3"
+	].join("\n");
+	const wsParsed = parsePolicy(wsReal);
+	eq("R31 trustPolicy: 读出 no-downgrade", wsParsed.policy, "no-downgrade");
+	eq("R31 trustPolicy: 没有豁免块时 hasExcludeKey=false（「没有」≠「空的」）", wsParsed.hasExcludeKey, false);
+	eq("R31 trustPolicy: 豁免列表是空数组", wsParsed.exclude, []);
+	eq("R31 trustPolicy: 没写 ignoreAfter 就是 null", wsParsed.ignoreAfter, null);
+	const wsInline = "trustPolicy: no-downgrade\ntrustPolicyExclude: [chromium-bidi, \"@scope/pkg@1.2.3\"]\n";
+	const inlineParsed = parsePolicy(wsInline);
+	eq("R31 trustPolicy: 内联数组也能读", inlineParsed.exclude, ["chromium-bidi", "@scope/pkg@1.2.3"]);
+	eq("R31 trustPolicy: 有豁免键时 hasExcludeKey=true", inlineParsed.hasExcludeKey, true);
+	const wsBlock = [
+		"trustPolicy: no-downgrade",
+		"trustPolicyIgnoreAfter: 43200",
+		"trustPolicyExclude:",
+		"  - chromium-bidi@157.0.8090-0",
+		"  - puppeteer-core"
+	].join("\n");
+	const blockParsed = parsePolicy(wsBlock);
+	eq("R31 trustPolicy: 块形态读两条", blockParsed.exclude, ["chromium-bidi@157.0.8090-0", "puppeteer-core"]);
+	eq("R31 trustPolicy: ignoreAfter 读成分钟数", blockParsed.ignoreAfter, 43200);
+	const mapForm = parsePolicy("trustPolicy: no-downgrade\ntrustPolicyExclude:\n  chromium-bidi: true\n");
+	eq("R31 trustPolicy: 映射写法不认，但要标 malformed（不炸）", [mapForm.malformed, mapForm.exclude.length], [true, 0]);
+	eq("R31 trustPolicy: 归一化不分大小写与空白", normalizeExclude(" Chromium-Bidi@157.0.8090-0 "), "chromium-bidi@157.0.8090-0");
+	eq("R31 trustPolicy: 拆出包名与版本", splitExclude("@scope/pkg@1.2.3"), { name: "@scope/pkg", versions: ["1.2.3"] });
+	eq("R31 trustPolicy: 只有名字 = 全部版本", splitExclude("plain-pkg"), { name: "plain-pkg", versions: [] });
+	eq("R31 trustPolicy: 版本并集也能拆", splitExclude("p@1.0.0||2.0.0").versions, ["1.0.0", "2.0.0"]);
+	const addAfterPolicy = addExclude(wsReal, ["chromium-bidi@157.0.8090-0"]);
+	eq("R31 trustPolicy 写入：没有豁免块时插在 trustPolicy 后面", addAfterPolicy.mode, "insert-after-policy");
+	eq("R31 trustPolicy 写入：真的加进去了", addAfterPolicy.added, ["chromium-bidi@157.0.8090-0"]);
+	ok("R31 trustPolicy 写入：原有每一行都还在（overrides 那行没被吃掉）",
+		/overrides:/.test(addAfterPolicy.text) && /'@deepseek-ai\/dsh-tools': 0.2.1-rc.3/.test(addAfterPolicy.text) && /nodeLinker: hoisted/.test(addAfterPolicy.text),
+		addAfterPolicy.text);
+	ok("R31 trustPolicy 写入：写出来的是合法列表行", /\n {2}- chromium-bidi@157\.0\.8090-0/.test(addAfterPolicy.text), addAfterPolicy.text);
+	const addAgain = addExclude(addAfterPolicy.text, ["chromium-bidi@157.0.8090-0"]);
+	eq("R31 trustPolicy 写入：同一条加两次 = 不改（幂等）", [addAgain.changed, addAgain.reason !== null], [false, true]);
+	const addToBlock = addExclude(wsBlock, ["chromium-bidi"]);
+	eq("R31 trustPolicy 写入：已有块就追加到块尾", addToBlock.mode, "block-append");
+	eq("R31 trustPolicy 写入：追加后三条都在", parsePolicy(addToBlock.text).exclude, ["chromium-bidi@157.0.8090-0", "puppeteer-core", "chromium-bidi"]);
+	const addToInline = addExclude(wsInline, ["devtools-protocol"]);
+	eq("R31 trustPolicy 写入：内联数组改成块形态", addToInline.mode, "inline-to-block");
+	eq("R31 trustPolicy 写入：内联原有的两条没丢", parsePolicy(addToInline.text).exclude, ["chromium-bidi", "@scope/pkg@1.2.3", "devtools-protocol"]);
+	const refuse = addExclude("trustPolicyExclude:\n  - a\n  b: c\n", ["d"]);
+	eq("R31 trustPolicy 写入：块里有非列表行 → 拒绝（不猜着改）", [refuse.changed, refuse.mode], [false, "refused"]);
+	ok("R31 trustPolicy 一句话：说清策略与豁免数", /no-downgrade/.test(describePolicy(blockParsed)) && /豁免 2 条/.test(describePolicy(blockParsed)), describePolicy(blockParsed));
+	eq("R31 trustPolicy 一句话：没开策略时直说", describePolicy(parsePolicy("packages:\n  - .\n")), "未开 trustPolicy（pnpm 不会因为「可信度降级」挡住安装）");
+	const wsProfile = dir("ws-profile");
+	await mkdir(wsProfile, { recursive: true });
+	await writeFile(join(wsProfile, "pnpm-workspace.yaml"), wsReal, "utf8");
+	const readBack = await readPolicy(wsProfile);
+	eq("R31 trustPolicy fs：读得到（ok:true + policy）", [readBack.ok, readBack.policy], [true, "no-downgrade"]);
+	const readMissing = await readPolicy(join(wsProfile, "nope"));
+	eq("R31 trustPolicy fs：读不到时 ok:false（读不到 ≠ 通过）", readMissing.ok, false);
+
+	/* Ⓞ R31：本机目录直连安装（link，不走 pnpm） */
+	eq("R31 link: 路径归一化抹平斜杠与大小写", normalizePath("D:\\A\\B\\"), normalizePath("d:/a/b"));
+	eq("R31 link: 同一个目录判同（尾斜杠不影响）", samePath("D:/x/y/", "d:\\X\\y"), true);
+	eq("R31 link: 不同目录判不同", samePath("D:/x/y", "D:/x/z"), false);
+	eq("R31 link: 空路径永远不等", samePath("", ""), false);
+	eq("R31 link: link: 绝对路径", parseLinkSpec("link:D:/a/b").dir.replace(/\\/g, "/"), "D:/a/b");
+	eq("R31 link: link: 相对路径按 profile 解析", parseLinkSpec("link:../plug", "D:/w/.dsh/profiles/desktop").dir.replace(/\\/g, "/"), "D:/w/.dsh/profiles/plug");
+	eq("R31 link: npm 声明不算 link", parseLinkSpec("npm:^1.2.3").kind, "other");
+	eq("R31 link: 没声明 = none", parseLinkSpec(null).kind, "none");
+	const cls = classifyEntry({ depSpec: "link:D:/plug/a", profileDir: "D:/p", sourceDir: "d:/plug/A/" });
+	eq("R31 link: 同一个目录 → sameTarget", [cls.kind, cls.sameTarget], ["link", true]);
+	const clsOther = classifyEntry({ depSpec: "link:D:/plug/b", profileDir: "D:/p", sourceDir: "D:/plug/a" });
+	eq("R31 link: 别的目录 → sameTarget=false", [clsOther.kind, clsOther.sameTarget], ["link", false]);
+	const planFresh = planLinkInstall({
+		name: "dsh-x",
+		sourceDir: "D:/plug/x",
+		profileDir: "D:/p",
+		manifest: { name: "dsh-x", dsh: { bundle: { patch: "./cordis.patch.yml" } } },
+		deps: {},
+		bundles: [],
+		entry: { exists: false, isLink: false, target: null, isDirectory: false }
+	});
+	eq("R31 link 计划：全新安装 → 三处都要改", [planFresh.ok, planFresh.changes.dependency, planFresh.changes.bundle, planFresh.changes.link], [true, true, true, true]);
+	ok("R31 link 计划：步骤写清「加进 dsh.profile.bundles」", planFresh.steps.some((s) => /bundles/.test(s)), planFresh.steps);
+	const planAlready = planLinkInstall({
+		name: "dsh-x",
+		sourceDir: "D:/plug/x",
+		profileDir: "D:/p",
+		manifest: { name: "dsh-x", dsh: { bundle: { patch: "./p.yml" } } },
+		deps: { "dsh-x": "link:D:/plug/x" },
+		bundles: ["dsh-x"],
+		entry: { exists: true, isLink: true, target: "D:\\plug\\x", isDirectory: true }
+	});
+	eq("R31 link 计划：已经直连装着 → 一处都不用改", [planAlready.alreadyLinked, planAlready.entryLinked, planAlready.changes.dependency, planAlready.changes.link], [true, true, false, false]);
+	ok("R31 link 计划：这时要明说「profile 不需要改动」", /不需要改动/.test(planAlready.note), planAlready.note);
+	const planReplace = planLinkInstall({
+		name: "dsh-x",
+		sourceDir: "D:/plug/x",
+		profileDir: "D:/p",
+		manifest: { name: "dsh-x", dsh: { bundle: { patch: "./p.yml" } } },
+		deps: { "dsh-x": "link:D:/plug/old" },
+		bundles: ["dsh-x"],
+		entry: { exists: true, isLink: true, target: "D:\\plug\\old", isDirectory: true }
+	});
+	eq("R31 link 计划：链到别处 → 换链接并改依赖行", [planReplace.changes.link, planReplace.changes.replaceEntry, planReplace.changes.dependency], [true, true, true]);
+	const planRealDir = planLinkInstall({
+		name: "dsh-x",
+		sourceDir: "D:/plug/x",
+		profileDir: "D:/p",
+		manifest: { name: "dsh-x", dsh: { bundle: { patch: "./p.yml" } } },
+		deps: { "dsh-x": "file:D:/vendor/x.tgz" },
+		bundles: ["dsh-x"],
+		entry: { exists: true, isLink: false, target: null, isDirectory: true }
+	});
+	eq("R31 link 计划：node_modules 里是真实目录 → 一律不动（那是 pnpm 的地盘）", [planRealDir.ok, planRealDir.blocked && planRealDir.blocked.code], [false, "real-directory"]);
+	eq("R31 link 计划：装自己 → 拒绝", planLinkInstall({ name: "dsh-plugin-installer", sourceDir: "D:/x", manifest: { dsh: { bundle: {} } } }).blocked.code, "self-package");
+	eq("R31 link 计划：没声明 dsh.bundle.patch → 拒绝（装了也不会挂载）",
+		planLinkInstall({ name: "dsh-x", sourceDir: "D:/x", manifest: { name: "dsh-x" } }).blocked.code, "not-bundle");
+
+	const lp = dir("link-profile");
+	await mkdir(join(lp, "node_modules"), { recursive: true });
+	await writeFile(join(lp, "package.json"), JSON.stringify({ name: "desktop", dependencies: {}, dsh: { profile: { bundles: ["keep-me"] } } }, null, 2), "utf8");
+	const pluginSrc = dir("link-source");
+	await mkdir(pluginSrc, { recursive: true });
+	await writeFile(join(pluginSrc, "package.json"), JSON.stringify({ name: "dsh-link-demo", version: "0.1.0", dsh: { bundle: { patch: "./cordis.patch.yml" } } }, null, 2), "utf8");
+	const linkApplied = await applyLinkInstall({
+		profileDir: lp,
+		name: "dsh-link-demo",
+		sourceDir: pluginSrc,
+		manifest: { name: "dsh-link-demo", version: "0.1.0", dsh: { bundle: { patch: "./cordis.patch.yml" } } }
+	});
+	eq("R31 link 写盘：成功且真的改了", [linkApplied.ok, linkApplied.changed], [true, true]);
+	ok("R31 link 写盘：依赖行写成 link:（正斜杠）", /^link:.*dsh-link-demo|^link:/i.test(linkApplied.plan ? "link:" : ""), true);
+	const lpPkg = JSON.parse(await readFile(join(lp, "package.json"), "utf8"));
+	ok("R31 link 写盘：依赖行是 link: 指向源码目录", String(lpPkg.dependencies["dsh-link-demo"] || "").toLowerCase().startsWith("link:") && /link-source/.test(lpPkg.dependencies["dsh-link-demo"]), lpPkg.dependencies);
+	ok("R31 link 写盘：加进了 bundles 且原有条目没丢", lpPkg.dsh.profile.bundles.includes("dsh-link-demo") && lpPkg.dsh.profile.bundles.includes("keep-me"), lpPkg.dsh.profile.bundles);
+	const lpEntry = await probeEntry(lp, "dsh-link-demo");
+	eq("R31 link 写盘：node_modules 里那条是链接", [lpEntry.exists, lpEntry.isLink], [true, true]);
+	const throughLink = JSON.parse(await readFile(join(lp, "node_modules", "dsh-link-demo", "package.json"), "utf8"));
+	eq("R31 link 写盘：通过链接读得到插件自己", throughLink.name, "dsh-link-demo");
+	eq("R31 link 写盘：复核三项都在", [linkApplied.verified.dependency, linkApplied.verified.bundle, linkApplied.verified.link], [true, true, true]);
+	const linkAgain = await applyLinkInstall({ profileDir: lp, name: "dsh-link-demo", sourceDir: pluginSrc });
+	eq("R31 link 写盘：第二次是 noop（不重复改）", [linkAgain.ok, linkAgain.changed, linkAgain.verified.already], [true, false, true]);
+	const linkRefuse = await applyLinkInstall({ profileDir: lp, name: "dsh-link-demo", sourceDir: pluginSrc, manifest: { name: "dsh-link-demo" } });
+	eq("R31 link 写盘：manifest 缺 dsh.bundle.patch → 一处都不改", [linkRefuse.ok, Boolean(linkRefuse.blocked)], [false, true]);
+	const linkUndone = await undoLinkInstall({ profileDir: lp, name: "dsh-link-demo", sourceDir: pluginSrc });
+	eq("R31 link 撤销：撤掉依赖 / 清单 / 链接", linkUndone.removed.sort(), ["bundle", "dependency", "link"]);
+	const lpAfter = JSON.parse(await readFile(join(lp, "package.json"), "utf8"));
+	eq("R31 link 撤销：依赖行与清单项都清了", [lpAfter.dependencies["dsh-link-demo"], lpAfter.dsh.profile.bundles.includes("dsh-link-demo")], [undefined, false]);
+	eq("R31 link 撤销：链接也删了", (await probeEntry(lp, "dsh-link-demo")).exists, false);
+
+	/* Ⓟ R31：pnpm 信任度降级（真实事故：跟要装的插件无关的一个包把整次安装掐了） */
+	const trustOut = [
+		"[ERR_PNPM_TRUST_DOWNGRADE] High-risk trust downgrade for \"chromium-bidi@157.0.8090-0\" (possible package takeover)",
+		"",
+		"This error happened while installing the dependencies of dsh-vision-router@3.1.0",
+		" at puppeteer-core@25.16.0",
+		"",
+		"[WARN] GET https://registry.npmmirror.com/jimp error (UND_ERR_DESTROYED). Will retry in 10 seconds. 2 retries left."
+	].join("\n");
+	eq("R31 信任降级：认得这一类失败", classifyPnpmFailure({ output: trustOut }), "trust-downgrade");
+	const trustBase = describeInstallFailure({ code: "operation-error", message: trustOut, output: trustOut });
+	eq("R31 信任降级：kind 是 trust-downgrade", trustBase.kind, "trust-downgrade");
+	eq("R31 信任降级：指出被点名的包与版本", [trustBase.trust && trustBase.trust.package, trustBase.trust && trustBase.trust.version], ["chromium-bidi", "157.0.8090-0"]);
+	eq("R31 信任降级：豁免条目精确到版本", trustBase.trust && trustBase.trust.entry, "chromium-bidi@157.0.8090-0");
+	eq("R31 信任降级：说清是谁把它拉进来的", [trustBase.trust && trustBase.trust.root, trustBase.trust && trustBase.trust.via], ["dsh-vision-router@3.1.0", "puppeteer-core@25.16.0"]);
+	ok("R31 信任降级：标题点明「跟你要装的东西无关」", /无关/.test(trustBase.title), trustBase.title);
+	ok("R31 信任降级：给的是「豁免这一个版本」的真动作", trustBase.action && trustBase.action.kind === "add-trust-exclude" && trustBase.action.entry === "chromium-bidi@157.0.8090-0", trustBase.action);
+	ok("R31 信任降级：处置步骤里带了可直接抄的 YAML 行",
+		trustBase.fix.some((f) => f.text === "    trustPolicyExclude:") && trustBase.fix.some((f) => /- chromium-bidi@157\.0\.8090-0/.test(f.text)),
+		trustBase.fix);
+	const trustNamed = describeInstallFailure({ code: "operation-error", output: trustOut, targetName: "dsh-lemofilm" });
+	ok("R31 信任降级：知道你在装什么时，标题会点名它", /dsh-lemofilm/.test(trustNamed.title) && /不是「dsh-lemofilm」/.test(trustNamed.plain), trustNamed.plain.slice(0, 120));
+	eq("R31 信任降级：普通 404 不许被误判成信任降级", classifyPnpmFailure({ output: "ERR_PNPM_FETCH_404  GET https://registry/x: Not Found" }), "not-found");
+	eq("R31 信任降级：真的认不出还是 unknown", classifyPnpmFailure({ output: "segfault in some native module" }), "unknown");
+
+	/* Ⓟb R31：老任务的失败解释要能跟上新判据（用户的失败任务是 R31 之前写的） */
+	const composer = new Installer({ ctx: {}, options: {} });
+	const oldJob = {
+		id: "old-trust",
+		status: "failed",
+		detected: { kind: "bundle", name: "dsh-lemofilm" },
+		install: {
+			kind: "bundle",
+			bundleName: "dsh-lemofilm",
+			ok: false,
+			failure: { code: "operation-error", kind: "unknown", title: "pnpm 报错了，但这段输出里没有能认出的失败原因" },
+			result: { packageResult: { output: trustOut } }
+		}
+	};
+	const oldView = composer.compactJob(oldJob);
+	eq("R31 老任务：原始输出命中新判据 → 解释就地升级成 trust-downgrade", oldView.install.failure.kind, "trust-downgrade");
+	ok("R31 老任务：升级后的解释带「豁免这一个版本」动作", oldView.install.failure.action && oldView.install.failure.action.entry === "chromium-bidi@157.0.8090-0", oldView.install.failure.action);
+	ok("R31 老任务：只换解释，原始回执不动", /ERR_PNPM_TRUST_DOWNGRADE/.test(oldView.install.result.packageResult.output) && oldJob.install.failure.kind === "unknown", oldJob.install.failure.kind);
+	const unrelated = composer.compactJob({ id: "old-404", status: "failed", install: { failure: { kind: "unknown", title: "原样" }, result: { packageResult: { output: "ERR_PNPM_FETCH_404 Not Found" } } } });
+	eq("R31 老任务：跟信任无关的旧失败不许被动过", [unrelated.install.failure.kind, unrelated.install.failure.title], ["unknown", "原样"]);
+	const alreadyNew = composer.compactJob({ id: "new", status: "failed", install: { failure: { kind: "trust-downgrade", title: "已是最新判据" } } });
+	eq("R31 新任务：已经是新判据的失败保持原样（不重复套）", alreadyNew.install.failure.title, "已是最新判据");
+	/* 红点 / 工具输出必须念同一句话（否则「面板说真因、红点念旧文案」又是一处两套口径） */
+	composer.settings = { redDot: true };
+	composer._dismissed = new Set();
+	composer.jobs = [oldJob];
+	const attentionView = composer.attention();
+	eq("R31 红点：reason 用重判后的失败标题", attentionView.items[0].reason, oldView.install.failure.title);
+	ok("R31 红点：那句话说清是被哪个包挡住的（不是「认不出原因」）", /chromium-bidi/.test(attentionView.items[0].reason), attentionView.items[0].reason);
+
+	/* Ⓢ R32：非 DSH 资产的确定性分类（unknown 不等于「什么都不认识」） */
+	const pkgOf = (name, extra) => ({ dir: "/x", manifest: { name, ...(extra || {}) } });
+	const fam = (input) => {
+		const r = classifyForeign(input);
+		return r ? r.family : null;
+	};
+	eq("R32 外部资产：MCP 服务器（依赖里有 @modelcontextprotocol/*）", fam({ packages: [pkgOf("@example/foo", { dependencies: { "@modelcontextprotocol/sdk": "^1" } })], files: ["index.js"] }), "mcp-server");
+	eq("R32 外部资产：VS Code 扩展（engines.vscode）", fam({ packages: [pkgOf("ext", { engines: { vscode: "^1.80.0" }, contributes: { commands: [] } })], files: ["extension.js"] }), "vscode-extension");
+	eq("R32 外部资产：Obsidian 插件（manifest.json 有 id+minAppVersion）", fam({ packages: [], files: ["main.js", "manifest.json"], rootManifest: { id: "sample", version: "1.0.0", minAppVersion: "1.0.0" } }), "obsidian-plugin");
+	eq("R32 外部资产：浏览器扩展（manifest_version）", fam({ packages: [], files: ["background.js"], rootManifest: { manifest_version: 3, name: "x" } }), "chrome-extension");
+	eq("R32 外部资产：Python 包（pyproject.toml）", fam({ packages: [], files: ["pyproject.toml", "pkg/__init__.py"] }), "python-package");
+	eq("R32 外部资产：npm CLI（package.json 有 bin）", fam({ packages: [pkgOf("prettier", { bin: "./bin/x.cjs" })], files: ["bin/x.cjs"] }), "npm-cli");
+	eq("R32 外部资产：普通 npm 库（只有 main/exports）", fam({ packages: [pkgOf("chalk", { main: "index.js", exports: "./index.js" })], files: ["index.js"] }), "npm-library");
+	eq("R32 外部资产：真的什么都不是时返回 null（不许瞎认）", fam({ packages: [], files: ["README.md", "src/a.js"] }), null);
+	ok("R32 外部资产：每一类都带「为什么不能这样装 + 正确用法」", (() => {
+		const r = classifyForeign({ packages: [pkgOf("m", { dependencies: { "@modelcontextprotocol/sdk": "1" } })], files: [] });
+		return Boolean(r && r.why.length > 10 && r.howTo.length > 10 && r.evidence.length > 0);
+	})());
+	ok("R32 外部资产：一句话摘要点出身份", /MCP 服务器/.test(foreignLine(classifyForeign({ packages: [pkgOf("m", { dependencies: { "@modelcontextprotocol/sdk": "1" } })], files: [] }))));
+	/* 探针摘要（纯函数）：认不出的东西也要在输出里说清「不可装」 */
+	const probeLines = summarizeProbe({
+		detected: { kind: "unknown", installable: false, foreign: { label: "MCP 服务器（Model Context Protocol）", why: "W", howTo: "H", evidence: ["e"] }, skillCount: 0 },
+		scan: { severity: "low", summary: "只有低危特征" },
+		purpose: { verdict: "unknown", summary: "用途未识别" },
+		precheck: { blocked: true, needsConfirm: false, severity: "low", needsAiReview: false, reasons: [{ level: "block", text: "不是 DSH 插件" }] }
+	}).join(" | ");
+	ok("R32 探针摘要：说清「它是 MCP 服务器」与正确用法", /MCP 服务器/.test(probeLines) && /正确用法/.test(probeLines), probeLines.slice(0, 200));
+	ok("R32 探针摘要：说清会不会阻断 / 会不会花 token", /会阻断/.test(probeLines) && /不会花 token/.test(probeLines), probeLines.slice(0, 240));
+	/* 多技能仓库：detect 要把所有 SKILL.md 都记下来（以前只留第一个、静默装一个） */
+	const multi = dir("multi-skill");
+	await mkdir(join(multi, "skills-a"), { recursive: true });
+	await mkdir(join(multi, "skills-b"), { recursive: true });
+	await writeFile(join(multi, "skills-a", "SKILL.md"), "---\nname: alpha\ndescription: A\n---\n# A\n", "utf8");
+	await writeFile(join(multi, "skills-b", "SKILL.md"), "---\nname: beta\ndescription: B\n---\n# B\n", "utf8");
+	const multiDetected = await detectKind(multi, {});
+	eq("R32 多技能仓库：数得出 2 个 SKILL.md", multiDetected.skillCount, 2);
+	eq("R32 多技能仓库：名字都记下来（不再只留第一个）", (multiDetected.skills || []).map((s) => s.name).sort(), ["alpha", "beta"]);
+	eq("R32 多技能仓库：仍然按第一个装（行为不变，只是不再静默）", multiDetected.kind, "skill");
+
+	/* Ⓠ R31：用途判据 —— 「界面档」必须有客户端代码，宿主工具归 tool 档 */
+	const toolJudge = judgePurpose({
+		detected: {
+			kind: "bundle",
+			name: "dsh-lemofilm",
+			description: "DSH GUI 插件：用 Playwright 在宿主进程里渲染视频帧，把渲染与抓取固定成工具",
+			payload: { manifest: { name: "dsh-lemofilm", dsh: { bundle: { patch: "./cordis.patch.yml" } } } }
+		},
+		scan: {
+			hits: [
+				{ kind: "child-process", severity: "high" },
+				{ kind: "network", severity: "medium" },
+				{ kind: "fs-write", severity: "medium" },
+				{ kind: "env-access", severity: "high" }
+			],
+			scanned: [{ rel: "index.js" }, { rel: "tools.js" }]
+		},
+		scripts: [],
+		contract: { definitions: 4, violations: [] }
+	});
+	eq("R31 用途：宿主工具插件（无 client.js）判成 tool 档", toolJudge.purpose.id, "tool");
+	eq("R31 用途：起子进程 / 联网 / 写盘对工具插件是合理的", toolJudge.verdict, "ok");
+	ok("R31 用途：不再说「界面插件不该起子进程」", !/界面/.test(toolJudge.plain), toolJudge.plain);
+	const fakeUi = judgePurpose({
+		detected: { kind: "bundle", name: "dsh-render-helper", description: "面板美化与图标样式", payload: { manifest: { name: "dsh-render-helper", dsh: { bundle: { patch: "./p.yml" } } } } },
+		scan: { hits: [{ kind: "fs-read", severity: "low" }], scanned: [{ rel: "index.js" }] },
+		scripts: []
+	});
+	ok("R31 用途：有界面关键词但没有 client.js → 不判界面（留痕说明为什么）",
+		fakeUi.purpose.id !== "ui" && fakeUi.purpose.signals.some((s) => /没有 client\.js/.test(s)), fakeUi.purpose);
+	const realUi = judgePurpose({
+		detected: { kind: "bundle", name: "dsh-pretty", description: "美化侧栏主题", payload: { manifest: { name: "dsh-pretty", dsh: { bundle: { patch: "./p.yml" }, client: { inject: ["slots"] } } } } },
+		scan: { hits: [{ kind: "child-process", severity: "medium" }], scanned: [{ rel: "client.js" }] },
+		scripts: []
+	});
+	eq("R31 用途：真有 client.js 时仍然是界面档（老判据不退化）", realUi.purpose.id, "ui");
+	eq("R31 用途：界面档多要子进程仍然是「说不通」", realUi.verdict, "warn");
+	const neverTool = judgePurpose({
+		detected: { kind: "bundle", name: "dsh-tool-x", description: "工具", payload: { manifest: { name: "dsh-tool-x", dsh: { bundle: { patch: "./p.yml" } } } } },
+		scan: { hits: [{ kind: "eval", severity: "high" }], scanned: [{ rel: "index.js" }] },
+		scripts: []
+	});
+	eq("R31 用途：eval 在任何用途里仍然是 error（这条不许放松）", neverTool.verdict, "error");
+
+	/* Ⓡ R31：预检把「直连」与「信任策略」两件事说出来（接线，不是新判据） */
+	const linkPre = await precheck({
+		detected: fine,
+		scan: cleanScan,
+		scripts: [],
+		source: { type: "local" },
+		link: { ok: true, alreadyLinked: true, entryLinked: true, sourceDir: "D:/plug/x", steps: [] }
+	});
+	ok("R31 预检：已经是直连安装时说清「这次不会改动 profile」",
+		linkPre.reasons.some((r) => /已经是直连安装/.test(r.text)), JSON.stringify(linkPre.reasons.map((r) => r.text)));
+	eq("R31 预检：直连判据进 precheck.link（面板据此渲染按钮）", linkPre.link && linkPre.link.alreadyLinked, true);
+	const linkCanPre = await precheck({
+		detected: fine,
+		scan: cleanScan,
+		scripts: [],
+		source: { type: "local" },
+		link: { ok: true, alreadyLinked: false, entryLinked: false, sourceDir: "D:/plug/x", steps: ["建链接"] }
+	});
+	ok("R31 预检：能直连时提示「可以直连安装（不走 pnpm）」",
+		linkCanPre.reasons.some((r) => /直连安装/.test(r.text)), JSON.stringify(linkCanPre.reasons.map((r) => r.text)));
+	const trustPre = await precheck({
+		detected: fine,
+		scan: cleanScan,
+		scripts: [],
+		source: { type: "local" },
+		trust: { known: true, policy: "no-downgrade", exclude: [], hasExcludeKey: false }
+	});
+	ok("R31 预检：信任策略旁边要写清「它会掐掉整次安装」",
+		trustPre.trust.notes.some((n) => /掐掉\*\*整次\*\*安装|整次/.test(n)), trustPre.trust.notes);
+	ok("R31 预检：信任策略没有豁免时给一句「这不是插件的问题」",
+		trustPre.trust.notes.some((n) => /ERR_PNPM_TRUST_DOWNGRADE/.test(n)), trustPre.trust.notes);
+	eq("R31 预检：兼容判据不一致时不打假 ✓（纯函数判据）", (() => {
+		const disagree = mCompatLine({ checks: [{ name: "engines.dsh", range: "x", actual: "y", ok: false, note: "n" }], mismatch: [{ name: "engines.dsh", range: "x", actual: "y", note: "n" }], via: "app-boot(asar)" });
+		return [disagree.kind, /✓/.test(disagree.text)];
+	})(), ["disagree", false]);
+	eq("R31 预检：一致时照旧给 ✓（不退化）", (() => {
+		const agree = mCompatLine({ checks: [{ name: "engines.dsh", range: "x", actual: "y", ok: true }], mismatch: [], via: "app-boot(asar)" });
+		return [agree.kind, /✓/.test(agree.text)];
+	})(), ["ok", true]);
 
 	await rm(root, { recursive: true, force: true });
 

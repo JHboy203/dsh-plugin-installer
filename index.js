@@ -380,6 +380,25 @@ export async function apply(ctx) {
 						   （客户端只能点同意，不能自带包名/版本 —— 名额不放宽，判据只在一处）。 */
 						result = await installer.exemptVersion(id);
 					}
+					else if (action === "link-install") {
+						/* R31：本机目录插件的**直连安装**（建链接 + 写两行 profile 配置，不走 pnpm）。
+						   **不暴露给模型** —— 它会改 profile 的 package.json 与 node_modules，
+						   属于「人按一下才做」的动文件动作（工具面里没有它）。 */
+						if (typeof installer.linkInstall !== "function") {
+							return json(res, 503, { ok: false, error: "宿主还没重启：直连安装是新代码（lib/pipeline.js 不热重载）" });
+						}
+						result = await installer.linkInstall(id, { reason: String(body.reason || "panel") });
+					}
+					else if (action === "add-trust-exclude") {
+						/* R31：把某一条加进 profile 的 trustPolicyExclude（放松一条供应链策略）。
+						   与「批准安装脚本」「版本豁免」同类：**只能人来按**，模型没有这个工具。
+						   面板要求二次确认；写前备份、写后复核都在 lib/trustpolicy.js 里。 */
+						if (typeof installer.addTrustExclude !== "function") {
+							return json(res, 503, { ok: false, error: "宿主还没重启：豁免写入是新代码（lib/pipeline.js 不热重载）" });
+						}
+						const entries = Array.isArray(body.entries) ? body.entries : body.entry ? [body.entry] : [];
+						result = await installer.addTrustExclude(entries);
+					}
 					else if (action === "repair") {
 						const report = await installer.doctor({ apply: true });
 						return json(res, 200, { ok: true, report, state: await installer.snapshotState() });
@@ -495,7 +514,7 @@ export async function apply(ctx) {
 	});
 	ctx.effect(() => dispose, "plugin-installer: panel routes");
 
-	/* 五个宿主工具（注册失败只记录，不影响面板） */
+	/* 六个宿主工具（注册失败只记录，不影响面板） */
 	const registered = [];
 	const failed = [];
 	const definitions = buildInstallerTools({ installer, ctx });

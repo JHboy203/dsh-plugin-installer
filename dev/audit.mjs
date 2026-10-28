@@ -46,18 +46,19 @@ export const FROZEN_DEFAULTS = {
 };
 
 /** 文档里声明的自检项数（改断言就先跑一次 host_selfcheck，再同步这个数）。 */
-export const EXPECTED_ASSERTIONS = 885;
+export const EXPECTED_ASSERTIONS = 990;
 
 /** 界面自检项数（dev/render-check.cjs）。同样是「文档对表」的一半。 */
-const EXPECTED_RENDER_ASSERTIONS = 153;
+const EXPECTED_RENDER_ASSERTIONS = 169;
 
-/** 期望注册的宿主工具（漏一个 = 模型看不见一项能力）。 */
+/** 期望注册的宿主工具（漏一个 = 模型看不见一项能力）。R32 起 6 个（新增只读探针）。 */
 const EXPECTED_TOOLS = [
 	"install_hub_status",
 	"install_hub_search_plugins",
 	"install_hub_submit_request",
 	"install_hub_review",
-	"install_hub_doctor"
+	"install_hub_doctor",
+	"install_hub_probe_repo"
 ];
 
 let passed = 0;
@@ -103,7 +104,7 @@ async function main() {
 
 	/* ③ 工具契约（漏 output = 整个插件静默失活） */
 	const tools = buildInstallerTools({ installer: {}, ctx: {} });
-	eq("工具数量固定为 5", tools.length, EXPECTED_TOOLS.length);
+	eq("工具数量固定为 6（R32 起含只读探针）", tools.length, EXPECTED_TOOLS.length);
 	eq("工具名字固定", tools.map((t) => t.name), EXPECTED_TOOLS);
 	ok("每个工具都声明 output 契约", tools.every((t) => t.output && t.output.schema && typeof t.output.render === "function"));
 	ok("每个工具都有 parameters schema", tools.every((t) => t.parameters && t.parameters.type === "object"));
@@ -468,6 +469,28 @@ async function main() {
 		}
 	}
 	ok("staging 保护集合可计算", keep instanceof Set && keep.size >= 0, keep ? keep.size : null);
+
+	/* ⑨ R31：直连安装（不走 pnpm）与 trustPolicy 的接线 ——
+	   这两条都是「改了 profile 配置」的能力，最怕的是**接线漏了**（面板有按钮、宿主没动作）。 */
+	const linkSrc = await readText(join("lib", "linkinstall.js"));
+	const trustSrc = await readText(join("lib", "trustpolicy.js"));
+	ok("R31：lib/linkinstall.js 存在且导出判据与写盘", Boolean(linkSrc) && /export function planLinkInstall/.test(linkSrc) && /export async function applyLinkInstall/.test(linkSrc) && /export async function undoLinkInstall/.test(linkSrc));
+	ok("R31：lib/trustpolicy.js 存在且导出读/改", Boolean(trustSrc) && /export function parsePolicy/.test(trustSrc) && /export function addExclude/.test(trustSrc) && /export async function writeExclude/.test(trustSrc));
+	ok("R31：junction 不能用 lstat 认（判据必须走 realpath）",
+		Boolean(linkSrc) && /realpath/.test(linkSrc) && /不能用 lstat 认|isSymbolicLink\(\)` 是 \*\*false\*\*/.test(linkSrc));
+	ok("R31：删链接不能用 unlink（junction 会 EPERM）",
+		Boolean(linkSrc) && /async function removeEntry/.test(linkSrc) && /rmdir/.test(linkSrc));
+	ok("R31：两个新动作在 index.js 里接了（link-install / add-trust-exclude）",
+		/action === "link-install"/.test(indexSrc2) && /action === "add-trust-exclude"/.test(indexSrc2) &&
+		/linkInstall/.test(String(await readText(join("lib", "pipeline.js")))));
+	ok("R31：**两个动作都不暴露给模型**（动 profile 文件只能人按）",
+		!/link-install/.test(toolsSrc) && !/add-trust-exclude/.test(toolsSrc) && !/linkInstall/.test(toolsSrc));
+	ok("R31：面板上有两张卡，且都提了 BUILD（r31.0）",
+		/function LinkInstallCard/.test(clientSrc) && /function TrustExemptCard/.test(clientSrc) && /const BUILD = "r31\.0"/.test(clientSrc));
+	ok("R31：安装失败时把「直连安装」当处置动作带出来（本机目录才给）",
+		/kind: "link-install"/.test(String(await readText(join("lib", "pipeline.js")))));
+	ok("R31：体检会报「信任策略挡过安装」这一条（只报不修）",
+		/trust-downgrade/.test(String(await readText(join("lib", "pipeline.js")))) && /report\.info\.trustPolicy/.test(String(await readText(join("lib", "pipeline.js")))));
 
 	/* ⑧ 文档与断言数对表（提示级：改了测试忘了改文档是常态） */
 	for (const doc of ["README.md", join("..", "★交接文件·插件安装面板.md")]) {
