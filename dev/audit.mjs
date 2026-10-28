@@ -28,6 +28,8 @@ import { buildInstallerTools } from "../lib/tools.js";
 import { buildStamp, dataDir, profileDir } from "../lib/hostinfo.js";
 import { stagingKeepNames } from "../lib/pipeline.js";
 import { compareProfile, judgePnpmState } from "../lib/profilestate.js";
+import { PY_RULES, RISK_KIND_LABELS } from "../lib/scan.js";
+import { PURPOSES } from "../lib/purpose.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, "..");
@@ -46,7 +48,7 @@ export const FROZEN_DEFAULTS = {
 };
 
 /** 文档里声明的自检项数（改断言就先跑一次 host_selfcheck，再同步这个数）。 */
-export const EXPECTED_ASSERTIONS = 990;
+export const EXPECTED_ASSERTIONS = 1009;
 
 /** 界面自检项数（dev/render-check.cjs）。同样是「文档对表」的一半。 */
 const EXPECTED_RENDER_ASSERTIONS = 169;
@@ -491,6 +493,14 @@ async function main() {
 		/kind: "link-install"/.test(String(await readText(join("lib", "pipeline.js")))));
 	ok("R31：体检会报「信任策略挡过安装」这一条（只报不修）",
 		/trust-downgrade/.test(String(await readText(join("lib", "pipeline.js")))) && /report\.info\.trustPolicy/.test(String(await readText(join("lib", "pipeline.js")))));
+
+	/* ⑦b R33：Python 规则的 kind 必须三处对齐。新增一类能力最典型的失效是「接了一半」——
+	   面板印出裸 kind（`db-connect`），或者某个用途档永远把它算成「越界」。
+	   这两类都不会编译报错、也不会在行为自检里红（除非正好断言了那条文案）。 */
+	const pyKinds = [...new Set(PY_RULES.map((rule) => rule.kind))];
+	eq("R33：Python 规则产出的每个 kind 都有中文标签", pyKinds.filter((kind) => !RISK_KIND_LABELS[kind]), []);
+	ok("R33：新增的 db-connect 在「数据」档里算本来就该有（否则「连数据库」会被判越界）",
+		(PURPOSES.data.expected || []).includes("db-connect"));
 
 	/* ⑧ 文档与断言数对表（提示级：改了测试忘了改文档是常态） */
 	for (const doc of ["README.md", join("..", "★交接文件·插件安装面板.md")]) {

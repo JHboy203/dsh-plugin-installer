@@ -141,7 +141,7 @@
 > **构建标记格式**（`0.1.0 · YYYY-MM-DD HH:MM`，且 `/health` 不许写死）/ 客户端设置与热键入口 /
 > `settings.json` 归一化后逐字不变 / 等待确认任务的 staging 现场还在 / README 与交接文件里的
 > 断言数是否等于 `EXPECTED_ASSERTIONS`。**不碰宿主、不 spawn、不写盘**，只打印
-> 「接着跑 host_selfcheck（990）+ render-check（169）」。自洽检查现已 **186 项**。
+> 「接着跑 host_selfcheck（1009）+ render-check（169）」。自洽检查现已 **188 项**。
 > 三层分工至此固定：**audit = 自洽，host_selfcheck = 行为，render-check = 界面**。
 > 线上实测：构建标签 `0.1.0 · 2026-10-20 19:45`、客户端 `r6.0`、`GET/POST /settings` 正常
 > （非法值当场夹取回默认）、`clientReport` 里有 360×658 的窄屏实例。
@@ -731,6 +731,53 @@ profile 依赖里的包名直接回 `already-installed`（原文：*uninstall it
 而模型想知道「这链接是什么、装上去会怎样」只能 `submit`（= 真装一遍：改 profile、可能重启、可能花 2k token 审查）。
 现在判据抽到 `lib/probe.js`，CLI 与工具共用一份：**下载→解包→识别→静态扫描→预检/用途**，不安装、不动 profile、不建任务。
 
+### 2f2. 一个真样本暴露的两件事：Python 项目认不出、扫描说了假话（R33）
+
+起点是用户真的把 `Tideglass.zip` 丢进了面板，被拒绝。拒绝是对的（它确实不是 DSH 插件），**错的是拒绝的理由**：
+
+```
+未识别内容：既没有 dsh.bundle，也没有 SKILL.md     ← 旧回答，没有信息量
+```
+
+那个包里是 8 个 `.py` + `requirements.txt`（`pymongo`）+ `data/memory.db` + `output/*.html` —— 一套**要连 MongoDB 的 Python 程序**。查下去是两处判据缺口：
+
+**① 非 DSH 资产少了一类：没有 `pyproject.toml`/`setup.py` 的纯脚本项目没人认。**
+`lib/foreign.js` 补第 8 类 **`python-app`（Python 应用 / 脚本项目）**：判据是「有 `requirements*.txt`
+或 ≥2 个 `.py`，且没有 `pyproject.toml`/`setup.py`（有那些仍是「Python 包」）」。
+它不只报身份，还把**跑起来要准备什么**读出来：
+
+```
+它是：Python 应用 / 脚本项目
+  为什么不能这样装：它是一套独立运行的 Python 程序：靠 requirements.txt 装依赖、有自己的入口脚本和数据文件、要连 MongoDB。
+                    DSH 插件是 JS 包（package.json 里声明 dsh.bundle 才会被挂载），两套运行时。
+  正确用法：① 解包，cd 进 `Tideglass` 目录；② pip install -r requirements.txt（它要装：pymongo）；
+           ③ **先接上它自己的数据库**：它要 MongoDB（依赖 pymongo）；· 它还带数据文件：data/memory.db（0 字节（空壳…））；
+           ④ python app.py；· 想让它变成 DSH 的能力，得另写一个 dsh.bundle 包装层
+  判据：requirements.txt 里要装 pymongo；8 个 .py 源文件（入口 app.py）；带数据文件：data/memory.db；依赖里有数据库驱动：pymongo → MongoDB
+```
+
+**② 静态扫描对「没有命中的 Python 项目」说了假话。** `.py` 以前**既不算代码也不算文本**，
+于是 8 个源文件一个字没读、只有一个 7 字节的 `requirements.txt` 被扫，摘要却照样写
+「未发现危险能力特征」。这是 R29 那条「**读不到 ≠ 通过**」的复发。三处修：
+
+| 位置 | 改法 |
+|---|---|
+| `lib/scan.js` | `.py` 有自己的规则集（子进程 / `shell=True` / eval·exec / 网络 / 写删 / 环境变量 / pickle / 长 base64），并新增一类 **`db-connect`（连接数据库）** —— 它回答的正是「这东西要连哪个库」。规则只对 `.py` 生效，**JS 插件零影响**（反过来也不会串味） |
+| 摘要 | 新增 `coverage`：没扫到的源码文件要算出来，**没扫全就不许说「未发现危险能力特征」**，改说「没有扫出危险特征 —— 但源码没扫全（1/2 个源文件）」 |
+| 构建产物 | `dist/` `build/` `vendor/` `output/` `*.min.js` `*.chunk.js` 里的命中**降一档**并注明「构建产物」；被跳过的也写明「构建产物 / 打包文件过大，未扫」而不是含糊的「文件过大」 |
+
+真样本现在的回答（扫描层）：`连接数据库(2 个文件)、读取环境变量(2 个文件)、写/删文件(1 个文件)`，
+并把 `output/vis-network.min.js` 标成构建产物跳过 —— 而不是「未发现危险能力特征」。
+
+**③ 顺带把 R32 没做完的两条收尾**（都来自上一轮那份调研）：
+
+- **Skill 的 `templates/` `examples/` `evals/` `tests/` 不再算「Skill 带了可执行文件」** ——
+  官方技能库（说明书 + 模板 + 自评测脚本）本来就是这个结构，以前会被判「明显不符」还触发一次 AI 审查。
+  **判据不放松**：其余位置（含根目录、`scripts/`）的 `.js/.ps1/.exe` 照样算。
+- **提示注入分强弱两档**：`SKILL.md` 只认强句式（伪造 `system` 标签、让人执行 shell 命令）；
+  弱句式（"ignore previous instructions" / "you are now a"）只在 `README` 等非技能正文里才算可疑 ——
+  **技能正文本来就是写给模型的指令**，拿通用祈使句判它，等于给所有第三方技能加噪音。
+
 ### 2e. 本机目录插件不再走 pnpm + 「信任策略挡住整次安装」的处置（R31）
 
 这一轮的起点是两句用户原话：**「认不出我自己写的插件，总是要显示再安装一遍」**与**「而且总是安装失败」**。查下去是两件独立的事，都修在判据上。
@@ -899,7 +946,7 @@ R31 做了三件事：
 ```bash
 # ① 自洽体检（最快，不碰宿主、不重启；换会话先跑这条）
 node DSH-Plugin/dsh-plugin-installer/dev/audit.mjs
-#   186 项：默认档冻结快照 / 6 个工具的 output 契约 / 构建标记形如「0.1.0 · 2026-10-22 02:40」/
+#   188 项：默认档冻结快照 / 6 个工具的 output 契约 / 构建标记形如「0.1.0 · 2026-10-22 02:40」/
 #   契约扫描与 profile 体检是否真的接着线 / 失败分诊与批准闭环是否接线 / 版本豁免是否三处一起接 /
 #   staging 是否保住「等确认」的现场 / 状态工具的「环境注意」行 / 「批准」与「授权」都没暴露给模型 /
 #   已装清单四类来源是否分开判 / 宿主自带包是否被排除在升级外 / check-updates 是否只挂在动作上（不在轮询里）/
@@ -916,7 +963,7 @@ node DSH-Plugin/dsh-plugin-installer/dev/audit.mjs
 #   换版本判据只在 lib/upgrade.js（自己换自己 / link / git 一律拒）；装失败自动装回旧版并**按版本核对**；
 #   中断可续跑（只对「卸载后/旧版还在」）；协作方是可选服务（没有就明确拒绝，不排无效队列）
 #
-# ② 990 项确定性自检（解包围栏 / 识别短路 / 扫描与密度 / 快照回滚 / 重打包 / prune 保鲜 / 地雷 /
+# ② 1009 项确定性自检（解包围栏 / 识别短路 / 扫描与密度 / 快照回滚 / 重打包 / prune 保鲜 / 地雷 /
 #   契约扫描 / profile 体检与修复 / 已装版本对照 / 已装清单判据 / registry 最新版比对（打桩 fetch）/
 #   设置归一化与审核三档 / 红点与跳过审核门禁 / 热键 / 7z 往返与围栏 / 搜索缓存 / 工具契约 /
 #   pnpm 失败分诊 / allowBuilds 解析 / 批准重装 / 版本豁免读写与回读确认 / 兼容降级口径 /
@@ -993,7 +1040,7 @@ DSH 每次启动换随机端口（`dsh-desktop-host` 里写死 `--port 0`），�
 
 | 场景 | 结果 |
 |---|---|
-| 确定性自检 | **990/990 通过**（`dev/hosttest.mjs`，含 zip/tar 构造、穿越与软链接拒绝、比例炸弹、5 种识别分支、快照还原、重打包往返、prune 引用保护、地雷处置、契约扫描、profile 体检与修复、设置归一化、审核三档、热键、pnpm 失败分诊、allowBuilds 解析、批准重装与三道闸、落盘串行、版本豁免读写与回读确认、兼容降级口径、预检「已授权不再阻断」回归、staging 生命周期、环境注意、运行中代码指纹、已装清单四类来源、registry 比对与缓存、npm: 前缀、**inject 六种写法与边界、激活失败分诊、fiberPhase 判据、SKILL.md 三种 frontmatter 形态、YAML 硬错误判据、技能备份识别与磁盘×宿主对账、指纹两栏（宿主/客户端）、备份处置的越权拒绝与真实搬运、frontmatter 改写的三道自检与真实修复、崩溃分诊两类日志与已知签名、崩溃结论的新鲜度（stale）、崩溃处置的来源判据（link:/tgz/git/npm）与两张新签名（prepare / lossless JSON）、YAML 三类新硬错误（Tab 缩进 / 重复键 / 引号没闭合）与「不可自动改写」分流、搜索结果影子包警戒（官方 @deepseek-ai/* 同名但不全等）、客户端包 rev 对账（真机向量 / combo 守卫 / same·rebuilt·unknown 与「同一份字节即使 stale 也报 error」/ 动作只给 npm 来源）、升级回滚四种模式与旧 .tgz 往返、批量队列去重/暂停/坏 spec 跳过、版本跨度三档、换版本判据（自己 / link / git / 无声明四类拒绝）、装回旧版按版本核对、中断续跑只给一种现场、协作方五种状态、更新结果按版本对账、profile 的 pnpm 世代三方对账（lockfile v9 importers × node_modules 实际版本 × `.modules.yaml` 的 prunedAt）、读不到≠通过（`pnpm-generation-unreadable` 单独成条）、`excludeLinksFromLockfile` 不误报、只报不修（动作表里没有「修 pnpm」的入口）、带外改动签名差分与归因台账（三个记账时机 / 只有终态才记 / 事件上限 / 首次只落基线不记噪声事件）、清历史的判据（只清终态 / 保留 queued·running·awaiting-confirm / 空值与非数组不炸）、**R31：trustPolicy 三种落点与「块里有非列表行就拒绝」、直连安装的判据/写盘/幂等/撤销全链路（含 junction 只能用 realpath 认、删链接只能 rmdir）、信任度降级的分诊与豁免条目解析、老任务失败分类的就地重判（只换解释不动事实）、用途 tool 档与「界面档必须有客户端代码」、兼容判据不一致时不打假 ✓**）**）；另 **169 项**无头渲染 + **186 项**自洽体检 |
+| 确定性自检 | **1009/1009 通过**（`dev/hosttest.mjs`，含 zip/tar 构造、穿越与软链接拒绝、比例炸弹、5 种识别分支、快照还原、重打包往返、prune 引用保护、地雷处置、契约扫描、profile 体检与修复、设置归一化、审核三档、热键、pnpm 失败分诊、allowBuilds 解析、批准重装与三道闸、落盘串行、版本豁免读写与回读确认、兼容降级口径、预检「已授权不再阻断」回归、staging 生命周期、环境注意、运行中代码指纹、已装清单四类来源、registry 比对与缓存、npm: 前缀、**inject 六种写法与边界、激活失败分诊、fiberPhase 判据、SKILL.md 三种 frontmatter 形态、YAML 硬错误判据、技能备份识别与磁盘×宿主对账、指纹两栏（宿主/客户端）、备份处置的越权拒绝与真实搬运、frontmatter 改写的三道自检与真实修复、崩溃分诊两类日志与已知签名、崩溃结论的新鲜度（stale）、崩溃处置的来源判据（link:/tgz/git/npm）与两张新签名（prepare / lossless JSON）、YAML 三类新硬错误（Tab 缩进 / 重复键 / 引号没闭合）与「不可自动改写」分流、搜索结果影子包警戒（官方 @deepseek-ai/* 同名但不全等）、客户端包 rev 对账（真机向量 / combo 守卫 / same·rebuilt·unknown 与「同一份字节即使 stale 也报 error」/ 动作只给 npm 来源）、升级回滚四种模式与旧 .tgz 往返、批量队列去重/暂停/坏 spec 跳过、版本跨度三档、换版本判据（自己 / link / git / 无声明四类拒绝）、装回旧版按版本核对、中断续跑只给一种现场、协作方五种状态、更新结果按版本对账、profile 的 pnpm 世代三方对账（lockfile v9 importers × node_modules 实际版本 × `.modules.yaml` 的 prunedAt）、读不到≠通过（`pnpm-generation-unreadable` 单独成条）、`excludeLinksFromLockfile` 不误报、只报不修（动作表里没有「修 pnpm」的入口）、带外改动签名差分与归因台账（三个记账时机 / 只有终态才记 / 事件上限 / 首次只落基线不记噪声事件）、清历史的判据（只清终态 / 保留 queued·running·awaiting-confirm / 空值与非数组不炸）、**R31：trustPolicy 三种落点与「块里有非列表行就拒绝」、直连安装的判据/写盘/幂等/撤销全链路（含 junction 只能用 realpath 认、删链接只能 rmdir）、信任度降级的分诊与豁免条目解析、老任务失败分类的就地重判（只换解释不动事实）、用途 tool 档与「界面档必须有客户端代码」、兼容判据不一致时不打假 ✓**、**R33：Python 应用（第 8 类非 DSH 资产）的判据/依赖/入口/数据文件/数据库、`.py` 真的被扫、「连接数据库」这个能力、JS 规则不串到 .py、扫描覆盖诚实化（没扫全时不许说「未发现危险特征」）、构建产物降权（dist/ 降一档、手写代码不降）、Skill 的 templates/ 豁免与提示注入强弱分档**）**）；另 **169 项**无头渲染 + **188 项**自洽体检 |
 | 已装 Skill（R14 实测，本机） | 技能根 `.dsh/skills` 下 **59 个目录 = 55 个技能 + 4 个备份残留**；上线第一分钟抓出 **3 个 frontmatter 不是合法 YAML** 的技能（`github-private-backup` / `win-desktop-automation` / `windows-disk-reclaim`，PyYAML 复核：`mapping values are not allowed here`）→ 宿主读不出 name、整条跳过；用 `.tools/fix-skill-frontmatter.py --apply`（写前备份、写后 PyYAML 复核）改成块标量后，宿主重扫即认到 —— **`hostVisible` 55/55、`yamlBroken` 0、`notVisible` 0**；`domain-modeling` / `grill-me` / `grill-with-docs` / `grilling` 各有一份 `.bak-mp20261017-1350` 同名备份（尚未清）；11 个技能的 description 是 `>` 折叠块，旧解析把它们读成「>」 |
 | 激活失败的真实样本（R13 实测） | `dsh-imgops` 两次任务：①宿主返回 `application:"failed" / stage:"enable" / diagnostic:"1 entry did not activate … cannot get property \"tools\" without inject"`（pnpm exit 0、包已落地）→ 新分诊判 `activation-failed`，标题点名缺 `tools`，处置给出 `export const inject = ['tools']`；② `already-installed` → 判 noop + 照常诊断。同机 4 个健康插件（本插件 / dsh-screenshot / dsh-diag / dsh-ops）静态扫描**零误报**（canvas 的 `ctx.fillRect` 不计入） |
 | 重装静默无效（R13 第二个 bug） | 修好 `dsh-imgops` 并升到 0.1.1 重新提交，宿主仍回 `already-installed`（实测 `changed:false`、`elapsedMs:11`、pnpm 没跑）—— 判据是依赖行的 spec 字符串，不含版本文件名就永远是同一个 spec。修法：`pkg-<名字>-<版本>.tgz` + 只收「没人引用的旧包」 |
@@ -1057,11 +1104,11 @@ lib/collaborator.js      R27：换版本的**可选**协作方探测（插件目
 lib/upgrade.js           R27：换版本判据（要不要换/能不能换/旧版怎么装回），纯函数、一处定义
 dev/verify-r13.mjs       R13：端到端验收器（运行中代码 / 提交 / ⑧ 回执 / ⑨ 诊断 / 体检），逐条 PASS/FAIL
 lib/tools.js             六个宿主工具定义（含 output 契约）
-dev/hosttest.mjs         990 项确定性自检（宿主进程跑）
+dev/hosttest.mjs         1009 项确定性自检（宿主进程跑）
 dev/probe-crash.mjs      R17：不进宿主、只读真实崩溃日志，看分诊判据（改 lib 后立刻能验）
 dev/probe-rev.mjs        R24：算法固定向量 + 最近一份 web-boot 日志里那份 client 包还在不在（`--full` 连体检结论）
 dev/render-check.cjs     169 项无头渲染自检（诊断卡 / 预检卡 / 审查卡 / 设置面板 / 跳过审核 / 批准卡 / 兼容卡 / **换版本卡（R27）** / **R31 直连安装卡与信任豁免卡** / **已装清单（含队列、跨度、80 条折叠、协作方两态）/ 已装 Skill（含移出与修复确认态、不可自动改写态、来自插件包/内置）/ 窄屏结构契约 / 发现卡动作按钮 / 搜索卡「已装」分来源与本机插件提示 / **R30 界面契约（两行历史、状态胶囊、空态、展开边界、版本胶囊、自绘图标、清历史的两段式与空态不出现）**）
-dev/audit.mjs            186 项自洽体检（不碰宿主；换会话先跑这个）
+dev/audit.mjs            188 项自洽体检（不碰宿主；换会话先跑这个）
 dev/probe-pnpmstate.mjs  R29 只读探针：profile 的 pnpm 世代（世代/规模/样本/结论/归因），不写盘、不跑 pnpm
 dev/probe-inject.mjs     手动探针：拿本机真实插件验 inject 扫描会不会误报（R13）
 dev/quarantine-dshtools.mjs  手动兜底：把埋下的 dsh-tools 挪进备份（薄壳，复用 lib/landmine.js）
