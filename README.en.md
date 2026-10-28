@@ -179,6 +179,56 @@ Cloud-drive links (Baidu/Quark/Ali/123/Lanzou…) **are not downloaded automatic
 
 ---
 
+## 2e. Local-source plugins skip pnpm, and a blocked install finally explains itself (R31)
+
+Two user reports drove this round: **"it doesn't recognize the plugins I wrote myself — it always wants to install them again"**
+and **"and the install always fails"**. They turned out to be three separate causes, all fixed in the judgement layer.
+
+**① The real cause of "it always fails" was not the plugin.** The profile carries `trustPolicy: no-downgrade`.
+Installing a local plugin, pnpm answered:
+
+```
+[ERR_PNPM_TRUST_DOWNGRADE] High-risk trust downgrade for "chromium-bidi@157.0.8090-0" (possible package takeover)
+This error happened while installing the dependencies of dsh-vision-router@3.1.0
+ at puppeteer-core@25.16.0
+```
+
+A transitive dependency of *another* plugin lost its "trusted publisher" evidence, and pnpm **rejects the whole install**.
+The panel's triage table had no such category, so it could only say "unrecognized failure" (`kind: unknown`).
+
+| Where | What |
+|---|---|
+| `lib/installfailure.js` | New `trust-downgrade` kind: parses **the package + version + who pulled it in**, and the title states plainly that it has nothing to do with the plugin you are installing |
+| `lib/trustpolicy.js` (new) | Read / explain / **append exactly one** exemption: `parsePolicy` distinguishes "no policy", "policy with no exemptions", "who is exempted", "ignore window"; `addExclude` handles block / inline / missing-key layouts and **refuses** when the block contains a non-list line; `writeExclude` backs up → writes atomically → **re-reads to verify** (restores on any mismatch) |
+| Panel + doctor | The job card gains a "pnpm supply-chain policy blocked this install" card (names the package, says who pulled it in, needs a second confirmation); `install_hub_doctor` reports it (**report only** — loosening a supply-chain policy is the human's call) |
+
+The discipline is unchanged: the panel still **never runs pnpm** and never touches `pnpm-lock.yaml`. It edits **one explicit list**
+in `pnpm-workspace.yaml`, only when a human clicks, with a backup and a verification step.
+
+**② Local-source plugins get a "direct install" that never runs pnpm.** Your own plugins live in a workspace directory;
+re-packing them into a `.tgz` and letting pnpm recompute the dependency tree is the wrong tool (28 of the 46 dependencies on
+this machine are already `link:`). `lib/linkinstall.js` does the three real steps: create the junction, write
+`dependencies[<name>] = "link:<dir>"`, add the name to `dsh.profile.bundles`. Three hard boundaries: a **real directory** in
+`node_modules/<name>` is never touched (that is pnpm's territory), pnpm and the lockfile are never run, and the write is
+verified afterwards (config written? plugin readable **through** the link?) — anything off gets rolled back.
+
+> Two Windows facts learned the hard way: a **junction is not a symlink to `lstat`** (`isSymbolicLink()` is `false` and
+> `readlink` throws `EINVAL`) — detect it with `realpath`; and a junction **cannot be removed with `unlink`** (`EPERM`) — use `rmdir`.
+
+**③ "It is already linked" is no longer "install it again".** Same source directory, profile already `link:`s it, the
+`node_modules` entry is there → nothing needs installing. Previously the pipeline kept going and produced either
+`already-installed` (looks like nothing happened) or a real pnpm run (blocked by ①). Now the job settles as `done` and
+**runs a real diagnosis** to answer "is it actually running?".
+
+**④ Two self-contradicting judgements fixed on the way.** The purpose heuristic counted `dsh.bundle` as evidence for "UI", so a
+**host-side tool plugin** (no `client.js`, registers tools, spawns processes, writes files) was labelled "UI enhancement" and
+flagged as "capabilities do not match purpose" — plus a ~2k-token AI review. Now **the UI bucket requires client-side code**,
+and host-side tool plugins have their own `tool` bucket where `child-process / shell / network / fs-write / env-access` are
+expected. And the version-compatibility line no longer prints a fake `✓` when the local semver check disagrees with the
+official `evaluatePluginCompatibility` verdict.
+
+---
+
 ## 3. Trust model (why it dares to touch installation)
 
 ```

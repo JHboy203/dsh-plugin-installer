@@ -175,7 +175,7 @@ function textOf(node, acc) {
  * 正常不执行，所以**数源码不等于数断言**（实测 103 处、只跑 80 条）。真正的判据只能是
  * 「这次实际跑了几条」，所以由脚本自己报总数、并由自己比对。
  */
-const EXPECTED_TOTAL = 153;
+const EXPECTED_TOTAL = 169;
 
 let failed = 0;
 let passed = 0;
@@ -1111,6 +1111,101 @@ check("R30 头部：有版本胶囊 .dpi-ver，且号取自 host.build（公开�
 	/className: "dpi-ver"/.test(code) && /String\(host\.build\)\.split/.test(code) && /\.dpi-ver\{/.test(cssText));
 check("R30 图标：自绘 SVG 图标集（同一套描边 1.7，不用 unicode 冒充）",
 	typeof t.Glyph === "function" && /function Glyph/.test(code) && /strokeWidth: 1\.7/.test(code));
+
+/* R31：直连安装卡 —— 已经直连装着的**不出按钮**（那正是「总要再装一遍」的另一半）；
+   能直连时给按钮 + 二次确认；被拒绝时只解释、不给假按钮。 */
+if (typeof t.LinkInstallCard === "function") {
+	const savedData = t.store.data;
+	t.store.data = null;
+
+	const already = {
+		id: "job-a",
+		status: "done",
+		detected: { kind: "bundle", name: "dsh-x" },
+		link: { ok: true, alreadyLinked: true, entryLinked: true, name: "dsh-x", sourceDir: "D:/plug/x", steps: [] }
+	};
+	resetHooks();
+	check("R31 直连卡：已经直连装着时不出现（不再劝人装一遍）", t.LinkInstallCard({ job: already, busy: null, act: () => {} }) == null);
+
+	const fresh = {
+		id: "job-b",
+		status: "failed",
+		detected: { kind: "bundle", name: "dsh-lemofilm" },
+		link: { ok: true, alreadyLinked: false, entryLinked: false, name: "dsh-lemofilm", sourceDir: "D:/plug/lemofilm", steps: ["建链接", "依赖声明 → link:…"] }
+	};
+	resetHooks();
+	const freshEl = t.LinkInstallCard({ job: fresh, busy: null, act: () => {} });
+	const freshText = freshEl ? textOf(freshEl).join(" | ") : "";
+	check("R31 直连卡：给出「直连安装（不走 pnpm）」按钮", freshText.includes("直连安装（不走 pnpm）"), freshText.slice(0, 120));
+	check("R31 直连卡：写明这条路不碰依赖树", /不重算依赖树|不跑 pnpm/.test(freshText), freshText.slice(0, 160));
+	check("R31 直连卡：默认不展开二次确认", !freshText.includes("我确认直连安装"));
+	check("R31 直连卡：把要做的几处改动列出来", freshText.includes("建链接"), freshText.slice(0, 200));
+
+	resetHooks();
+	hooks[0] = true;
+	const askingEl = t.LinkInstallCard({ job: fresh, busy: null, act: () => {} });
+	const askingText = askingEl ? textOf(askingEl).join(" | ") : "";
+	check("R31 直连卡：二次确认写明会改 profile 与「要重启才生效」",
+		askingText.includes("我确认直连安装") && /重启/.test(askingText) && /package\.json/.test(askingText), askingText.slice(0, 220));
+	check("R31 直连卡：二次确认有「再想想」", askingText.includes("再想想"));
+
+	const blocked = {
+		id: "job-c",
+		status: "failed",
+		detected: { kind: "bundle", name: "dsh-y" },
+		link: { ok: false, blocked: { code: "real-directory", text: "node_modules/dsh-y 是一份真实目录", plain: "大白话：那是 pnpm 的地盘。", fix: [{ text: "先卸载那一份" }] } }
+	};
+	resetHooks();
+	const blockedEl = t.LinkInstallCard({ job: blocked, busy: null, act: () => {} });
+	const blockedText = blockedEl ? textOf(blockedEl).join(" | ") : "";
+	check("R31 直连卡：被拒绝时只解释、不给按钮",
+		blockedText.includes("直连安装被拒") && !blockedText.includes("直连安装（不走 pnpm）"), blockedText.slice(0, 160));
+
+	resetHooks();
+	check("R31 直连卡：没有 link 判据时什么都不渲染", t.LinkInstallCard({ job: { id: "j", detected: { kind: "skill" } }, busy: null, act: () => {} }) == null);
+	t.store.data = savedData;
+} else {
+	check("__test 暴露了 LinkInstallCard", false);
+}
+
+/* R31：pnpm 信任策略豁免卡 —— 只在 trust-downgrade 时出现；按钮文案点名那个包与版本。 */
+if (typeof t.TrustExemptCard === "function") {
+	const savedData = t.store.data;
+	t.store.data = null;
+
+	const plainJob = { id: "job-1", install: { failure: { kind: "unknown" } } };
+	resetHooks();
+	check("R31 信任卡：不是 trust-downgrade 就不出现", t.TrustExemptCard({ job: plainJob, busy: null, act: () => {} }) == null);
+
+	const trustJob = {
+		id: "job-2",
+		install: {
+			failure: {
+				kind: "trust-downgrade",
+				trust: { package: "chromium-bidi", version: "157.0.8090-0", entry: "chromium-bidi@157.0.8090-0", root: "dsh-vision-router@3.1.0", via: "puppeteer-core@25.16.0" },
+				action: { kind: "add-trust-exclude", entry: "chromium-bidi@157.0.8090-0" }
+			}
+		}
+	};
+	resetHooks();
+	const trustEl = t.TrustExemptCard({ job: trustJob, busy: null, act: () => {} });
+	const trustText = trustEl ? textOf(trustEl).join(" | ") : "";
+	check("R31 信任卡：点名被挡的包与版本", trustText.includes("chromium-bidi@157.0.8090-0"), trustText.slice(0, 140));
+	check("R31 信任卡：说清「跟你要装的插件无关」", /无关/.test(trustText), trustText.slice(0, 160));
+	check("R31 信任卡：写出是谁把它拉进来的", /dsh-vision-router@3\.1\.0/.test(trustText), trustText.slice(0, 200));
+	check("R31 信任卡：默认不展开二次确认", !trustText.includes("我确认豁免这一个版本"));
+
+	resetHooks();
+	hooks[0] = true;
+	const trustAsking = t.TrustExemptCard({ job: trustJob, busy: null, act: () => {} });
+	const trustAskingText = trustAsking ? textOf(trustAsking).join(" | ") : "";
+	check("R31 信任卡：二次确认说清「这一步等于把闸门打开」",
+		trustAskingText.includes("我确认豁免这一个版本") && /闸门|不再/.test(trustAskingText), trustAskingText.slice(0, 240));
+	check("R31 信任卡：二次确认写明只到这一条、不做通配", /通配/.test(trustAskingText), trustAskingText.slice(0, 240));
+	t.store.data = savedData;
+} else {
+	check("__test 暴露了 TrustExemptCard", false);
+}
 
 /* 条数自对表：断言被删/被加都会在这里当场红（数源码不可靠，见 EXPECTED_TOTAL 的注释） */
 if (passed !== EXPECTED_TOTAL) {

@@ -23,7 +23,7 @@ window.__ModuleLoader__.load({
 		/* 客户端 build 号（R5.1）：改 client.js 就提一位。
 		   client 会热重载、但没人保证「当前页面跑的是哪一版」—— 这个号随 client-state
 		   一起上报，宿主 /health 的 clientReport.build 就是答案（宿主侧另有 mtime 标签）。 */
-		const BUILD = "r30.0";
+		const BUILD = "r31.0";
 
 		/* ── 迷你 store（模块级，面板关着时图标也在用）──────────────────── */
 
@@ -1038,10 +1038,117 @@ window.__ModuleLoader__.load({
 			);
 		}
 
+		/* R31：本机目录插件的**直连安装**（不走 pnpm）。
+		   为什么要有这一张卡：用户自己写的插件通常就住在工作区里，pnpm 那条路（重打成 .tgz →
+		   插件管理器 → 重算依赖树）在本机会被 profile 的 trustPolicy 掐掉，于是「总是装不上」。
+		   直连安装只做三件事：建链接、写一行 link: 依赖、加进 bundles —— 一次 pnpm 都不跑。
+		   代价必须写在按钮旁边：装的是「随时在变的源码」，不是固定字节；宿主半边要重启才生效。 */
+		function LinkInstallCard(props) {
+			const job = props.job;
+			const busy = props.busy;
+			const act = props.act;
+			const [asking, setAsking] = useState(false);
+			const link = (job && job.link) || null;
+			if (!job || !link) return null;
+			if (job.status === "running") return null;
+			/* 已经是直连安装：不出现按钮（那时「装一遍」本身就不该被点） */
+			if (link.alreadyLinked && link.entryLinked) return null;
+			const name = link.name || (job.detected && job.detected.name) || "";
+			const dir = link.sourceDir || "";
+			if (link.blocked) {
+				return h("div", { className: "dpi-card" },
+					h("div", { className: "dpi-card-head" }, h("strong", null, "这条路走不通：直连安装被拒"), h(Pill, { tone: "warn" }, "不能直连")),
+					h("div", { className: "dpi-muted" }, link.blocked.text),
+					link.blocked.plain ? h("div", { className: "dpi-detail" }, link.blocked.plain) : null,
+					link.blocked.fix && link.blocked.fix.length > 0
+						? h("ul", { className: "dpi-list dpi-list-info" }, link.blocked.fix.map((f, i) => h("li", { key: "lkf" + i }, f.text)))
+						: null);
+			}
+			const steps = Array.isArray(link.steps) ? link.steps : [];
+			return h("div", { className: "dpi-card dpi-card-info" },
+				h("div", { className: "dpi-card-head" },
+					h("strong", null, "也可以直连安装（不走 pnpm）"),
+					h(Pill, { tone: "ok" }, "不碰依赖树")),
+				h("div", { className: "dpi-muted" },
+					"直连安装 = 在 profile 的 node_modules 里建链接指向你的源码目录 + 写一行 link: 依赖 + 加进 dsh.profile.bundles。" +
+					"它**不重算依赖树、不跑 pnpm** —— 本机 pnpm 现在被 trustPolicy 挡着，走 .tgz 很可能失败，这条路不受影响。"),
+				h("div", { className: "dpi-muted" }, "这次会做：" + (steps.length > 0 ? steps.join("；") : "（profile 已经对上了，只会跑一次复核）")),
+				h("div", { className: "dpi-muted" }, "目录：" + dir),
+				asking
+					? h("div", { className: "dpi-ask" },
+						h("b", null, "确认把这台机器上的 profile 指向这个源码目录？"),
+						h("div", { className: "dpi-detail" },
+							"会改 profile 的 package.json（依赖行 + bundles 清单）与 node_modules/" + name + " 的一条链接；写前有快照可回滚。",
+							"装的是「随时在变的源码」：以后改了代码不用再装，但宿主半边要重启 DSH 才生效。",
+							"不跑 pnpm，也不改 pnpm-lock.yaml —— 所以它不改依赖树，也就不会被 trustPolicy 挡。"),
+						h("div", { className: "dpi-actions dpi-actions-tight" },
+							h("button", { className: "dpi-btn dpi-btn-sm", onClick: () => setAsking(false) }, "再想想"),
+							h("button", {
+								className: "dpi-btn dpi-btn-primary dpi-btn-sm",
+								disabled: busy !== null,
+								onClick: () => {
+									setAsking(false);
+									act("link-install", { reason: "panel" });
+								}
+							}, busy === "link-install" ? "安装中…" : "我确认直连安装")))
+					: h("div", { className: "dpi-actions dpi-actions-tight" },
+						h("button", { className: "dpi-btn dpi-btn-primary dpi-btn-sm", disabled: busy !== null, onClick: () => setAsking(true) }, "直连安装（不走 pnpm）"),
+						h("span", { className: "dpi-muted" }, "装完要重启 DSH 才加载新代码"))
+			);
+		}
+
+		/* R31：pnpm 的供应链策略挡住了整次安装（ERR_PNPM_TRUST_DOWNGRADE）。
+		   要点：被点名的包**不是**你要装的插件（它是别的插件的传递依赖），所以重试没有意义。
+		   面板给两条真路径：豁免这一个版本（写前备份 + 二次确认），或者改走直连安装（那张卡在上面）。 */
+		function TrustExemptCard(props) {
+			const job = props.job;
+			const busy = props.busy;
+			const act = props.act;
+			const [asking, setAsking] = useState(false);
+			const install = (job && job.install) || null;
+			const failure = install && install.failure ? install.failure : null;
+			if (!failure || failure.kind !== "trust-downgrade") return null;
+			const action = failure.action || null;
+			const trust = failure.trust || null;
+			const entry = (action && action.entry) || (trust && trust.entry) || "";
+			if (!entry) return null;
+			const chain = trust && trust.root && trust.via ? trust.root + " → " + trust.via : "";
+			return h("div", { className: "dpi-card dpi-card-warn" },
+				h("div", { className: "dpi-card-head" },
+					h("strong", null, "pnpm 信任策略挡了一次安装：" + entry),
+					h(Pill, { tone: "warn" }, "跟你要装的插件无关")),
+				h("div", { className: "dpi-muted" },
+					"profile 里开着 trustPolicy: no-downgrade。同一个包，旧版本有「可信发布者」证据、新版本没有，" +
+					"pnpm 就当成可能被人接管，于是**拒绝整次安装** —— 一个包被拒，整棵树都不装。" +
+					(chain ? "被点名的这个包是被 " + chain + " 拉进来的。" : "")),
+				h("div", { className: "dpi-detail" },
+					"所以换插件、重试都不会好：要动的是这条策略的豁免名单，或者把那个依赖钉回有可信证据的旧版。"),
+				asking
+					? h("div", { className: "dpi-ask" },
+						h("b", null, "确认豁免 " + entry + "？"),
+						h("div", { className: "dpi-detail" },
+							"这会在 profile 的 pnpm-workspace.yaml 里加一行 trustPolicyExclude: " + entry + "（写前备份、写后复核）。",
+							"含义：pnpm **不再**对这一个包的这一个版本做「可信度降级」检查。范围只到这一条，不做通配。",
+							"只在你看过它确实只是版本更新导致证据缺失时才点；如果它是被投毒的包，这一步等于把闸门打开。"),
+						h("div", { className: "dpi-actions dpi-actions-tight" },
+							h("button", { className: "dpi-btn dpi-btn-sm", onClick: () => setAsking(false) }, "再想想"),
+							h("button", {
+								className: "dpi-btn dpi-btn-primary dpi-btn-sm",
+								disabled: busy !== null,
+								onClick: () => {
+									setAsking(false);
+									act("add-trust-exclude", { entries: [entry] });
+								}
+							}, busy === "add-trust-exclude" ? "写入中…" : "我确认豁免这一个版本")))
+					: h("div", { className: "dpi-actions dpi-actions-tight" },
+						h("button", { className: "dpi-btn dpi-btn-primary dpi-btn-sm", disabled: busy !== null, onClick: () => setAsking(true) }, "豁免 " + entry),
+						h("span", { className: "dpi-muted" }, "豁免之后回面板点「重试」"))
+			);
+		}
+
 		/* R10：版本不兼容 —— 以前这里是一条「先退出 DSH 再跑 CLI」的死路。
 		   现在把宿主的精确版本豁免做成同一套「二次确认 → 宿主授权 → 重试」。 */
-		function CompatExemptCard(props) {
-			const job = props.job;
+		function CompatExemptCard(props) {			const job = props.job;
 			const busy = props.busy;
 			const act = props.act;
 			const [asking, setAsking] = useState(false);
@@ -1171,6 +1278,8 @@ window.__ModuleLoader__.load({
 					else if (action === "confirm") toast("继续安装");
 					else if (action === "ack") toast("已清除红点");
 					else if (action === "approve-builds") toast("已批准安装脚本，正在重新安装");
+					else if (action === "link-install") toast("已直连安装：重启 DSH 后加载新代码");
+					else if (action === "add-trust-exclude") toast((result && result.message) || "已写入豁免，回面板点重试");
 				} catch (e) {
 					toast("操作失败：" + String((e && e.message) || e));
 				} finally {
@@ -1203,11 +1312,17 @@ window.__ModuleLoader__.load({
 						h("b", null, (job.error.stage ? "[" + job.error.stage + "] " : "") + job.error.message),
 						job.error.plain ? h("div", { className: "dpi-detail" }, job.error.plain) : null,
 						job.error.hint ? h("div", { className: "dpi-detail" }, "建议：" + job.error.hint) : null,
-						job.error.fix && job.error.fix.length > 0 ? h(FixSteps, { steps: job.error.fix }) : null)
+						job.error.fix && job.error.fix.length > 0 ? h(FixSteps, { steps: job.error.fix, actions: job.error.actions }) : null)
 					: null,
 
 				/* R9：安装脚本待批准 —— 面板上直接给「允许并重试」，别让人自己去翻 yaml */
 				h(BuildApprovalCard, { job, busy, act }),
+
+				/* R31：pnpm 供应链策略挡路（ERR_PNPM_TRUST_DOWNGRADE）—— 给「豁免这一个版本」 */
+				h(TrustExemptCard, { job, busy, act }),
+
+				/* R31：本机目录插件 —— 给「直连安装（不走 pnpm）」这条不碰依赖树的路 */
+				h(LinkInstallCard, { job, busy, act }),
 
 				/* R10：版本不兼容 —— 面板上直接给「授权精确版本豁免并重试」 */
 				h(CompatExemptCard, { job, busy, act }),
@@ -1319,6 +1434,35 @@ window.__ModuleLoader__.load({
 		function runFindingAction(action) {
 			const kind = action && action.kind;
 			const plugin = String((action && action.plugin) || "");
+			/* R31：两个新动作。都走 POST /action，且都由宿主再判一遍（面板只是把按钮接上）。
+			   · link-install：失败卡上的「直连安装（不走 pnpm）」，需要 jobId；
+			   · add-trust-exclude：失败卡上的「豁免 <pkg>@<ver>」，需要 entry。 */
+			if (kind === "link-install") {
+				const jobId = String((action && (action.jobId || action.id)) || "");
+				if (!jobId) {
+					toast("这条动作缺少任务 id：请到任务卡上点那个按钮");
+					return Promise.resolve();
+				}
+				return api("/action", { method: "POST", body: JSON.stringify({ action: "link-install", id: jobId, reason: "finding" }) })
+					.then((r) => {
+						if (r && r.state) setStore({ data: r.state });
+						toast(r && r.ok === false ? (r.message || "直连安装失败") : "已直连安装：重启 DSH 后加载新代码");
+					})
+					.catch((e) => toast("直连安装失败：" + String((e && e.message) || e)));
+			}
+			if (kind === "add-trust-exclude") {
+				const entry = String((action && action.entry) || "");
+				if (!entry) {
+					toast("这条动作缺少要豁免的包名");
+					return Promise.resolve();
+				}
+				return api("/action", { method: "POST", body: JSON.stringify({ action: "add-trust-exclude", entries: [entry] }) })
+					.then((r) => {
+						if (r && r.state) setStore({ data: r.state });
+						toast((r && (r.message || r.error)) || "已处理");
+					})
+					.catch((e) => toast("写豁免失败：" + String((e && e.message) || e)));
+			}
 			if (kind !== "upgrade-npm" || !plugin) return Promise.resolve();
 			return api("/action", { method: "POST", body: JSON.stringify({ action: "check-updates" }) })
 				.then((r) => {
@@ -2827,6 +2971,9 @@ window.__ModuleLoader__.load({
 			CompatExemptCard,
 			/* R27：换版本卡（先卸后装 / 中断续跑）—— 无头渲染要能验「为什么必须卸、能不能续」 */
 			UpgradeCard,
+			/* R31：直连安装卡与信任豁免卡（两条新处置都必须能被无头渲染摸到） */
+			LinkInstallCard,
+			TrustExemptCard,
 			/* R30：界面打磨 —— 顶部品牌块 / 历史两行 / 空态 / 自绘图标（无头渲染要能验） */
 			History,
 			Glyph,
