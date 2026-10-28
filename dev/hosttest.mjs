@@ -3213,6 +3213,29 @@ async function main() {
 	eq("R31 信任降级：普通 404 不许被误判成信任降级", classifyPnpmFailure({ output: "ERR_PNPM_FETCH_404  GET https://registry/x: Not Found" }), "not-found");
 	eq("R31 信任降级：真的认不出还是 unknown", classifyPnpmFailure({ output: "segfault in some native module" }), "unknown");
 
+	/* Ⓟb R31：老任务的失败解释要能跟上新判据（用户的失败任务是 R31 之前写的） */
+	const composer = new Installer({ ctx: {}, options: {} });
+	const oldJob = {
+		id: "old-trust",
+		status: "failed",
+		detected: { kind: "bundle", name: "dsh-lemofilm" },
+		install: {
+			kind: "bundle",
+			bundleName: "dsh-lemofilm",
+			ok: false,
+			failure: { code: "operation-error", kind: "unknown", title: "pnpm 报错了，但这段输出里没有能认出的失败原因" },
+			result: { packageResult: { output: trustOut } }
+		}
+	};
+	const oldView = composer.compactJob(oldJob);
+	eq("R31 老任务：原始输出命中新判据 → 解释就地升级成 trust-downgrade", oldView.install.failure.kind, "trust-downgrade");
+	ok("R31 老任务：升级后的解释带「豁免这一个版本」动作", oldView.install.failure.action && oldView.install.failure.action.entry === "chromium-bidi@157.0.8090-0", oldView.install.failure.action);
+	ok("R31 老任务：只换解释，原始回执不动", /ERR_PNPM_TRUST_DOWNGRADE/.test(oldView.install.result.packageResult.output) && oldJob.install.failure.kind === "unknown", oldJob.install.failure.kind);
+	const unrelated = composer.compactJob({ id: "old-404", status: "failed", install: { failure: { kind: "unknown", title: "原样" }, result: { packageResult: { output: "ERR_PNPM_FETCH_404 Not Found" } } } });
+	eq("R31 老任务：跟信任无关的旧失败不许被动过", [unrelated.install.failure.kind, unrelated.install.failure.title], ["unknown", "原样"]);
+	const alreadyNew = composer.compactJob({ id: "new", status: "failed", install: { failure: { kind: "trust-downgrade", title: "已是最新判据" } } });
+	eq("R31 新任务：已经是新判据的失败保持原样（不重复套）", alreadyNew.install.failure.title, "已是最新判据");
+
 	/* Ⓠ R31：用途判据 —— 「界面档」必须有客户端代码，宿主工具归 tool 档 */
 	const toolJudge = judgePurpose({
 		detected: {
