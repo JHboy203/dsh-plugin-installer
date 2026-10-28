@@ -514,7 +514,7 @@ export async function apply(ctx) {
 	});
 	ctx.effect(() => dispose, "plugin-installer: panel routes");
 
-	/* 五个宿主工具（注册失败只记录，不影响面板） */
+	/* 六个宿主工具（注册失败只记录，不影响面板） */
 	const registered = [];
 	const failed = [];
 	const definitions = buildInstallerTools({ installer, ctx });

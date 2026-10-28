@@ -46,18 +46,19 @@ export const FROZEN_DEFAULTS = {
 };
 
 /** 文档里声明的自检项数（改断言就先跑一次 host_selfcheck，再同步这个数）。 */
-export const EXPECTED_ASSERTIONS = 974;
+export const EXPECTED_ASSERTIONS = 990;
 
 /** 界面自检项数（dev/render-check.cjs）。同样是「文档对表」的一半。 */
 const EXPECTED_RENDER_ASSERTIONS = 169;
 
-/** 期望注册的宿主工具（漏一个 = 模型看不见一项能力）。 */
+/** 期望注册的宿主工具（漏一个 = 模型看不见一项能力）。R32 起 6 个（新增只读探针）。 */
 const EXPECTED_TOOLS = [
 	"install_hub_status",
 	"install_hub_search_plugins",
 	"install_hub_submit_request",
 	"install_hub_review",
-	"install_hub_doctor"
+	"install_hub_doctor",
+	"install_hub_probe_repo"
 ];
 
 let passed = 0;
@@ -103,7 +104,7 @@ async function main() {
 
 	/* ③ 工具契约（漏 output = 整个插件静默失活） */
 	const tools = buildInstallerTools({ installer: {}, ctx: {} });
-	eq("工具数量固定为 5", tools.length, EXPECTED_TOOLS.length);
+	eq("工具数量固定为 6（R32 起含只读探针）", tools.length, EXPECTED_TOOLS.length);
 	eq("工具名字固定", tools.map((t) => t.name), EXPECTED_TOOLS);
 	ok("每个工具都声明 output 契约", tools.every((t) => t.output && t.output.schema && typeof t.output.render === "function"));
 	ok("每个工具都有 parameters schema", tools.every((t) => t.parameters && t.parameters.type === "object"));

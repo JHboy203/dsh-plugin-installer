@@ -105,6 +105,9 @@ import {
 	undoLinkInstall
 } from "../lib/linkinstall.js";
 import { addExclude, describePolicy, normalizeExclude, parsePolicy, readPolicy, splitExclude } from "../lib/trustpolicy.js";
+/* R32：非 DSH 资产的确定性分类（面板要能说「这是什么」）+ 只读探针的摘要 */
+import { classifyForeign, foreignLine } from "../lib/foreign.js";
+import { summarizeProbe } from "../lib/probe.js";
 import * as mExemptions from "../lib/exemptions.js";
 import * as mCompat from "../lib/compat.js";
 import * as mCodestamp from "../lib/codestamp.js";
@@ -1375,7 +1378,11 @@ async function main() {
 
 	/* 工具契约：数量、output 声明、搜索描述与真实源一致 */
 	const toolDefs = buildInstallerTools({ installer: {}, ctx: {} });
-	eq("tools: 注册五个宿主工具", toolDefs.length, 5);
+	eq("tools: 注册六个宿主工具（R32 起含只读探针）", toolDefs.length, 6);
+	ok("tools: 探针工具是只读的（描述里写清不安装、不动 profile）", (() => {
+		const probe = toolDefs.find((d) => d.name === "install_hub_probe_repo");
+		return Boolean(probe && /只读探针/.test(probe.description) && /不安装/.test(probe.description) && probe.output && probe.output.schema);
+	})());
 	ok("tools: 每个都声明 output 契约", toolDefs.every((d) => d.output && d.output.schema && typeof d.output.render === "function"));
 	ok(
 		"tools: 搜索工具描述写明 6 源（含商店）",
@@ -3242,6 +3249,45 @@ async function main() {
 	const attentionView = composer.attention();
 	eq("R31 红点：reason 用重判后的失败标题", attentionView.items[0].reason, oldView.install.failure.title);
 	ok("R31 红点：那句话说清是被哪个包挡住的（不是「认不出原因」）", /chromium-bidi/.test(attentionView.items[0].reason), attentionView.items[0].reason);
+
+	/* Ⓢ R32：非 DSH 资产的确定性分类（unknown 不等于「什么都不认识」） */
+	const pkgOf = (name, extra) => ({ dir: "/x", manifest: { name, ...(extra || {}) } });
+	const fam = (input) => {
+		const r = classifyForeign(input);
+		return r ? r.family : null;
+	};
+	eq("R32 外部资产：MCP 服务器（依赖里有 @modelcontextprotocol/*）", fam({ packages: [pkgOf("@example/foo", { dependencies: { "@modelcontextprotocol/sdk": "^1" } })], files: ["index.js"] }), "mcp-server");
+	eq("R32 外部资产：VS Code 扩展（engines.vscode）", fam({ packages: [pkgOf("ext", { engines: { vscode: "^1.80.0" }, contributes: { commands: [] } })], files: ["extension.js"] }), "vscode-extension");
+	eq("R32 外部资产：Obsidian 插件（manifest.json 有 id+minAppVersion）", fam({ packages: [], files: ["main.js", "manifest.json"], rootManifest: { id: "sample", version: "1.0.0", minAppVersion: "1.0.0" } }), "obsidian-plugin");
+	eq("R32 外部资产：浏览器扩展（manifest_version）", fam({ packages: [], files: ["background.js"], rootManifest: { manifest_version: 3, name: "x" } }), "chrome-extension");
+	eq("R32 外部资产：Python 包（pyproject.toml）", fam({ packages: [], files: ["pyproject.toml", "pkg/__init__.py"] }), "python-package");
+	eq("R32 外部资产：npm CLI（package.json 有 bin）", fam({ packages: [pkgOf("prettier", { bin: "./bin/x.cjs" })], files: ["bin/x.cjs"] }), "npm-cli");
+	eq("R32 外部资产：普通 npm 库（只有 main/exports）", fam({ packages: [pkgOf("chalk", { main: "index.js", exports: "./index.js" })], files: ["index.js"] }), "npm-library");
+	eq("R32 外部资产：真的什么都不是时返回 null（不许瞎认）", fam({ packages: [], files: ["README.md", "src/a.js"] }), null);
+	ok("R32 外部资产：每一类都带「为什么不能这样装 + 正确用法」", (() => {
+		const r = classifyForeign({ packages: [pkgOf("m", { dependencies: { "@modelcontextprotocol/sdk": "1" } })], files: [] });
+		return Boolean(r && r.why.length > 10 && r.howTo.length > 10 && r.evidence.length > 0);
+	})());
+	ok("R32 外部资产：一句话摘要点出身份", /MCP 服务器/.test(foreignLine(classifyForeign({ packages: [pkgOf("m", { dependencies: { "@modelcontextprotocol/sdk": "1" } })], files: [] }))));
+	/* 探针摘要（纯函数）：认不出的东西也要在输出里说清「不可装」 */
+	const probeLines = summarizeProbe({
+		detected: { kind: "unknown", installable: false, foreign: { label: "MCP 服务器（Model Context Protocol）", why: "W", howTo: "H", evidence: ["e"] }, skillCount: 0 },
+		scan: { severity: "low", summary: "只有低危特征" },
+		purpose: { verdict: "unknown", summary: "用途未识别" },
+		precheck: { blocked: true, needsConfirm: false, severity: "low", needsAiReview: false, reasons: [{ level: "block", text: "不是 DSH 插件" }] }
+	}).join(" | ");
+	ok("R32 探针摘要：说清「它是 MCP 服务器」与正确用法", /MCP 服务器/.test(probeLines) && /正确用法/.test(probeLines), probeLines.slice(0, 200));
+	ok("R32 探针摘要：说清会不会阻断 / 会不会花 token", /会阻断/.test(probeLines) && /不会花 token/.test(probeLines), probeLines.slice(0, 240));
+	/* 多技能仓库：detect 要把所有 SKILL.md 都记下来（以前只留第一个、静默装一个） */
+	const multi = dir("multi-skill");
+	await mkdir(join(multi, "skills-a"), { recursive: true });
+	await mkdir(join(multi, "skills-b"), { recursive: true });
+	await writeFile(join(multi, "skills-a", "SKILL.md"), "---\nname: alpha\ndescription: A\n---\n# A\n", "utf8");
+	await writeFile(join(multi, "skills-b", "SKILL.md"), "---\nname: beta\ndescription: B\n---\n# B\n", "utf8");
+	const multiDetected = await detectKind(multi, {});
+	eq("R32 多技能仓库：数得出 2 个 SKILL.md", multiDetected.skillCount, 2);
+	eq("R32 多技能仓库：名字都记下来（不再只留第一个）", (multiDetected.skills || []).map((s) => s.name).sort(), ["alpha", "beta"]);
+	eq("R32 多技能仓库：仍然按第一个装（行为不变，只是不再静默）", multiDetected.kind, "skill");
 
 	/* Ⓠ R31：用途判据 —— 「界面档」必须有客户端代码，宿主工具归 tool 档 */
 	const toolJudge = judgePurpose({
