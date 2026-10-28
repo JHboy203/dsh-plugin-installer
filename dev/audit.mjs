@@ -46,7 +46,7 @@ export const FROZEN_DEFAULTS = {
 };
 
 /** 文档里声明的自检项数（改断言就先跑一次 host_selfcheck，再同步这个数）。 */
-export const EXPECTED_ASSERTIONS = 972;
+export const EXPECTED_ASSERTIONS = 974;
 
 /** 界面自检项数（dev/render-check.cjs）。同样是「文档对表」的一半。 */
 const EXPECTED_RENDER_ASSERTIONS = 169;

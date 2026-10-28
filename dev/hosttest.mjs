@@ -3235,6 +3235,13 @@ async function main() {
 	eq("R31 老任务：跟信任无关的旧失败不许被动过", [unrelated.install.failure.kind, unrelated.install.failure.title], ["unknown", "原样"]);
 	const alreadyNew = composer.compactJob({ id: "new", status: "failed", install: { failure: { kind: "trust-downgrade", title: "已是最新判据" } } });
 	eq("R31 新任务：已经是新判据的失败保持原样（不重复套）", alreadyNew.install.failure.title, "已是最新判据");
+	/* 红点 / 工具输出必须念同一句话（否则「面板说真因、红点念旧文案」又是一处两套口径） */
+	composer.settings = { redDot: true };
+	composer._dismissed = new Set();
+	composer.jobs = [oldJob];
+	const attentionView = composer.attention();
+	eq("R31 红点：reason 用重判后的失败标题", attentionView.items[0].reason, oldView.install.failure.title);
+	ok("R31 红点：那句话说清是被哪个包挡住的（不是「认不出原因」）", /chromium-bidi/.test(attentionView.items[0].reason), attentionView.items[0].reason);
 
 	/* Ⓠ R31：用途判据 —— 「界面档」必须有客户端代码，宿主工具归 tool 档 */
 	const toolJudge = judgePurpose({
