@@ -94,6 +94,8 @@ import {
 	pendingBuildFinding
 } from "../lib/installfailure.js";
 import { judgePurpose } from "../lib/purpose.js";
+/* R35：把「干净基线会不会也违规」做成可复跑的判据（只在临时目录里跑 pnpm） */
+import { buildProbeManifest, classifyResolveOutput } from "../lib/pnpmresolve.js";
 /* R31：本机目录直连安装（不走 pnpm）+ pnpm 供应链策略（trustPolicy） */
 import {
 	applyLinkInstall,
@@ -2152,7 +2154,21 @@ async function main() {
 	ok("R35 pnpm: 带上大白话与真处置（等 / 加豁免 / 先不升级 / 查是哪几个）",
 		explainedRemove.fix.length >= 3 && /放一放|等一等|窗口/.test(explainedRemove.plain || ""), { fix: explainedRemove.fix.length, plain: (explainedRemove.plain || "").slice(0, 80) });
 	eq("R35 pnpm: 跟策略无关的输出不被硬套", explainPnpmOutput("EINTEGRITY sha512-abc").kind, "integrity");
-	eq("pnpm: 认出 404", classifyPnpmFailure({ output: "ERR_PNPM_FETCH_404 Not Found - GET https://reg/x" }), "not-found");
+
+	/* R35：解析探针的纯函数部分 —— 它回答「违规是包的问题还是 profile 状态的问题」，
+	   而当时只能靠人肉做实验。跑 pnpm 的那半不进自检（慢、且要真实 profile）。 */
+	const probePkg = {
+		name: "probe",
+		dependencies: { "@liustack/modsearch": "^5.10.7", "dsh-video-downloader": "github:zimai233/dsh-video-downloader", "dsh-diag": "link:D:/plug/diag" }
+	};
+	const builtProbe = buildProbeManifest(probePkg, { "@liustack/modsearch": "5.10.11" });
+	eq("R35 探针: 摘掉 git 依赖并记账（沙箱里 git 会 EPERM）", builtProbe.dropped, ["dsh-video-downloader=github:zimai233/dsh-video-downloader"]);
+	ok("R35 探针: link: 依赖保留（它本来就该参与解析）", builtProbe.manifest.dependencies["dsh-diag"] === "link:D:/plug/diag", builtProbe.manifest.dependencies);
+	eq("R35 探针: --pin 生效并记下 from→to", builtProbe.pinned, [{ name: "@liustack/modsearch", from: "^5.10.7", to: "5.10.11" }]);
+	eq("R35 探针: 原 package.json 不被改动（纯函数）", probePkg.dependencies["@liustack/modsearch"], "^5.10.7");
+	eq("R35 探针: pnpm 正常收尾判 clean", classifyResolveOutput("Progress: resolved 136\nDone in 2.9s using pnpm v11.28.5", 0).verdict, "clean");
+	const viol = classifyResolveOutput("[ERR_PNPM_RESOLUTION_POLICY_VIOLATIONS_UNHANDLED] 6 resolution-policy violations were produced", 1);
+	eq("R35 探针: 策略违规单独成一类并取到条数", [viol.verdict, viol.count], ["violations", 6]);	eq("pnpm: 认出 404", classifyPnpmFailure({ output: "ERR_PNPM_FETCH_404 Not Found - GET https://reg/x" }), "not-found");
 	eq("pnpm: 认出没有匹配版本", classifyPnpmFailure({ output: "ERR_PNPM_NO_MATCHING_VERSION No matching version found" }), "no-matching-version");
 	eq("pnpm: 认出磁盘满", classifyPnpmFailure({ output: "ENOSPC: no space left on device" }), "disk-full");
 	eq("pnpm: 认出权限", classifyPnpmFailure({ output: "EPERM: operation not permitted, open D:\\x" }), "permission");
