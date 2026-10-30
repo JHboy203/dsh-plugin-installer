@@ -175,7 +175,7 @@ function textOf(node, acc) {
  * 正常不执行，所以**数源码不等于数断言**（实测 103 处、只跑 80 条）。真正的判据只能是
  * 「这次实际跑了几条」，所以由脚本自己报总数、并由自己比对。
  */
-const EXPECTED_TOTAL = 190;
+const EXPECTED_TOTAL = 199;
 
 let failed = 0;
 let passed = 0;
@@ -1330,6 +1330,70 @@ if (typeof t.HostDownBanner === "function") {
 		helpedText.includes("dsh-tools") && helpedText.includes("禁用第三方插件"), helpedText.slice(0, 400));
 } else {
 	check("__test 暴露了 HostDownBanner", false);
+}
+
+/* R35：「等待确认」要先给一个**决定条**，再折叠细节。
+   用户原话：「安装过程也需要简化，信息有点太多，不知道该看哪个」。
+   这张卡原来把「安全预检」+「用途 vs 权限」两张巨卡摊开，而且里面还有逐字重复的段落。 */
+if (typeof t.DecisionBar === "function") {
+	const purposeErr = {
+		purpose: { label: "界面 / 交互增强" },
+		verdict: "error",
+		unexpected: [{ kind: "child-process", label: "启动子进程" }, { kind: "fs-write", label: "写/删文件" }, { kind: "network", label: "网络请求" }]
+	};
+	const waitingJob = {
+		id: "job-wait",
+		status: "awaiting-confirm",
+		precheck: {
+			blocked: false,
+			needsConfirm: true,
+			severity: "high",
+			purpose: purposeErr,
+			risks: { summary: "写/删文件(2 个文件)、读文件(2 个文件)、网络请求(2 个文件)、组合信号×1", scripts: [{ name: "prepublishOnly" }] },
+			reasons: [
+				{ level: "warn", text: "静态扫描发现高危能力信号", detail: "写/删文件(2 个文件)、读文件(2 个文件)" },
+				{ level: "warn", text: "权限与用途不符：用途「界面 / 交互增强」与它要的能力不符：启动子进程、写/删文件", detail: "这一整段和下面的用途卡逐字重复" }
+			]
+		}
+	};
+	resetHooks();
+	const barEl = t.DecisionBar({ job: waitingJob });
+	const barText = barEl ? textOf(barEl).join(" | ") : "";
+	check("R35 决定条：一句话说清「为什么停下来」", barText.includes("为什么停下来") && barText.includes("它自称「界面 / 交互增强」") && barText.includes("不像这个用途该有的"), barText.slice(0, 200));
+	check("R35 决定条：把能力列成 chips（不再是一整段文字）", (() => {
+		const chips = findNodes(barEl, (p) => p && typeof p.className === "string" && p.className.includes("dpi-chip"));
+		return chips.length >= 3;
+	})());
+	check("R35 决定条：组合信号不算「能力」", !barText.includes("组合信号"), barText.slice(0, 220));
+	check("R35 决定条：有安装期脚本时单独提醒（会真的在本机跑）", barText.includes("安装期脚本") && barText.includes("prepublishOnly"), barText.slice(0, 260));
+
+	resetHooks();
+	const barNoPurpose = t.DecisionBar({ job: { id: "j", status: "awaiting-confirm", precheck: { needsConfirm: true, risks: { summary: "网络请求(1 个文件)" } } } });
+	const barNoPurposeText = barNoPurpose ? textOf(barNoPurpose).join(" | ") : "";
+	check("R35 决定条：认不出用途时也给一句人话（不空着）", /为什么停下来/.test(barNoPurposeText) && /点头|确认/.test(barNoPurposeText), barNoPurposeText.slice(0, 160));
+
+	/* 去重：purpose 卡在场时，不再由 precheck 重复渲染那条「权限与用途不符」 */
+	resetHooks();
+	const pcEl = t.PrecheckCard({ precheck: waitingJob.precheck });
+	const pcText = pcEl ? textOf(pcEl).join(" | ") : "";
+	check("R35 预检卡：不再重复「权限与用途不符」那一段（交给用途卡说一次）", !pcText.includes("权限与用途不符"), pcText.slice(0, 240));
+	check("R35 预检卡：静态扫描的同一条明细不再说两遍", (pcText.match(/写\/删文件\(2 个文件\)/g) || []).length <= 2, (pcText.match(/写\/删文件\(2 个文件\)/g) || []).length);
+
+	/* 决定条在，详细判据进折叠 */
+	resetHooks();
+	const waitDetail = t.JobDetail({ job: waitingJob });
+	const waitDetailText = waitDetail ? textOf(waitDetail).join(" | ") : "";
+	check("R35 等待确认：先给决定条", waitDetailText.includes("为什么停下来"), waitDetailText.slice(0, 200));
+	/* ⚠️ 不能用「文本里看不到预检正文」来判折叠：textOf 会把 <details> 里的子节点也读出来
+	   （React 里它们本来就被渲染了，只是视觉上收起）。判据必须是**结构**：预检卡挂在 details 下。 */
+	check("R35 等待确认：详细判据收进折叠（预检不是顶层直挂）", (() => {
+		const why = findNodes(waitDetail, (p) => p && typeof p.className === "string" && p.className.includes("dpi-why"));
+		if (why.length !== 1) return false;
+		const kids = [].concat((why[0].props && why[0].props.children) || []);
+		return kids.some((kid) => kid && kid.type === t.PrecheckCard);
+	})(), "预检卡应作为 <details> 的子节点");
+} else {
+	check("__test 暴露了 DecisionBar", false);
 }
 
 /* 条数自对表：断言被删/被加都会在这里当场红（数源码不可靠，见 EXPECTED_TOTAL 的注释） */

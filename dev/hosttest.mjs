@@ -88,6 +88,7 @@ import {
 	UNDECIDED_BUILD,
 	classifyPnpmFailure,
 	describeInstallFailure,
+	explainPnpmOutput,
 	ignoredBuildNames,
 	parseAllowBuilds,
 	pendingBuildFinding
@@ -2132,6 +2133,25 @@ async function main() {
 	eq("policy: 没有这个块 = 空", parseAllowBuilds("packages:\n  - .\n").pending, []);
 
 	eq("pnpm: 认出构建脚本被拦", classifyPnpmFailure({ output: "ERR_PNPM_IGNORED_BUILDS Ignored build scripts: x" }), "build-blocked");
+	/* R35：宿主给 pnpm 传的 minimumReleaseAge 触发后缺回调（2026-10-30 实测：升级 modsearch 连卸载都失败） */
+	eq("R35 pnpm: 认出「策略违规但没接回调」这一类",
+		classifyPnpmFailure({ output: "[ERR_PNPM_RESOLUTION_POLICY_VIOLATIONS_UNHANDLED] 6 resolution-policy violations were produced" }),
+		"resolution-policy");
+	const realRemoveOutput = [
+		"✓ Lockfile passes supply-chain policies (verified 54m ago)",
+		"Progress: resolved 1, reused 0, downloaded 0, added 0",
+		"Progress: resolved 33, reused 8, downloaded 0, added 0",
+		"[ERR_PNPM_RESOLUTION_POLICY_VIOLATIONS_UNHANDLED] 6 resolution-policy violations were produced but no handleResolutionPolicyViolations callback was wired to react to them.",
+		"",
+		"Internal: resolveDependencies needs a handleResolutionPolicyViolations callback whenever a policy that can produce violations (today: minimumReleaseAge) is active."
+	].join("\n");
+	const explainedRemove = explainPnpmOutput(realRemoveOutput);
+	ok("R35 pnpm: 从整段输出里挑出**真正那一行**（不是那句 ✓ 成功信息）",
+		/^\[ERR_PNPM_RESOLUTION_POLICY_VIOLATIONS_UNHANDLED\]/.test(explainedRemove.line || ""), explainedRemove.line);
+	ok("R35 pnpm: 这一行不再出现误导性的「✓ Lockfile passes…」", !/✓|Lockfile passes/.test(explainedRemove.line || ""), explainedRemove.line);
+	ok("R35 pnpm: 带上大白话与真处置（等 / 加豁免 / 先不升级 / 查是哪几个）",
+		explainedRemove.fix.length >= 3 && /放一放|等一等|窗口/.test(explainedRemove.plain || ""), { fix: explainedRemove.fix.length, plain: (explainedRemove.plain || "").slice(0, 80) });
+	eq("R35 pnpm: 跟策略无关的输出不被硬套", explainPnpmOutput("EINTEGRITY sha512-abc").kind, "integrity");
 	eq("pnpm: 认出 404", classifyPnpmFailure({ output: "ERR_PNPM_FETCH_404 Not Found - GET https://reg/x" }), "not-found");
 	eq("pnpm: 认出没有匹配版本", classifyPnpmFailure({ output: "ERR_PNPM_NO_MATCHING_VERSION No matching version found" }), "no-matching-version");
 	eq("pnpm: 认出磁盘满", classifyPnpmFailure({ output: "ENOSPC: no space left on device" }), "disk-full");
@@ -2264,6 +2284,12 @@ async function main() {
 	ok("inject: 已有声明时提示追加而不是覆盖", /现有/.test(injectFixLine(["skills"], ["tools"])));
 	eq("inject: 从宿主原话里取出服务名", servicesFromHostError('imgops (dsh-imgops): Error: cannot get property "tools" without inject'), ["tools"]);
 	eq("inject: 宿主原话认不出时返回空", servicesFromHostError("某个别的错"), []);
+	/* R35：`pending (waiting for service: X)` 也要读出服务名 —— 它跟「缺 inject」是两种病。
+	   2026-10-30 实测：dsh-ffmpeg 被面板误诊成「缺 export const inject」，真因是整个宿主没人提供 tools。 */
+	eq("R35 inject: 认出 pending (waiting for service: X)",
+		servicesFromHostError("ffmpeg (dsh-ffmpeg): pending (waiting for service: tools)"), ["tools"]);
+	eq("R35 inject: 两种写法混在一起时去重",
+		servicesFromHostError('a: cannot get property "tools" without inject\nb: pending (waiting for service: tools)'), ["tools"]);
 
 	/* R26.2：两个误判的实证修正 ——
 	   ① `ctx.interval()` 是 timer 服务的方法，不是名为 interval 的服务；

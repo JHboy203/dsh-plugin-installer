@@ -956,6 +956,45 @@ window.__ModuleLoader__.load({
 			);
 		}
 
+		/* R35：「等待确认」以前是两张巨卡（安全预检 + 用途 vs 权限），里面还有重复段落 ——
+		   用户原话：「安装过程也需要简化，信息有点太多，不知道该看哪个」。
+		   现在先给一个**决定条**：为什么停下来（一句）+ 它要什么（能力 chips）+ 有没有安装期脚本；
+		   详细判据收进一个折叠（点一下全在）。 */
+		function DecisionBar(props) {
+			const job = props.job || {};
+			const pc = job.precheck || {};
+			const purpose = pc.purpose || null;
+			const risks = pc.risks || {};
+			const caps = String(risks.summary || "")
+				.split("、")
+				.map((s) => s.trim())
+				.filter((s) => s && !/^组合信号/.test(s));
+			const scripts = (risks.scripts || []).map((s) => s.name).filter(Boolean);
+			const purposeLabel = (purpose && purpose.purpose && purpose.purpose.label) || null;
+			const never = (purpose && purpose.unexpected) || [];
+			let why;
+			if (pc.blocked) why = "安全预检判定不能装（下面写清了原因）";
+			else if (purpose && purpose.verdict === "error" && purposeLabel) {
+				why = "它自称「" + purposeLabel + "」，却要" +
+					(never.length > 0 ? never.map((u) => u.label).slice(0, 4).join("、") : "这些能力") +
+					" —— 不像这个用途该有的，所以停下来先问你";
+			} else if (purpose && purpose.verdict === "warn" && purposeLabel) {
+				why = "它比「" + purposeLabel + "」该有的多要了一点，看一眼再决定";
+			} else if (pc.needsConfirm) why = "有 " + (caps.length || "几") + " 类能力需要你点头";
+			else why = "预检要你确认一下";
+			return h(
+				"div",
+				{ className: "dpi-decide" },
+				h("div", { className: "dpi-decide-why" }, h("b", null, "为什么停下来："), why),
+				caps.length > 0
+					? h("div", { className: "dpi-decide-caps" }, caps.map((cap, i) => h("span", { key: "cap" + i, className: "dpi-chip" }, cap)))
+					: null,
+				scripts.length > 0
+					? h("div", { className: "dpi-decide-flag" }, "⚠ 它带安装期脚本（" + scripts.join("、") + "）：确认后会真的在本机跑")
+					: null
+			);
+		}
+
 		/* 预检结论 */
 		function PrecheckCard(props) {
 			const pc = props.precheck;
@@ -985,8 +1024,15 @@ window.__ModuleLoader__.load({
 				blocks.length > 0
 					? h("ul", { className: "dpi-list dpi-list-block" }, blocks.map((r, i) => h("li", { key: "b" + i }, h("b", null, r.text), r.detail ? h("span", { className: "dpi-detail" }, r.detail) : null)))
 					: null,
+				/* R35：去掉两处「同一件事说两遍」——
+				   ① 「权限与用途不符」那条 warn 的 detail 与下面的「用途 vs 权限」卡逐字重复；
+				   ② 「静态扫描发现…」那条 warn 的 detail 与紧接着的 `静态扫描：…` 行重复。
+				   判据：purpose 卡在场时跳过 ①；静态扫描那行只留标题，明细交给下面那次（可展开）。 */
 				warns.length > 0
-					? h("ul", { className: "dpi-list dpi-list-warn" }, warns.map((r, i) => h("li", { key: "w" + i }, h("b", null, r.text), r.detail ? h("span", { className: "dpi-detail" }, r.detail) : null)))
+					? h("ul", { className: "dpi-list dpi-list-warn" }, warns
+						.filter((r) => !(pc.purpose && /权限与用途不符/.test(String(r.text || ""))))
+						.map((r, i) => h("li", { key: "w" + i }, h("b", null, r.text),
+							r.detail && !/静态扫描/.test(String(r.text || "")) ? h("span", { className: "dpi-detail" }, r.detail) : null)))
 					: null,
 				h(
 					"div",
@@ -1473,7 +1519,7 @@ window.__ModuleLoader__.load({
 				   事后的证据统一收进「技术细节」；只有「等待确认」时预检留在外面（那是按不按的依据）。 */
 				h(StageProgress, { stages: job.stages, status: job.status }),
 
-				job.status === "awaiting-confirm" ? h(PrecheckCard, { precheck: job.precheck }) : null,
+				job.status === "awaiting-confirm" ? h(DecisionBar, { job }) : null,
 
 				job.status === "awaiting-confirm"
 					? h("div", { className: "dpi-actions" },
@@ -1482,6 +1528,13 @@ window.__ModuleLoader__.load({
 						h("button", { className: "dpi-btn", disabled: busy !== null, onClick: () => act("cancel") }, "取消"),
 						h("span", { className: "dpi-muted" }, "有告警才停下来问你；确认后秒装。")
 					)
+					: null,
+
+				/* R35：详细判据收进一个折叠 —— 想核对的点开，不想看的不必先滚过两屏。 */
+				job.status === "awaiting-confirm"
+					? h("details", { className: "dpi-hits dpi-why" },
+						h("summary", null, "凭什么这么判（安全预检 / 用途对账 / 扫描命中）"),
+						h(PrecheckCard, { precheck: job.precheck }))
 					: null,
 
 				h(JobTechFold, { job }),
@@ -2846,7 +2899,16 @@ window.__ModuleLoader__.load({
 .dpi-pill-error{color:var(--dsw-alias-state-error-primary);background:color-mix(in srgb,var(--dsw-alias-state-error-primary) 13%,transparent)}
 .dpi-pill-idle{color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-layer-2)}
 .dpi-stages{list-style:none;margin:6px 0 10px;padding:0;display:flex;flex-direction:column;gap:3px}
-/* R34 进度条：每一步一段；还在跑的那段呼吸，跑完就安静下来 */
+/* R35：等待确认时的「决定条」—— 一句话 + 能力 chips + 安装期脚本提醒 */
+.dpi-decide{margin:8px 0 6px;padding:10px 12px;border-radius:8px;border:1px solid var(--dsw-alias-line,rgba(127,127,127,.22));
+ background:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#c48b1d) 7%,transparent)}
+.dpi-decide-why{font-size:13px;line-height:1.6}
+.dpi-decide-why b{font-weight:600}
+.dpi-decide-caps{display:flex;flex-wrap:wrap;gap:5px;margin-top:7px}
+.dpi-chip{font-size:11.5px;line-height:1.5;padding:1.5px 7px;border-radius:999px;
+ background:var(--dsw-alias-bg-tertiary,rgba(127,127,127,.14));color:var(--dsw-alias-label-secondary);white-space:nowrap}
+.dpi-decide-flag{margin-top:7px;font-size:12px;color:var(--dsw-alias-state-warn-primary,#c48b1d)}
+
 .dpi-progress{margin:2px 0 8px}
 .dpi-progress-btn{display:flex;align-items:center;gap:8px;width:100%;background:none;border:0;padding:4px 0;cursor:pointer;color:inherit;font:inherit;text-align:left}
 .dpi-progress-track{display:flex;gap:3px;flex:1;min-width:0}
@@ -3142,6 +3204,8 @@ window.__ModuleLoader__.load({
 			StageProgress,
 			JobTechFold,
 			HostDownBanner,
+			/* R35：等待确认时的「决定条」 */
+			DecisionBar,
 			StageList,
 			/* R30：界面打磨 —— 顶部品牌块 / 历史两行 / 空态 / 自绘图标（无头渲染要能验） */
 			History,
