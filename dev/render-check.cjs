@@ -175,7 +175,7 @@ function textOf(node, acc) {
  * 正常不执行，所以**数源码不等于数断言**（实测 103 处、只跑 80 条）。真正的判据只能是
  * 「这次实际跑了几条」，所以由脚本自己报总数、并由自己比对。
  */
-const EXPECTED_TOTAL = 189;
+const EXPECTED_TOTAL = 190;
 
 let failed = 0;
 let passed = 0;
@@ -1293,6 +1293,14 @@ if (typeof t.JobTechFold === "function") {
 	})());
 	resetHooks();
 	check("R34 技术细节：没有什么可折的时候不渲染", t.JobTechFold({ job: { id: "x", status: "done" } }) == null);
+
+	/* 回归（本轮真踩过）：审查卡**只该在折叠里**。改版时漏删了 JobDetail 里那一行，
+	   结果它一直挂在折叠外面 —— 实测那一张 507px，占掉整张历史卡的一半高度。 */
+	resetHooks();
+	const detailEl = t.JobDetail({ job: foldJob });
+	const detailText = detailEl ? textOf(detailEl).join(" | ") : "";
+	check("R34 历史卡：审查卡正文默认不出现在折叠外面（只在「技术细节」里）",
+		!detailText.includes("判 safe 不单独放行"), detailText.slice(0, 320));
 } else {
 	check("__test 暴露了 JobTechFold", false);
 }

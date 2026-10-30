@@ -1487,7 +1487,8 @@ window.__ModuleLoader__.load({
 				h(JobTechFold, { job }),
 
 				h(DiagnosisCard, { diagnosis: job.diagnosis }),
-				h(ReviewCard, { review: job.review }),
+				/* ⚠️ 审查卡**只在 JobTechFold 里**渲染。这里以前还有一份（R34 改版时漏删），
+				   结果它一直挂在折叠外面 —— 实测那一张就占 507px，占掉整张历史卡的一半高度。 */
 
 				job.rollback
 					? h("div", { className: "dpi-card" },
