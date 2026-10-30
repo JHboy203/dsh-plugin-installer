@@ -48,10 +48,10 @@ export const FROZEN_DEFAULTS = {
 };
 
 /** 文档里声明的自检项数（改断言就先跑一次 host_selfcheck，再同步这个数）。 */
-export const EXPECTED_ASSERTIONS = 1034;
+export const EXPECTED_ASSERTIONS = 1045;
 
 /** 界面自检项数（dev/render-check.cjs）。同样是「文档对表」的一半。 */
-const EXPECTED_RENDER_ASSERTIONS = 237;
+const EXPECTED_RENDER_ASSERTIONS = 243;
 
 /** 期望注册的宿主工具（漏一个 = 模型看不见一项能力）。R32 起 6 个（新增只读探针）。 */
 const EXPECTED_TOOLS = [
@@ -199,6 +199,13 @@ async function main() {
 	ok("更新比对：有 TTL 缓存（不重复打 registry）", /memoizeTtl/.test(updSrc || ""));
 	ok("check-updates 只在动作里跑（不挂在 /state 轮询上）", /check-updates/.test(indexSrc2) && !/checkUpdates\(|inventory\(/.test(((pipelineSrc.match(/async snapshotState[\s\S]{0,900}/) || [""])[0])));
 	ok("面板把已装清单接进「清单」浮窗（R36）", /h\(Inventory, \{ inWindow: true \}\)/.test(clientSrc) && /"\/inventory"/.test(clientSrc));
+
+	/* R37：两个「检查更新」合并成一个。用户直接提的诉求 —— 接线错了界面就会回到两个入口，
+	   而两边各查各的时，MCP 的更新永远躲在浮窗里没人点。 */
+	ok("R37：面板只发 check-all-updates（不再单独发 check-mcp-updates）",
+		/check-all-updates/.test(clientSrc) && !/action: "check-mcp-updates"/.test(clientSrc));
+	ok("R37：宿主提供 checkAllUpdates 且 index 暴露动作",
+		/async checkAllUpdates\(/.test(pipelineSrc) && /check-all-updates/.test(indexSrc2));
 	eq("界面自检项数与文档一致", await declaredRenderAssertions(), EXPECTED_RENDER_ASSERTIONS);
 
 	/* R12.1：指纹只在 codestamp.js 加载时算一次，而宿主是**逐文件**换新的 ——

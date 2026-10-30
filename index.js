@@ -317,7 +317,10 @@ export async function apply(ctx) {
 						return json(res, 503, { ok: false, error: "宿主还没重启：MCP 清单是新代码（lib/pipeline.js 不热重载）" });
 					}
 					const mcp = await installer.mcpView();
-					return json(res, 200, { ok: true, mcp });
+					/* R37：把上一条更新检查的缓存一起回传 —— 面板热重载 / 重开之后，
+					   MCP 的「可升级 / 无法判断」要和插件那边一样还在（30 分钟内有效）。 */
+					const updates = typeof installer.mcpUpdatesCached === "function" ? installer.mcpUpdatesCached() : null;
+					return json(res, 200, { ok: true, mcp, updates });
 				}
 
 				/* R13：激活视图 —— 「我装的东西现在都在跑吗」。
@@ -383,6 +386,16 @@ export async function apply(ctx) {
 						}
 						const updates = await installer.checkUpdates();
 						return json(res, 200, { ok: true, inventory: updates, state: await installer.snapshotState() });
+					}
+					else if (action === "check-all-updates") {
+						/* R37：面板上唯一的「检查更新」—— 一次跑两条链（插件 + MCP）。
+						   pipeline.checkAllUpdates() 用 allSettled 隔离失败：一半挂了，
+						   另一半的结果照样回给面板，错误写进 inventory.error / mcpError。 */
+						if (typeof installer.checkAllUpdates !== "function") {
+							return json(res, 503, { ok: false, error: "宿主还没重启：合并更新检查是新代码（lib/pipeline.js 不热重载）" });
+						}
+						const all = await installer.checkAllUpdates();
+						return json(res, 200, { ...all, state: await installer.snapshotState() });
 					}
 					else if (action === "approve-builds") {
 						/* R9：批准「待决定的安装脚本」并重试。名单由面板从任务里带上来，

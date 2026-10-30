@@ -23,7 +23,7 @@ window.__ModuleLoader__.load({
 		/* 客户端 build 号（R5.1）：改 client.js 就提一位。
 		   client 会热重载、但没人保证「当前页面跑的是哪一版」—— 这个号随 client-state
 		   一起上报，宿主 /health 的 clientReport.build 就是答案（宿主侧另有 mtime 标签）。 */
-		const BUILD = "r36.1";
+		const BUILD = "r37.2";
 
 		/* ── 迷你 store（模块级，面板关着时图标也在用）──────────────────── */
 
@@ -1673,26 +1673,58 @@ window.__ModuleLoader__.load({
 				});
 		}
 
-		function runCheckUpdates() {
-			setLocal({ invBusy: true });
-			return api("/action", { method: "POST", body: JSON.stringify({ action: "check-updates" }) })
+		/**
+		 * R37：合并检查完成后的一句话摘要（toast 用）。
+		 *
+		 * 单独抽成纯函数，是因为这里有一个很容易说假话的判据：**0 条可检查 ≠ 都是最新的**。
+		 * 本机没有 MCP 时，第一版就把 checked=0 说成了「MCP 都是最新的」—— 面板上那条却写着
+		 * 「没有可检查的条目」，两处自相矛盾。现在两处共用同一套措辞，并由 render-check 钉住。
+		 */
+		function checkAllSummaryText(inventory, mcpUpdates, mcpError) {
+			const sum = inventory && inventory.summary;
+			const msum = mcpUpdates && mcpUpdates.summary;
+			const parts = [];
+			if (inventory && inventory.ok === false) parts.push("插件检查失败");
+			else if (sum) parts.push(sum.outdated > 0 ? "插件可升级 " + sum.outdated + " 个" : "插件都是最新的");
+			if (mcpError) parts.push(mcpError);
+			else if (msum) {
+				parts.push(msum.checked === 0
+					? "MCP 没有可检查的条目"
+					: msum.outdated > 0
+						? "MCP 可升级 " + msum.outdated + " 台"
+						: "MCP 都是最新的");
+			}
+			return parts.length ? parts.join(" · ") : "检查完成";
+		}
+
+		/**
+		 * R37：一次点击检查两类更新（插件 + MCP）。
+		 *
+		 * 以前主面板一个「检查更新」、已装 MCP 浮窗里又一个，各查各的 ——
+		 * 用户得记住「MCP 的更新在另一个窗口里查」。现在只有这一个入口：
+		 * 宿主侧 checkAllUpdates() 把两条链都跑完（一条失败不拖垮另一条），
+		 * 这里一次写回两边的结果，摘要也在同一条里说清。
+		 */
+		function runCheckAllUpdates() {
+			setLocal({ invBusy: true, mcpBusy: true });
+			return api("/action", { method: "POST", body: JSON.stringify({ action: "check-all-updates" }) })
 				.then((r) => {
 					if (r && r.state) setStore({ data: r.state });
-					if (!r || r.ok === false) {
-						toast((r && r.error) || "检查更新失败");
+					if (!r) return r;
+					if (r.ok === false) {
+						toast(r.error || "检查更新失败");
 						return r;
 					}
 					if (r.inventory) setLocal({ inventory: r.inventory });
-					const sum = r.inventory && r.inventory.summary;
-					if (!sum) toast("检查完成");
-					else if (sum.outdated > 0) toast("发现 " + sum.outdated + " 个可升级");
-					else toast("都是最新的（比对 " + sum.checked + " 个，查不到 " + sum.failed + " 个）");
+					if (r.mcp) setLocal({ mcp: r.mcp });
+					if (r.mcpUpdates) setLocal({ mcpUpdates: r.mcpUpdates });
+					toast(checkAllSummaryText(r.inventory, r.mcpUpdates, r.mcpError));
 					return r;
 				})
 				.catch((e) => {
 					toast("检查更新失败：" + String((e && e.message) || e));
 				})
-				.finally(() => setLocal({ invBusy: false }));
+				.finally(() => setLocal({ invBusy: false, mcpBusy: false }));
 		}
 
 		/* R26：批量升级 —— 串行排队、一次一单；只升 npm 来源（本地 .tgz 要重新打包，排不了队）。
@@ -1799,7 +1831,9 @@ window.__ModuleLoader__.load({
 						setLocal({ mcp: view });
 						return view;
 					}
-					setLocal({ mcp: r.mcp });
+					/* R37：宿主把上一条更新检查的结果一起回传（30 分钟内），
+					   面板重开 / 热重载后 MCP 的「可升级 / 无法判断」不会莫名消失。 */
+					setLocal(r.updates ? { mcp: r.mcp, mcpUpdates: r.updates } : { mcp: r.mcp });
 					return r.mcp;
 				})
 				.catch((e) => {
@@ -2241,7 +2275,8 @@ window.__ModuleLoader__.load({
 		 * 「哪些落后了」这个问题从来没被回答过。这块补的就是这个视角。
 		 *
 		 * 数据：GET /inventory（宿主**本地读** profile，30 秒缓存，不联网）；
-		 * 点「检查更新」才走 POST action:check-updates（registry 结果另有 30 分钟 TTL）。
+		 * R37 起联网检查只有主面板「插件与 MCP 更新」一个入口（action:check-all-updates），
+		 * 这张卡只显示结果，不再自己发请求。
 		 * 判据在 lib/inventory.js + lib/updates.js —— link: / file: / git 这三类**不参与**比对，
 		 * 它们没有「registry 上的新版本」，硬比会产出假的「落后」。 */
 		function Inventory({ inWindow } = {}) {
@@ -2355,8 +2390,8 @@ window.__ModuleLoader__.load({
 					/* 浮窗标题由 FloatWindow 负责，卡里不再重复一遍「已装插件」 */
 					inWindow ? null : h("strong", null, "已装插件"),
 					h("span", { className: "dpi-muted" }, headline),
-					/* R36：「检查更新」「全部升级」已搬到主面板的 UpdateBar（清单收进浮窗后，
-					   这两个动作不能跟着一起藏起来）。这里只留窗口内自己的「展开/收起」。 */
+					/* R36/R37：「检查更新」「全部升级」已搬到主面板的 UpdateBar（清单收进浮窗后，
+					   这两个动作不能跟着一起藏起来；R37 起面板上只有那一个检查入口）。这里只留窗口内自己的「展开/收起」。 */
 					inWindow
 						? null
 						: h("button", { className: "dpi-btn dpi-btn-sm", style: { marginLeft: "auto" }, disabled: !counts, onClick: () => setOpen(!open) },
@@ -2371,7 +2406,7 @@ window.__ModuleLoader__.load({
 					: h("div", { className: "dpi-muted" },
 						inv && inv.ok === false
 							? ""
-							: "还没比对过最新版。点主面板的「检查更新」才联网（只查 npm 来源的包；本机目录 / 本面板装的 .tgz / Git 来源不参与）。"),
+							: "还没比对过最新版。点主面板「插件与 MCP 更新」的「检查更新」才联网（只查 npm 来源的包；本机目录 / 本面板装的 .tgz / Git 来源不参与）。"),
 				problems.length > 0 && !isOpen
 					? h("div", { className: "dpi-muted" }, "· " + problems.length + " 个依赖「声明了但没落地」（展开看，或用环境体检细查）")
 					: null,
@@ -2631,38 +2666,72 @@ window.__ModuleLoader__.load({
 
 		/* ── R36：独立更新条 / 清单菜单 / 浮窗 / 已装 MCP ─────────────────── */
 
+		/** 插件更新摘要（更新条与「已装插件」浮窗共用一套措辞）。 */
+		function pluginUpdateText(summary, at) {
+			const bits = [
+				summary.outdated > 0 ? "可升级 " + summary.outdated + " 个" : "都是最新的",
+				"比对 " + summary.checked,
+				"最新 " + summary.current
+			];
+			if (summary.ahead) bits.push("比 registry 新 " + summary.ahead);
+			if (summary.failed) bits.push("查不到 " + summary.failed);
+			return bits.join(" · ") + (at ? " · " + ago(at) : "");
+		}
+
+		/** MCP 更新摘要 —— 单独一条，因为 MCP 有「无法判断」这一档（没有版本源）。 */
+		function mcpUpdateText(summary, at) {
+			if (summary.checked === 0) return "没有可检查的条目（先装一台）";
+			const bits = [
+				summary.outdated > 0 ? "可升级 " + summary.outdated + " 台" : "都是最新的",
+				"比对 " + summary.checked,
+				"无法判断 " + (summary.undetectable + summary.failed)
+			];
+			if (summary.failed) bits.push("其中查不到 " + summary.failed);
+			if (at) bits.push(ago(at));
+			return bits.join(" · ");
+		}
+
 		/**
-		 * 「检查更新」不再藏在「已装插件」卡里 —— 清单收进浮窗后，这是主面板上唯一
-		 * 的更新入口。顺带保留「全部升级」与「看清单」，不用先打开浮窗。
+		 * R37：主面板上**唯一**的更新入口 —— 一次点击同时检查插件与 MCP。
+		 *
+		 * 以前这里是「插件更新」，MCP 的更新检查藏在「已装 MCP」浮窗里；两处都叫
+		 * 「检查更新」，用户得记住去哪个窗口查。现在一个按钮、两条链、一份结果。
 		 */
 		function UpdateBar({ onOpenList } = {}) {
 			const s = useStore();
 			const inv = s.local.inventory || null;
+			const mcp = s.local.mcp || null;
+			const mcpUpdates = s.local.mcpUpdates || null;
 			const counts = (inv && inv.counts) || null;
+			const mcpCounts = (mcp && mcp.counts) || null;
 			const summary = (inv && inv.summary) || null;
+			const mcpSummary = (mcpUpdates && mcpUpdates.summary) || null;
 			const items = (inv && inv.items) || [];
 			const outdated = items.filter((item) => item.update && item.update.relation === "outdated");
-			const busy = s.local.invBusy;
+			const busy = Boolean(s.local.invBusy || s.local.mcpBusy);
 			const collab = (s.data && s.data.collaborator) || null;
 			const collabOk = Boolean(collab && collab.ok);
 			useEffect(() => {
 				if (!s.local.inventory && !s.local.invBusy) loadInventory();
+				/* R37：MCP 的规模也要在这一条里看见 —— 合并之后，这里就是唯一的更新入口。 */
+				if (!s.local.mcp && !s.local.mcpBusy) loadMcp();
 			}, []);
 			const headline = inv && inv.ok === false
 				? "读不到：" + (inv.error || inv.note || "未知原因")
 				: counts
-					? counts.total + " 个依赖 · " + counts.bundle + " 个在 bundle 行里"
+					? counts.total + " 个依赖 · " + counts.bundle + " 个在 bundle 行里" +
+						(mcpCounts ? " · " + mcpCounts.total + " 台 MCP" : "")
 					: "读取中…";
 			return h("div", { className: "dpi-card dpi-updatebar" },
 				h("div", { className: "dpi-card-head" },
-					h("strong", null, "插件更新"),
+					h("strong", null, "插件与 MCP 更新"),
 					h("span", { className: "dpi-muted" }, headline),
 					h("button", {
 						className: "dpi-btn dpi-btn-primary dpi-btn-sm",
 						style: { marginLeft: "auto" },
 						disabled: busy,
-						title: "联网比对 npm registry 上每个包的最新版（30 分钟内同结果走缓存）",
-						onClick: runCheckUpdates
+						title: "一次联网比对：npm 上每个插件包的最新版 + MCP（Registry / 锁版本的 npx 包）；30 分钟内同结果走缓存。MCP 没有版本源的会如实标「无法判断」",
+						onClick: runCheckAllUpdates
 					}, busy ? "检查中…" : "检查更新"),
 					outdated.length > 0
 						? h("button", {
@@ -2678,16 +2747,19 @@ window.__ModuleLoader__.load({
 						? h("button", { className: "dpi-btn dpi-btn-sm", onClick: () => onOpenList("plugins") }, "看清单")
 						: null),
 				summary
-					? h("div", { className: "dpi-muted" },
-						"更新：" + (summary.outdated > 0 ? "可升级 " + summary.outdated + " 个" : "都是最新的") +
-						"（比对 " + summary.checked + " · 最新 " + summary.current +
-						(summary.ahead ? " · 比 registry 新 " + summary.ahead : "") +
-						(summary.failed ? " · 查不到 " + summary.failed : "") + "）" +
-						(inv && inv.updatesAt ? " · " + ago(inv.updatesAt) : ""))
+					? h("div", { className: "dpi-muted" }, "插件：" + pluginUpdateText(summary, inv && inv.updatesAt))
 					: h("div", { className: "dpi-muted" },
 						inv && inv.ok === false
 							? ""
-							: "还没比对过最新版。点「检查更新」才联网（只查 npm 来源的包；本机目录 / 本面板装的 .tgz / Git 来源不参与）。"),
+							: "插件：还没比对过最新版（只查 npm 来源的包；本机目录 / 本面板装的 .tgz / Git 来源不参与）。"),
+				mcpSummary
+					? h("div", { className: "dpi-muted" }, "MCP：" + mcpUpdateText(mcpSummary, mcpUpdates && mcpUpdates.at))
+					: h("div", { className: "dpi-muted" },
+						mcp && mcp.ok === false
+							? "MCP：读不到 —— " + (mcp.error || "未知原因")
+							: mcpCounts && mcpCounts.total > 0
+								? "MCP：还没检查过（" + mcpCounts.total + " 台；没有版本源的会如实标「无法判断」）。"
+								: "MCP：还没配置（没有条目可比对）。"),
 				outdated.length > 0
 					? h("div", { className: "dpi-muted" },
 						collabOk
@@ -2773,6 +2845,9 @@ window.__ModuleLoader__.load({
 		/**
 		 * R36：已装 MCP —— 读的是 profile 组合文件里的 dsh-mcp-client 条目，
 		 * 并用「工具表里有没有 mcp__<server>__*」判断它到底跑没跑。
+		 *
+		 * R37：这里**不再单独联网检查更新** —— 主面板的「检查更新」一次查完插件和 MCP，
+		 * 这个浮窗只显示同一份结果；「刷新」仍然只读本地组合文件。
 		 */
 		/** R36：MCP 行上的更新标记（可升级 / 最新 / 无法判断）。 */
 		function mcpUpdateTag(item, updates) {
@@ -2803,24 +2878,6 @@ window.__ModuleLoader__.load({
 			useEffect(() => {
 				if (!s.local.mcp && !s.local.mcpBusy) loadMcp();
 			}, []);
-			const check = () => {
-				setLocal({ mcpBusy: true });
-				api("/action", { method: "POST", body: JSON.stringify({ action: "check-mcp-updates" }) })
-					.then((r) => {
-						if (r && r.mcp) setLocal({ mcp: r.mcp });
-						if (r && r.updates) setLocal({ mcpUpdates: r.updates });
-						if (!r || r.ok === false) {
-							toast((r && (r.error || r.message)) || "MCP 更新检查失败");
-							return;
-						}
-						const sum = r.updates && r.updates.summary;
-						if (!sum) toast("检查完成");
-						else toast("MCP 更新：可升级 " + sum.outdated + " · 最新 " + sum.current +
-							" · 无法判断 " + (sum.undetectable + sum.failed));
-					})
-					.catch((e) => toast("MCP 更新检查失败：" + String((e && e.message) || e)))
-					.finally(() => setLocal({ mcpBusy: false }));
-			};
 			const counts = (view && view.counts) || null;
 			const items = (view && view.items) || [];
 			const summary = (updates && updates.summary) || null;
@@ -2838,25 +2895,15 @@ window.__ModuleLoader__.load({
 						className: "dpi-btn dpi-btn-sm",
 						style: { marginLeft: "auto" },
 						disabled: busy,
-						title: "有来源台账的查 Registry、锁版本的 npx 包查 npm；其余如实标「无法判断」",
-						onClick: check
-					}, busy ? "检查中…" : "检查更新"),
-					h("button", {
-						className: "dpi-btn dpi-btn-sm",
-						disabled: busy,
 						title: "重新读 profile 的两份组合文件（本地，不联网）",
 						onClick: () => loadMcp(true)
 					}, busy ? "刷新中…" : "刷新")),
+				h("div", { className: "dpi-muted" },
+					"更新检查在主面板「插件与 MCP 更新」里一起查 —— 这里只显示同一份结果，不再单独联网。"),
 				summary
-					? h("div", { className: "dpi-muted" },
-						summary.checked === 0
-							? "没有可检查的 MCP 条目（先装一台再点「检查更新」）"
-							: "更新：" + (summary.outdated > 0 ? "可升级 " + summary.outdated + " 台" : "都是最新的") +
-								"（比对 " + summary.checked + " · 无法判断 " + (summary.undetectable + summary.failed) +
-								(summary.failed ? "（其中查不到 " + summary.failed + "）" : "") +
-								(updates && updates.at ? " · " + ago(updates.at) : "") + "）")
+					? h("div", { className: "dpi-muted" }, "更新：" + mcpUpdateText(summary, updates && updates.at))
 					: h("div", { className: "dpi-muted" },
-						"还没检查过 MCP 更新。MCP 没有统一的版本源：面板从 Registry 装的会记版本；手工 npx 未锁版本 / 远程端点只能标「无法判断」。"),
+						"还没检查过 MCP 更新。主面板的「检查更新」会一次查完插件和 MCP；MCP 没有统一的版本源：面板从 Registry 装的会记版本，手工 npx 未锁版本 / 远程端点只能标「无法判断」。"),
 				h("div", { className: "dpi-muted" },
 					"MCP 条目写在 profile 的 cordis.patch.yml；改完要重启 DSH 才加载。env / headers 的值不会显示（只显示键名）。"),
 				view && view.notes && view.notes.length > 0
@@ -3290,8 +3337,8 @@ window.__ModuleLoader__.load({
 
 				h(Composer),
 
-				/* R36：「检查更新」单独一条，不再藏在清单卡里 —— 清单已经在浮窗中，
-				   更新入口必须留在主面板。 */
+				/* R36/R37：「检查更新」单独一条，且**只有这一条** —— 插件与 MCP 一起查。
+				   清单已经在浮窗里，更新入口必须留在主面板。 */
 				h(UpdateBar, { onOpenList: (key) => setListWindow(key) }),
 
 				data.active ? h("div", { className: "dpi-card dpi-active" }, h(JobDetail, { job: data.active })) : null,
@@ -3304,7 +3351,7 @@ window.__ModuleLoader__.load({
 				h(AiBox),
 				h(History),
 				/* R36：已装插件 / 已装 Skill 已收进右上角「清单」浮窗（低频入口），
-				   主面板只留「插件更新」这一条。 */
+				   主面板只留「插件与 MCP 更新」这一条。 */
 				h(DoctorBox),
 
 				h("footer", { className: "dpi-footer" },
@@ -3319,7 +3366,7 @@ window.__ModuleLoader__.load({
 				listWindow === "plugins"
 					? h(FloatWindow, {
 						title: "已装插件",
-						subtitle: "profile 依赖 · 可升级的排在最前 · 更新入口在主面板「插件更新」",
+						subtitle: "profile 依赖 · 可升级的排在最前 · 更新入口在主面板「插件与 MCP 更新」",
 						onClose: () => setListWindow(null)
 					}, h(Inventory, { inWindow: true }))
 					: null,
@@ -3333,7 +3380,7 @@ window.__ModuleLoader__.load({
 				listWindow === "mcp"
 					? h(FloatWindow, {
 						title: "已装 MCP",
-						subtitle: "profile 组合文件里的 dsh-mcp-client 条目 · 写进去要重启 DSH 才加载",
+						subtitle: "profile 组合文件里的 dsh-mcp-client 条目 · 更新在主面板「检查更新」里一起查 · 写进去要重启 DSH 才加载",
 						onClose: () => setListWindow(null)
 					}, h(McpList, { inWindow: true }))
 					: null
@@ -3830,6 +3877,7 @@ window.__ModuleLoader__.load({
 			/* R14：已装 Skill（无头渲染要能验：折叠/展开、备份标签、宿主没认、读不到兜底） */
 			Skills,
 			/* R36：清单菜单 / 浮窗 / 已装 MCP / 独立更新条（四个新界面都要能被无头渲染验到） */
+			checkAllSummaryText,
 			UpdateBar,
 			ListMenu,
 			FloatWindow,

@@ -175,7 +175,7 @@ function textOf(node, acc) {
  * 正常不执行，所以**数源码不等于数断言**（实测 103 处、只跑 80 条）。真正的判据只能是
  * 「这次实际跑了几条」，所以由脚本自己报总数、并由自己比对。
  */
-const EXPECTED_TOTAL = 237;
+const EXPECTED_TOTAL = 243;
 
 let failed = 0;
 let passed = 0;
@@ -1470,20 +1470,39 @@ if (typeof t.UpdateBar === "function") {
 			counts: { total: 3, bundle: 2 },
 			summary: { checked: 2, outdated: 1, current: 1, ahead: 0, failed: 0 },
 			items: [{ name: "a", update: { relation: "outdated" } }]
+		},
+		mcp: { ok: true, counts: { total: 1, running: 1 }, items: [] },
+		mcpUpdates: {
+			at: "2026-10-30T14:00:00.000Z",
+			summary: { checked: 1, outdated: 1, current: 0, ahead: 0, undetectable: 0, failed: 0 },
+			items: []
 		}
 	};
 	t.store.data = { collaborator: { ok: true, line: "卸载协作：可用" } };
 	resetHooks();
 	const bar = t.UpdateBar({ onOpenList: () => {} });
 	const barText = textOf(bar).join(" | ");
-	check("R36 更新条：标题是「插件更新」", barText.includes("插件更新"), barText.slice(0, 100));
+	check("R37 更新条：标题是「插件与 MCP 更新」（一个入口两条链）", barText.includes("插件与 MCP 更新"), barText.slice(0, 100));
 	check("R36 更新条：检查更新独立出现", barText.includes("检查更新"));
+	check("R37 更新条：同一条里同时报插件与 MCP 的更新结果", barText.includes("插件：可升级 1 个") && barText.includes("MCP：可升级 1 台"), barText.slice(0, 400));
 	check("R36 更新条：可升级时给「全部升级」", barText.includes("全部升级 1"));
 	check("R36 更新条：留一个「看清单」入口", barText.includes("看清单"));
 	t.store.local = saved;
 	t.store.data = savedData;
 } else {
 	check("__test 暴露了 UpdateBar", false);
+}
+
+/* R37：合并检查的一句话摘要 —— 0 条可检查 ≠ 都是最新的（本机 0 台 MCP 时第一版说过假话）。 */
+if (typeof t.checkAllSummaryText === "function") {
+	check("R37 合并摘要：0 条可检查时说「没有可检查的条目」（不许说都是最新的）",
+		t.checkAllSummaryText({ ok: true, summary: { outdated: 2 } }, { summary: { checked: 0, outdated: 0 } }, null) === "插件可升级 2 个 · MCP 没有可检查的条目");
+	check("R37 合并摘要：两边都可升级时一句说全",
+		t.checkAllSummaryText({ ok: true, summary: { outdated: 2 } }, { summary: { checked: 1, outdated: 1 } }, null) === "插件可升级 2 个 · MCP 可升级 1 台");
+	check("R37 合并摘要：一条链失败不吞掉另一条",
+		t.checkAllSummaryText({ ok: false }, null, "MCP 更新检查失败：registry down") === "插件检查失败 · MCP 更新检查失败：registry down");
+} else {
+	check("__test 暴露了 checkAllSummaryText", false);
 }
 
 if (typeof t.McpList === "function") {
@@ -1509,13 +1528,17 @@ if (typeof t.McpList === "function") {
 		}
 	};
 	resetHooks();
-	const mcpText = textOf(t.McpList({})).join(" | ");
+	const mcpTree = t.McpList({});
+	const mcpText = textOf(mcpTree).join(" | ");
 	check("R36 MCP：卡片标题是「已装 MCP」", mcpText.includes("已装 MCP"), mcpText.slice(0, 120));
 	check("R36 MCP：报「几台 · 几台在跑」", mcpText.includes("2 台") && mcpText.includes("1 台在跑"), mcpText.slice(0, 160));
 	check("R36 MCP：运行中与未加载分开标", mcpText.includes("运行中") && mcpText.includes("已配置 · 未加载"));
 	check("R36 MCP：显示启动命令与来源文件行", mcpText.includes("npx -y @mcp/fs") && mcpText.includes("cordis.patch.yml:1"));
 	check("R36 MCP：env 只显示键名（不显示值）", mcpText.includes("env TOKEN") && !mcpText.includes("sk-"), mcpText.slice(0, 300));
-	check("R36 MCP 更新：有独立的「检查更新」按钮", mcpText.includes("检查更新"));
+	const mcpButtons = findNodes(mcpTree, (props) => typeof props.className === "string" && props.className.includes("dpi-btn"));
+	const mcpCheckButtons = mcpButtons.filter((node) => textOf(node).join(" ").includes("检查更新"));
+	check("R37 MCP 更新：不再有独立的「检查更新」按钮（合并到主面板）", mcpCheckButtons.length === 0, mcpCheckButtons.map((node) => textOf(node).join("")));
+	check("R37 MCP 更新：说清更新检查在主面板一起查", mcpText.includes("主面板") && mcpText.includes("一起查"), mcpText.slice(0, 300));
 	check("R36 MCP 更新：摘要报可升级 / 无法判断", mcpText.includes("可升级 1 台") && mcpText.includes("无法判断 1"), mcpText.slice(0, 400));
 	check("R36 MCP 更新：可升级行给目标版本", mcpText.includes("可升级 → 2.0.0"), mcpText.slice(0, 500));
 	check("R36 MCP 更新：无法判断时写明原因", mcpText.includes("无法判断") && mcpText.includes("远程端点没有版本号"), mcpText.slice(0, 600));
@@ -1583,7 +1606,8 @@ if (typeof t.Panel === "function") {
 		panelText = textOf(t.Panel({})).join(" | ");
 		check("R36 Panel：头部三件套「设置 / 清单 / 刷新」都在", panelText.includes("设置") && panelText.includes("清单") && panelText.includes("刷新"), panelText.slice(0, 200));
 		check("R36 Panel：「清单」在「设置」之后、「刷新」之前", panelText.indexOf("设置") < panelText.indexOf("清单") && panelText.indexOf("清单") < panelText.indexOf("刷新"), panelText.slice(0, 200));
-		check("R36 Panel：主面板有独立的「插件更新」条", panelText.includes("插件更新") && panelText.includes("检查更新"), panelText.slice(0, 300));
+		check("R37 Panel：主面板有「插件与 MCP 更新」条（唯一入口）", panelText.includes("插件与 MCP 更新") && panelText.includes("检查更新"), panelText.slice(0, 300));
+		check("R37 Panel：「检查更新」在整页只出现一次（两个入口已合并）", (panelText.match(/检查更新/g) || []).length === 1, (panelText.match(/检查更新/g) || []).length);
 		check("R36 Panel：清单窗口默认不挂载（低频内容不占主面板）", !panelText.includes("看一段能直接抄") && !panelText.includes("只读 profile 的两份组合文件"));
 	} catch (e) {
 		check("R36 Panel：渲染不抛异常", false, String((e && e.message) || e));
