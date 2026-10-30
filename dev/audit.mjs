@@ -48,10 +48,10 @@ export const FROZEN_DEFAULTS = {
 };
 
 /** 文档里声明的自检项数（改断言就先跑一次 host_selfcheck，再同步这个数）。 */
-export const EXPECTED_ASSERTIONS = 1009;
+export const EXPECTED_ASSERTIONS = 1018;
 
 /** 界面自检项数（dev/render-check.cjs）。同样是「文档对表」的一半。 */
-const EXPECTED_RENDER_ASSERTIONS = 169;
+const EXPECTED_RENDER_ASSERTIONS = 189;
 
 /** 期望注册的宿主工具（漏一个 = 模型看不见一项能力）。R32 起 6 个（新增只读探针）。 */
 const EXPECTED_TOOLS = [
@@ -487,8 +487,10 @@ async function main() {
 		/linkInstall/.test(String(await readText(join("lib", "pipeline.js")))));
 	ok("R31：**两个动作都不暴露给模型**（动 profile 文件只能人按）",
 		!/link-install/.test(toolsSrc) && !/add-trust-exclude/.test(toolsSrc) && !/linkInstall/.test(toolsSrc));
-	ok("R31：面板上有两张卡，且都提了 BUILD（r31.0）",
-		/function LinkInstallCard/.test(clientSrc) && /function TrustExemptCard/.test(clientSrc) && /const BUILD = "r31\.0"/.test(clientSrc));
+	/* ⚠️ 这里以前把 BUILD 钉成字面量 `r31.0` —— 每加一轮都要改测试，等于用测试阻碍发版。
+	   判据要的是「两张卡在 + client 有 build 号」，具体第几版由它自己报。 */
+	ok("R31：面板上有两张卡，且都带 BUILD 号",
+		/function LinkInstallCard/.test(clientSrc) && /function TrustExemptCard/.test(clientSrc) && /const BUILD = "r\d+\.\d+"/.test(clientSrc));
 	ok("R31：安装失败时把「直连安装」当处置动作带出来（本机目录才给）",
 		/kind: "link-install"/.test(String(await readText(join("lib", "pipeline.js")))));
 	ok("R31：体检会报「信任策略挡过安装」这一条（只报不修）",

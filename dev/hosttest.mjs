@@ -744,6 +744,46 @@ async function main() {
 	ok("crash: 真点名时保留「点名了这些插件」文案", /点名了这些插件/.test((findingC && findingC.plain) || ""), findingC && findingC.plain);
 	ok("crash: 真点名时 fix 指向点名的插件", /点名的插件/.test(((findingC && findingC.fix && findingC.fix[0] && findingC.fix[0].text) || "")), findingC && findingC.fix);
 
+	/* E（R34）：宿主启动失败的**真形态** —— 不是某个插件坏了，而是一个**服务**没人提供。
+	   2026-10-30 现场：装完插件宿主重启，`tools` 没起来，45 个插件一起等待，
+	   `/plugin-installer/*` 整块 404（用户看到的就是「面板读不到状态，每次都要重启」）。
+	   日志里那张表以前被完全忽略，只能说「日志里没有点名失败插件」。 */
+	const crashWait = dir("crashE");
+	await mkdir(crashWait, { recursive: true });
+	const hostWaitLog = join(crashWait, "crash-2026-10-30T09-01-38-579Z-host.log");
+	await writeFile(hostWaitLog, [
+		"time: 2026-10-30T09:01:38.579Z",
+		"source: host",
+		"phase: startup",
+		"app: @deepseek-ai/dsh-desktop 0.2.1-rc.5",
+		"",
+		"--- error ---",
+		"DesktopHostFatalError: dsh: startup failed: 1 required plugin did not activate",
+		"",
+		"Plugins waiting for services (45):",
+		"  Plugin                       Missing services",
+		"  agent-loop (required)        tools",
+		"  tool-working-directory       tools",
+		"  plugin-installer             tools"
+	].join("\n"), "utf8");
+	await ageFile(hostWaitLog, 10);
+	const waitTable = mHealth.parseWaitingServices(await readFile(hostWaitLog, "utf8"));
+	eq("R34 crash：认出「一片插件在等某个服务」", [waitTable.count, waitTable.services], [45, ["tools"]]);
+	eq("R34 crash：标出其中 required 的那个", waitTable.plugins.filter((p) => p.required).map((p) => p.plugin), ["agent-loop"]);
+	const readWait = await mHealth.readNewestCrash(crashWait);
+	eq("R34 crash：这张表挂到 crash.waiting 上", readWait.waiting && readWait.waiting.services, ["tools"]);
+	ok("R34 crash：签名认出「某个服务没有提供者」", /服务没有提供者/.test((readWait.signature && readWait.signature.name) || ""), readWait.signature);
+	const findingWait = (await inspectProfile({ profileDir: crashProfile, hostVersion: "0.2.1-rc.5", dataDir: dir("crashDataWait"), crashDir: crashWait, contract: false, processStartedAt: nowMs - 3 * 3600000 })).findings.find((f) => f.code === "crash-recent");
+	ok("R34 crash：detail 直说「45 个插件在等服务：tools」", /45 个插件在等服务：tools/.test((findingWait && findingWait.detail) || ""), findingWait && findingWait.detail);
+	ok("R34 crash：处置第一条就是查 dsh-tools 地雷", /dsh-tools/.test(((findingWait && findingWait.fix && findingWait.fix[0] && findingWait.fix[0].text) || "")), findingWait && findingWait.fix);
+	ok("R34 crash：不再谎称「日志里没有点名失败插件」", !/日志里没有点名失败插件/.test((findingWait && findingWait.detail) || ""), findingWait && findingWait.detail);
+
+	/* F（R34）：**凡是跑过 pnpm 的地方都要扫雷**。装回旧版 / 续跑这两条以前漏了 ——
+	   而它们恰恰是「装新版把宿主搞崩 → 自动回滚」那条最常走的路（2026-10-30 的 09:01:03）。 */
+	const pipeSrc = String(await readFile(join(pluginRoot, "lib", "pipeline.js"), "utf8"));
+	ok("R34 扫雷：装回旧版的路径跑完 pnpm 也要扫雷", /sweepLandmine\("restore:"/.test(pipeSrc));
+	ok("R34 扫雷：续跑安装的路径跑完 pnpm 也要扫雷", /sweepLandmine\("resume:"/.test(pipeSrc));
+
 	/* D：链式失败的长错误行要被压成「哪个包没起来」，renderer 里的 JS 异常要单独拎出来 */
 	const crashD = dir("crashD");
 	await mkdir(crashD, { recursive: true });

@@ -175,7 +175,7 @@ function textOf(node, acc) {
  * 正常不执行，所以**数源码不等于数断言**（实测 103 处、只跑 80 条）。真正的判据只能是
  * 「这次实际跑了几条」，所以由脚本自己报总数、并由自己比对。
  */
-const EXPECTED_TOTAL = 169;
+const EXPECTED_TOTAL = 189;
 
 let failed = 0;
 let passed = 0;
@@ -1205,6 +1205,123 @@ if (typeof t.TrustExemptCard === "function") {
 	t.store.data = savedData;
 } else {
 	check("__test 暴露了 TrustExemptCard", false);
+}
+
+/* R34：阶段时间线 → 进度条。
+   用户原话：「绿色方框简化成进度条；加载时下方浮现一行淡淡的小字显示目前正在做什么；
+   结束时不再浮现小字，但可以点开显示某一步做了什么」。这三条都必须在这里被钉住，
+   否则「简化」很容易退化成「把信息弄丢了」。 */
+if (typeof t.StageProgress === "function") {
+	const runningStages = [
+		{ key: "input", label: "① 输入接入", status: "ok", detail: "npm：dsh-ffmpeg@0.7.3", ms: 1300 },
+		{ key: "download", label: "② 下载", status: "ok", detail: "78 KiB", ms: 400 },
+		{ key: "install", label: "⑧ 安装", status: "running", detail: "正在写 profile" }
+	];
+	const doneStages = [
+		{ key: "input", label: "① 输入接入", status: "ok", detail: "npm：dsh-ffmpeg@0.7.3", ms: 1300 },
+		{ key: "install", label: "⑧ 安装", status: "fail", detail: "插件装上了，但没激活：启动时抛错", ms: 13000 }
+	];
+	resetHooks();
+	check("R34 进度条：没有阶段就不渲染", t.StageProgress({ stages: [], status: "running" }) == null);
+
+	resetHooks();
+	const runningEl = t.StageProgress({ stages: runningStages, status: "running" });
+	const runningText = runningEl ? textOf(runningEl).join(" | ") : "";
+	check("R34 进度条：跑起来时下方有一行「现在在做什么」",
+		runningText.includes("⑧ 安装") && runningText.includes("正在写 profile"), runningText.slice(0, 160));
+	check("R34 进度条：默认不把每一步全铺开（那正是要简化掉的东西）",
+		!runningText.includes("① 输入接入"), runningText.slice(0, 160));
+	check("R34 进度条：给出进度计数", /\d+\/\d+/.test(runningText), runningText.slice(0, 120));
+	check("R34 进度条：当前那段是 running（会呼吸），已完成的是 done", (() => {
+		const segs = findNodes(runningEl, (p) => p && typeof p.className === "string" && p.className.includes("dpi-progress-seg"));
+		const names = segs.map((n) => String(n.props.className));
+		return names.some((c) => c.includes("is-running")) && names.some((c) => c.includes("is-done"));
+	})());
+
+	resetHooks();
+	const doneEl = t.StageProgress({ stages: doneStages, status: "failed" });
+	const doneText = doneEl ? textOf(doneEl).join(" | ") : "";
+	check("R34 进度条：跑完就没有那行小字了", !doneText.includes("⑧ 安装"), doneText.slice(0, 160));
+	check("R34 进度条：失败时说「失败」而不是数字", doneText.includes("失败"), doneText.slice(0, 120));
+
+	resetHooks();
+	hooks[0] = true;
+	const openEl = t.StageProgress({ stages: runningStages, status: "done" });
+	const openText = openEl ? textOf(openEl).join(" | ") : "";
+	check("R34 进度条：点开后能看某一步做了什么（label + detail + 耗时）",
+		openText.includes("① 输入接入") && openText.includes("npm：dsh-ffmpeg@0.7.3") && openText.includes("1.3s"), openText.slice(0, 200));
+} else {
+	check("__test 暴露了 StageProgress", false);
+}
+
+/* R34：事后的证据收进「技术细节」，默认不糊在脸上；等待确认时预检必须留在外面（那是按不按的依据） */
+if (typeof t.JobTechFold === "function") {
+	const precheck = {
+		blocked: false,
+		needsConfirm: true,
+		severity: "medium",
+		reasons: [{ level: "warn", text: "需要确认：写/删文件(2 个文件)" }],
+		risks: { summary: "写/删文件(2 个文件)", hits: [] },
+		compat: { verdict: "ok", runtimeVersion: "0.2.1-rc.5", via: "app-boot(asar)" }
+	};
+	const foldJob = {
+		id: "job-fold",
+		status: "done",
+		detected: { kind: "bundle", name: "dsh-ffmpeg", version: "0.7.3", files: 29, bytes: 201728 },
+		precheck,
+		review: { status: "safe", verdict: "safe", summary: "未发现投放行为" },
+		install: { kind: "bundle", result: { ok: true, changed: true } }
+	};
+	resetHooks();
+	const foldEl = t.JobTechFold({ job: foldJob });
+	const foldText = foldEl ? textOf(foldEl).join(" | ") : "";
+	check("R34 技术细节：默认收起（预检理由 / 审查结论 / 回执 JSON 都不在这里）",
+		!foldText.includes("写/删文件") && !foldText.includes("未发现投放行为") && !foldText.includes("changed"), foldText.slice(0, 200));
+	check("R34 技术细节：标题写明里面有什么", foldText.includes("技术细节") && foldText.includes("安全预检"), foldText.slice(0, 160));
+
+	resetHooks();
+	hooks[0] = true;
+	const foldOpen = t.JobTechFold({ job: foldJob });
+	const foldOpenText = foldOpen ? textOf(foldOpen).join(" | ") : "";
+	check("R34 技术细节：点开后一条不少（预检理由 + 审查卡 + 回执 + 来源信息）",
+		foldOpenText.includes("写/删文件") && foldOpenText.includes("AI 语义审查") && foldOpenText.includes("changed") && foldOpenText.includes("dsh-ffmpeg"), foldOpenText.slice(0, 240));
+
+	resetHooks();
+	check("R34 技术细节：等待确认时预检**不进**折叠（它要留在外面当决策依据）", (() => {
+		const waiting = t.JobTechFold({ job: { ...foldJob, status: "awaiting-confirm" } });
+		return waiting == null || !String(textOf(waiting).join(" | ")).includes("安全预检");
+	})());
+	resetHooks();
+	check("R34 技术细节：没有什么可折的时候不渲染", t.JobTechFold({ job: { id: "x", status: "done" } }) == null);
+} else {
+	check("__test 暴露了 JobTechFold", false);
+}
+
+/* R34：宿主没起来时不再甩「响应不是 JSON（HTTP 404）」，而是说人话 + 自动重连 + 给真处置 */
+if (typeof t.HostDownBanner === "function") {
+	resetHooks();
+	const fresh = t.HostDownBanner({ host: { down: true, since: Date.now() - 5000, attempts: 2, error: "HTTP 404（返回的不是 JSON，说明这不是面板的路由）" }, onRetry: () => {} });
+	const freshText = fresh ? textOf(fresh).join(" | ") : "";
+	check("R34 掉线条：说人话（连不上宿主半边 + 第几次重连）",
+		freshText.includes("连不上宿主半边") && freshText.includes("第 2 次重连"), freshText.slice(0, 200));
+	check("R34 掉线条：给「立即重试」按钮", freshText.includes("立即重试"), freshText.slice(0, 200));
+	check("R34 掉线条：10 秒内说「正在重启」（这是最常见的真实情况）", freshText.includes("正在重启"), freshText.slice(0, 220));
+	check("R34 掉线条：保留原始错误作为证据（不隐瞒）", freshText.includes("404"), freshText.slice(0, 260));
+	check("R34 掉线条：默认不展开「怎么办」（先给结论，别一上来三屏字）", !freshText.includes("dsh-boot-guard"), freshText.slice(0, 260));
+
+	resetHooks();
+	const stale = t.HostDownBanner({ host: { down: true, since: Date.now() - 120000, attempts: 40, error: "HTTP 404" }, onRetry: () => {} });
+	const staleText = stale ? textOf(stale).join(" | ") : "";
+	check("R34 掉线条：超过一分钟改口「这次启动大概失败了」", staleText.includes("这次启动大概失败了"), staleText.slice(0, 220));
+
+	resetHooks();
+	hooks[0] = true;
+	const helped = t.HostDownBanner({ host: { down: true, since: Date.now() - 120000, attempts: 40, error: "HTTP 404" }, onRetry: () => {} });
+	const helpedText = helped ? textOf(helped).join(" | ") : "";
+	check("R34 掉线条：展开后给两条真处置（dsh-tools 地雷 / 恢复对话框别点禁用）",
+		helpedText.includes("dsh-tools") && helpedText.includes("禁用第三方插件"), helpedText.slice(0, 400));
+} else {
+	check("__test 暴露了 HostDownBanner", false);
 }
 
 /* 条数自对表：断言被删/被加都会在这里当场红（数源码不可靠，见 EXPECTED_TOTAL 的注释） */

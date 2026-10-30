@@ -23,7 +23,7 @@ window.__ModuleLoader__.load({
 		/* 客户端 build 号（R5.1）：改 client.js 就提一位。
 		   client 会热重载、但没人保证「当前页面跑的是哪一版」—— 这个号随 client-state
 		   一起上报，宿主 /health 的 clientReport.build 就是答案（宿主侧另有 mtime 标签）。 */
-		const BUILD = "r31.0";
+		const BUILD = "r34.0";
 
 		/* ── 迷你 store（模块级，面板关着时图标也在用）──────────────────── */
 
@@ -70,21 +70,41 @@ window.__ModuleLoader__.load({
 			try {
 				data = await res.json();
 			} catch (e) {
-				data = { ok: false, error: "响应不是 JSON（HTTP " + res.status + "）" };
+				/* R34：宿主没起来时（重启窗口 / 启动失败 / 被换成最小 profile）这里拿到的是 HTML 或空体。
+				   以前把它当普通错误甩出去，还会**覆盖掉上一次的数据** —— 面板整块变空，看着像插件没了。
+				   现在打上 hostDown 标记，由 refresh() 决定「保留旧数据 + 说人话 + 自动重连」。 */
+				data = { ok: false, error: "HTTP " + res.status + "（返回的不是 JSON，说明这不是面板的路由）", hostDown: true, status: res.status };
 			}
 			return data;
 		}
 
 		let polling = null;
 		let refreshing = false;
+		/* R34：宿主掉线时记账（什么时候开始掉、重连了几次、最近一次错什么）。 */
+		function markHost(ok, error) {
+			const prev = store.host || {};
+			setStore({
+				host: ok
+					? { down: false }
+					: { down: true, since: prev.down ? prev.since : Date.now(), at: Date.now(), attempts: (prev.attempts || 0) + 1, error: error || null }
+			});
+		}
 		async function refresh() {
 			if (refreshing) return;
 			refreshing = true;
 			try {
 				const data = await api("/state");
-				setStore({ data, loading: false, error: data && data.ok === false ? data.error || "状态读取失败" : null });
+				if (data && data.hostDown) {
+					/* 断线：**不清 data** —— 上一次能用的那份继续显示。一次重启不该让面板变空白。 */
+					markHost(false, data.error);
+					setStore({ loading: false, error: null });
+				} else {
+					markHost(true);
+					setStore({ data, loading: false, error: data && data.ok === false ? data.error || "状态读取失败" : null });
+				}
 			} catch (e) {
-				setStore({ loading: false, error: String((e && e.message) || e) });
+				markHost(false, String((e && e.message) || e));
+				setStore({ loading: false });
 			} finally {
 				refreshing = false;
 			}
@@ -819,6 +839,123 @@ window.__ModuleLoader__.load({
 			);
 		}
 
+		/* R34：阶段时间线 → **进度条**。
+		   用户原话：「历史里的『插件』展开后非常长一串，需要简化，使其更适合小白用户使用…
+		   绿色方框的位置可以简化成进度条，进度条在加载时会在下方浮现一行淡淡的小字显示目前正在做什么，
+		   结束时不再浮现小字，但是可以点开会显示某一步做了什么」。
+		   所以：条 = 每一步一段；小字 = 只在**还在跑**时出现（当前这一步在干什么）；
+		   点条（或右侧箭头）= 展开原来那张一步不落的明细。 */
+		function StageProgress(props) {
+			const stages = props.stages || [];
+			if (stages.length === 0) return null;
+			const [open, setOpen] = useState(false);
+			const finished = props.status === "done" || props.status === "failed" || props.status === "cancelled";
+			const done = stages.filter((s) => s.status === "ok" || s.status === "skip").length;
+			const running = finished ? null : stages.find((s) => s.status === "running");
+			const failed = stages.find((s) => s.status === "fail") || null;
+			const segClass = (st) => (st === "ok" || st === "skip" ? "done" : st === "warn" ? "warn" : st === "fail" ? "fail" : st === "running" ? "running" : "idle");
+			return h(
+				"div",
+				{ className: "dpi-progress" },
+				h(
+					"button",
+					{
+						className: "dpi-progress-btn" + (open ? " is-open" : ""),
+						title: "点开看每一步做了什么",
+						onClick: () => setOpen(!open)
+					},
+					h("span", { className: "dpi-progress-track", "aria-hidden": true },
+						stages.map((stage) => h("i", { key: stage.key, className: "dpi-progress-seg is-" + segClass(stage.status) }))),
+					h("span", { className: "dpi-progress-count" }, failed ? "失败" : done + "/" + stages.length),
+					h("span", { className: "dpi-chev" + (open ? " is-open" : "") }, h(Glyph, { name: "chevron", size: 11 }))
+				),
+				running
+					? h("div", { className: "dpi-progress-note" },
+						running.label + (running.detail ? " · " + running.detail : "") + "…")
+					: null,
+				open ? h(StageList, { stages }) : null
+			);
+		}
+
+		/* R34：**事的后材料默认收起来**。
+		   「决定要不要装」的东西（等待确认时的安全预检）留在外面；
+		   事后的证据（预检全文 / AI 审查 / 插件管理器回执 / 来源信息）收进「技术细节」。
+		   数据一条没少 —— 只是默认不糊在脸上，点一下全在。 */
+		function JobTechFold(props) {
+			const job = props.job || {};
+			const [open, setOpen] = useState(false);
+			const detected = job.detected;
+			const showPc = Boolean(job.precheck) && job.status !== "awaiting-confirm";
+			const showReview = Boolean(job.review);
+			const showReceipt = Boolean(job.install && job.install.kind === "bundle" && job.install.result);
+			const showMeta = Boolean(detected && (detected.description || detected.files || detected.skill));
+			if (!showPc && !showReview && !showReceipt && !showMeta) return null;
+			const bits = [];
+			if (showPc) bits.push("安全预检");
+			if (showReview) bits.push("AI 审查");
+			if (showReceipt) bits.push("插件管理器回执");
+			if (showMeta) bits.push("来源信息");
+			return h(
+				"div",
+				{ className: "dpi-tech" },
+				h("button", { className: "dpi-tech-btn" + (open ? " is-open" : ""), onClick: () => setOpen(!open) },
+					h("span", { className: "dpi-chev" + (open ? " is-open" : "") }, h(Glyph, { name: "chevron", size: 11 })),
+					"技术细节：" + bits.join(" / ")),
+				open
+					? h(
+						"div",
+						{ className: "dpi-tech-body" },
+						showMeta
+							? h("div", { className: "dpi-meta" },
+								detected.description ? h("div", null, detected.description) : null,
+								h("div", { className: "dpi-muted" },
+									(detected.name || "未命名") +
+									(detected.files ? " · " + detected.files + " 个文件 / " + fmtBytes(detected.bytes) : "") +
+									(detected.wrappers && detected.wrappers.length ? " · 剥壳 " + detected.wrappers.join("/") : "") +
+									(detected.skill && detected.skill.name ? " · 技能 " + detected.skill.name : "")))
+							: null,
+						showPc ? h(PrecheckCard, { precheck: job.precheck }) : null,
+						showReview ? h(ReviewCard, { review: job.review }) : null,
+						showReceipt ? h("pre", { className: "dpi-pre" }, JSON.stringify(job.install.result, null, 2)) : null)
+					: null
+			);
+		}
+
+		/* R34：宿主没在响应时**不再**甩一句「面板读不到状态：响应不是 JSON（HTTP 404）」。
+		   人要的是：它可能正在重启、现在自动重连到第几次、要不要管、管就得做什么。
+		   ⚠️ 2026-10-30 的真实现场：装完插件宿主重启时 `tools` 服务没起来（45 个插件都在等它），
+		   `/plugin-installer/*` 整块 404 —— 那时候唯一有用的话是「等它回来，回不来就修启动失败」。 */
+		function HostDownBanner(props) {
+			const host = props.host || {};
+			const [open, setOpen] = useState(false);
+			const secs = Math.max(0, Math.round((Date.now() - (host.since || Date.now())) / 1000));
+			const stage = secs < 10
+				? "正在重启（装完 / 升级插件后宿主会重启一次）"
+				: secs < 60
+					? "还没回来 —— 它可能卡在启动里"
+					: "一直没回来 —— 这次启动大概失败了";
+			return h(
+				"div",
+				{ className: "dpi-offline" },
+				h("div", { className: "dpi-offline-head" },
+					h("span", { className: "dpi-offline-dot" }),
+					h("b", null, "连不上宿主半边"),
+					h("span", { className: "dpi-muted" }, "· 第 " + (host.attempts || 1) + " 次重连 · 已 " + secs + " 秒"),
+					h("button", { className: "dpi-btn dpi-btn-sm", onClick: props.onRetry }, "立即重试")),
+				h("div", { className: "dpi-offline-note" }, stage + "。面板每 2.5 秒自动重连，不用刷新页面。"),
+				host.error ? h("div", { className: "dpi-offline-err" }, "最近一次失败：" + host.error) : null,
+				h("button", { className: "dpi-btn dpi-btn-ghost dpi-btn-sm", onClick: () => setOpen(!open) },
+					open ? "收起怎么做" : "一直连不上怎么办"),
+				open
+					? h("ol", { className: "dpi-offline-steps" },
+						h("li", null, "先等 30 秒：装完插件宿主会自己重启一次，这段时间连不上是正常的。"),
+						h("li", null, "还不行：把 DSH 完全退出再打开（托盘里也要退），别只关窗口。"),
+						h("li", null, "如果启动时它报「1 required plugin did not activate」或「plugins waiting for services: tools」：多半是 profile 里多了一份 @deepseek-ai/dsh-tools —— 跑一次 `.tools\\dsh-boot-guard.mjs --apply`（或 python `.tools\\dsh_doctor.py --fix`）再启动。"),
+						h("li", null, "启动失败后 DSH 可能弹「禁用第三方插件」——**别点**，它会把 dsh.profile.bundles 从几十项裁到 2 项。要恢复用 `.tools\\dsh-boot-guard.mjs --apply`。"))
+					: null
+			);
+		}
+
 		/* 预检结论 */
 		function PrecheckCard(props) {
 			const pc = props.precheck;
@@ -1330,18 +1467,13 @@ window.__ModuleLoader__.load({
 				/* R27：换版本（先卸后装）—— 为什么必须卸、由谁卸、中断了能不能续 */
 				h(UpgradeCard, { job, busy, act }),
 
-				detected ? h("div", { className: "dpi-meta" },
-					detected.description ? h("div", null, detected.description) : null,
-					h("div", { className: "dpi-muted" },
-						(detected.name || "未命名") +
-						(detected.files ? " · " + detected.files + " 个文件 / " + fmtBytes(detected.bytes) : "") +
-						(detected.wrappers && detected.wrappers.length ? " · 剥壳 " + detected.wrappers.join("/") : "") +
-						(detected.skill && detected.skill.name ? " · 技能 " + detected.skill.name : "")
-					)
-				) : null,
+				/* R34：原来这里是一张「10 个绿色方框」的详细时间线 + 预检卡 + 回执 + 审查卡，
+				   展开一条历史能拉出两三屏（用户原话：「非常长一串，需要简化，更适合小白用户」）。
+				   现在：**进度条**（还在跑时下面浮一行小字说在干什么，跑完就没小字，点开看每一步），
+				   事后的证据统一收进「技术细节」；只有「等待确认」时预检留在外面（那是按不按的依据）。 */
+				h(StageProgress, { stages: job.stages, status: job.status }),
 
-				h(StageList, { stages: job.stages }),
-				h(PrecheckCard, { precheck: job.precheck }),
+				job.status === "awaiting-confirm" ? h(PrecheckCard, { precheck: job.precheck }) : null,
 
 				job.status === "awaiting-confirm"
 					? h("div", { className: "dpi-actions" },
@@ -1352,11 +1484,7 @@ window.__ModuleLoader__.load({
 					)
 					: null,
 
-				job.install && job.install.kind === "bundle" && job.install.result
-					? h("details", { className: "dpi-hits" },
-						h("summary", null, "插件管理器回执"),
-						h("pre", { className: "dpi-pre" }, JSON.stringify(job.install.result, null, 2)))
-					: null,
+				h(JobTechFold, { job }),
 
 				h(DiagnosisCard, { diagnosis: job.diagnosis }),
 				h(ReviewCard, { review: job.review }),
@@ -2552,7 +2680,11 @@ window.__ModuleLoader__.load({
 							h(Glyph, { name: "refresh", size: 13 }), "刷新"),
 						attention.dot ? h("button", { className: "dpi-btn dpi-btn-ghost dpi-btn-sm", onClick: () => api("/action", { method: "POST", body: JSON.stringify({ action: "ack" }) }).then((r) => r.state && setStore({ data: r.state })) }, "清除红点") : null)),
 
-				s.error ? h("div", { className: "dpi-error" }, "面板读不到状态：" + s.error + "（宿主半边可能还没重启）") : null,
+				s.host && s.host.down
+					? h(HostDownBanner, { host: s.host, onRetry: () => refresh() })
+					: s.error
+						? h("div", { className: "dpi-error" }, "面板读不到状态：" + s.error)
+						: null,
 
 				data.warnings && data.warnings.length > 0
 					? h("div", { className: "dpi-warnbar" },
@@ -2713,6 +2845,37 @@ window.__ModuleLoader__.load({
 .dpi-pill-error{color:var(--dsw-alias-state-error-primary);background:color-mix(in srgb,var(--dsw-alias-state-error-primary) 13%,transparent)}
 .dpi-pill-idle{color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-layer-2)}
 .dpi-stages{list-style:none;margin:6px 0 10px;padding:0;display:flex;flex-direction:column;gap:3px}
+/* R34 进度条：每一步一段；还在跑的那段呼吸，跑完就安静下来 */
+.dpi-progress{margin:2px 0 8px}
+.dpi-progress-btn{display:flex;align-items:center;gap:8px;width:100%;background:none;border:0;padding:4px 0;cursor:pointer;color:inherit;font:inherit;text-align:left}
+.dpi-progress-track{display:flex;gap:3px;flex:1;min-width:0}
+.dpi-progress-seg{flex:1;height:4px;border-radius:2px;background:var(--dsw-alias-bg-tertiary,rgba(127,127,127,.22));transition:background .18s ease}
+.dpi-progress-seg.is-done{background:var(--dsw-alias-state-success-primary,#2f9e5f)}
+.dpi-progress-seg.is-warn{background:var(--dsw-alias-state-warn-primary,#c48b1d)}
+.dpi-progress-seg.is-fail{background:var(--dsw-alias-state-error-primary,#c0392b)}
+.dpi-progress-seg.is-running{background:var(--dsw-alias-brand-primary,#4a7dff);animation:dpi-pulse 1.1s ease-in-out infinite}
+@keyframes dpi-pulse{0%,100%{opacity:.45}50%{opacity:1}}
+.dpi-progress-count{font-size:11px;color:var(--dsw-alias-label-secondary);font-variant-numeric:tabular-nums;flex-shrink:0}
+.dpi-progress-note{margin:1px 0 0 1px;font-size:11.5px;line-height:1.5;color:var(--dsw-alias-label-secondary);opacity:.72;
+ overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* R34 技术细节折叠：事后材料收在这里，默认不糊脸 */
+.dpi-tech{margin:6px 0 2px}
+.dpi-tech-btn{display:inline-flex;align-items:center;gap:6px;background:none;border:0;padding:2px 0;cursor:pointer;
+ font:inherit;font-size:11.5px;color:var(--dsw-alias-label-secondary);opacity:.9}
+.dpi-tech-btn:hover{opacity:1;text-decoration:underline}
+.dpi-tech-body{margin-top:6px;padding-left:2px}
+/* R34 宿主掉线条：不再甩 "响应不是 JSON(HTTP 404)" */
+.dpi-offline{margin:0 0 10px;padding:9px 11px;border-radius:8px;border:1px solid var(--dsw-alias-state-warn-primary,#c48b1d);
+ background:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#c48b1d) 9%,transparent)}
+.dpi-offline-head{display:flex;align-items:center;gap:7px;flex-wrap:wrap;font-size:12.5px}
+.dpi-offline-head b{font-weight:600}
+.dpi-offline-head .dpi-btn{margin-left:auto}
+.dpi-offline-dot{width:8px;height:8px;border-radius:50%;background:var(--dsw-alias-state-warn-primary,#c48b1d);
+ animation:dpi-pulse 1.1s ease-in-out infinite;flex-shrink:0}
+.dpi-offline-note{margin-top:3px;font-size:12px;color:var(--dsw-alias-label-secondary)}
+.dpi-offline-err{margin-top:3px;font-size:11.5px;color:var(--dsw-alias-label-secondary);opacity:.8;word-break:break-all}
+.dpi-offline-steps{margin:6px 0 0 16px;padding:0;font-size:12px;color:var(--dsw-alias-label-secondary);line-height:1.65}
+.dpi-offline-steps li{margin:2px 0}
 .dpi-stage{display:flex;align-items:baseline;gap:8px;font-size:12.5px}
 .dpi-stage-icon{width:14px;text-align:center;font-weight:700;color:var(--dsw-alias-label-secondary);flex-shrink:0}
 .dpi-stage.is-ok .dpi-stage-icon{color:var(--dsw-alias-state-success-primary)}
@@ -2974,6 +3137,11 @@ window.__ModuleLoader__.load({
 			/* R31：直连安装卡与信任豁免卡（两条新处置都必须能被无头渲染摸到） */
 			LinkInstallCard,
 			TrustExemptCard,
+			/* R34：进度条 / 技术细节折叠 / 宿主掉线条（三块新界面都要能被无头渲染验到） */
+			StageProgress,
+			JobTechFold,
+			HostDownBanner,
+			StageList,
 			/* R30：界面打磨 —— 顶部品牌块 / 历史两行 / 空态 / 自绘图标（无头渲染要能验） */
 			History,
 			Glyph,
