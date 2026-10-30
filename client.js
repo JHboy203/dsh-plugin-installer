@@ -995,6 +995,21 @@ window.__ModuleLoader__.load({
 			);
 		}
 
+		/* R35：把一段「整段 pnpm 输出」压成**该看的那一行**。
+		   由来：失败当时把 pnpm 的整段输出存进了 error.message，红点上显示的是
+		   `卸载旧版失败：✓ Lockfile passes supply-chain policies…`（那是**成功**信息），
+		   真原因被埋在中间。宿主侧出口已经改了，但**已经失败的旧任务**存的是老文案 ——
+		   这层兜底让它在不重启的情况下也读得懂。 */
+		function tidyError(message) {
+			const text = String(message || "");
+			const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+			if (lines.length <= 1) return text;
+			const pick = lines.find((line) => /ERR_PNPM_|^Error:|^✖/.test(line));
+			if (!pick) return lines[0].length > 220 ? lines[0].slice(0, 217) + "…" : lines[0];
+			const head = /^([^：]{2,14})：/.exec(lines[0]);
+			return (head ? head[1] + "：" : "") + pick;
+		}
+
 		/* 预检结论 */
 		function PrecheckCard(props) {
 			const pc = props.precheck;
@@ -1492,7 +1507,7 @@ window.__ModuleLoader__.load({
 
 				job.error
 					? h("div", { className: "dpi-error" },
-						h("b", null, (job.error.stage ? "[" + job.error.stage + "] " : "") + job.error.message),
+						h("b", null, (job.error.stage ? "[" + job.error.stage + "] " : "") + tidyError(job.error.message)),
 						job.error.plain ? h("div", { className: "dpi-detail" }, job.error.plain) : null,
 						job.error.hint ? h("div", { className: "dpi-detail" }, "建议：" + job.error.hint) : null,
 						job.error.fix && job.error.fix.length > 0 ? h(FixSteps, { steps: job.error.fix, actions: job.error.actions }) : null)
@@ -2759,7 +2774,7 @@ window.__ModuleLoader__.load({
 
 				attention.count > 0 && attention.items && attention.items.length > 0
 					? h("ul", { className: "dpi-attention" }, attention.items.map((item) =>
-						h("li", { key: "att" + item.id }, h("b", null, item.title), h("span", { className: "dpi-detail" }, item.reason))))
+						h("li", { key: "att" + item.id }, h("b", null, item.title), h("span", { className: "dpi-detail" }, tidyError(item.reason)))))
 					: null,
 
 				h(AiBox),

@@ -175,7 +175,7 @@ function textOf(node, acc) {
  * 正常不执行，所以**数源码不等于数断言**（实测 103 处、只跑 80 条）。真正的判据只能是
  * 「这次实际跑了几条」，所以由脚本自己报总数、并由自己比对。
  */
-const EXPECTED_TOTAL = 199;
+const EXPECTED_TOTAL = 201;
 
 let failed = 0;
 let passed = 0;
@@ -1394,6 +1394,29 @@ if (typeof t.DecisionBar === "function") {
 	})(), "预检卡应作为 <details> 的子节点");
 } else {
 	check("__test 暴露了 DecisionBar", false);
+}
+
+/* R35 兜底：整段 pnpm 输出停在任务里时，界面只该显示「该看的那一行」 */
+if (typeof t.JobDetail === "function") {
+	const noisy = {
+		id: "job-noisy",
+		status: "failed",
+		error: {
+			code: "remove-failed",
+			message: [
+				"卸载旧版失败：✓ Lockfile passes supply-chain policies (verified 54m ago)",
+				"Progress: resolved 33, reused 8, downloaded 0, added 0",
+				"[ERR_PNPM_RESOLUTION_POLICY_VIOLATIONS_UNHANDLED] 6 resolution-policy violations were produced."
+			].join("\n")
+		}
+	};
+	resetHooks();
+	const noisyEl = t.JobDetail({ job: noisy });
+	const noisyText = noisyEl ? textOf(noisyEl).join(" | ") : "";
+	check("R35 老任务：界面只显示该看的那一行（不再把整段 pnpm 输出倒出来）",
+		noisyText.includes("ERR_PNPM_RESOLUTION_POLICY_VIOLATIONS_UNHANDLED") && !noisyText.includes("Progress: resolved"), noisyText.slice(0, 220));
+	check("R35 老任务：保留「卸载旧版失败：」这层前缀（知道是哪一步挂的）",
+		noisyText.includes("卸载旧版失败：") && !noisyText.includes("✓ Lockfile"), noisyText.slice(0, 200));
 }
 
 /* 条数自对表：断言被删/被加都会在这里当场红（数源码不可靠，见 EXPECTED_TOTAL 的注释） */

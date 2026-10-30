@@ -3288,6 +3288,26 @@ async function main() {
 
 	/* Ⓟb R31：老任务的失败解释要能跟上新判据（用户的失败任务是 R31 之前写的） */
 	const composer = new Installer({ ctx: {}, options: {} });
+	/* R35：用户那条真实失败 —— 卸载旧版时 pnpm 的策略抛错，消息里存的是**成功**那一行 */
+	const removeBlob = [
+		"✓ Lockfile passes supply-chain policies (verified 54m ago)",
+		"Progress: resolved 33, reused 8, downloaded 0, added 0",
+		"[ERR_PNPM_RESOLUTION_POLICY_VIOLATIONS_UNHANDLED] 6 resolution-policy violations were produced but no handleResolutionPolicyViolations callback was wired to react to them."
+	].join("\n");
+	const removeJob = {
+		id: "old-remove",
+		status: "failed",
+		input: { raw: "npm:@liustack/modsearch@5.10.11", kind: "npm-spec", label: "npm" },
+		error: { code: "remove-failed", message: "卸载旧版失败：" + removeBlob },
+		upgrade: { removal: { ok: false, error: removeBlob, code: "operation-error" } }
+	};
+	const removeView = composer.compactJob(removeJob);
+	ok("R35 老任务：卸载失败的文案换成真正那一行（不再是 ✓ Lockfile passes…）",
+		/ERR_PNPM_RESOLUTION_POLICY_VIOLATIONS_UNHANDLED/.test(removeView.error.message) && !/✓|Lockfile passes/.test(removeView.error.message),
+		removeView.error.message.slice(0, 140));
+	eq("R35 老任务：就地重判成 resolution-policy（面板据此渲染处置）", removeView.error.kind, "resolution-policy");
+	ok("R35 老任务：只换解释，原始任务对象一个字没动", removeJob.error.message === "卸载旧版失败：" + removeBlob);
+
 	const oldJob = {
 		id: "old-trust",
 		status: "failed",
