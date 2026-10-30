@@ -21,17 +21,9 @@ import { classifyInput } from "../lib/urls.js";
 import { DEFAULT_LIMITS, extractToDir, findBsdtar, sniffFormat } from "../lib/formats.js";
 import { detectKind } from "../lib/detect.js";
 import { parseSkillFrontmatter, yamlFrontmatterIssue } from "../lib/detect.js";
-import {
-	buildSkillView,
-	planSkillFix,
-	planSkillPark,
-	readSkillsOnDisk,
-	rewriteSkillFrontmatter,
-	skillBackupInfo,
-	skillFindings,
-	skillSourceLabel,
-	summarizeSkills
-} from "../lib/skills.js";
+import { buildSkillView, planSkillFix, planSkillPark, readSkillsOnDisk, rewriteSkillFrontmatter, skillBackupInfo, skillFindings, skillSourceLabel, summarizeSkills } from "../lib/skills.js";
+/* R38：Skill 来源台账 / 目录指纹 / 更新检查 / 重装判据 */
+import { buildSkillLedgerEntry, checkSkillUpdates, hashSkillDir, planSkillReinstall, readSkillLedger, recordSkillSource } from "../lib/skillledger.js";
 import { scanTree, redact, detectPromptInjection } from "../lib/scan.js";
 import { precheck, describeCompatVersions as mCompatLine } from "../lib/precheck.js";
 import { backupVendorTarball, createSnapshot, fileSpecPath, restoreProfileFiles, backupSkillInSnapshot, readSnapshotMeta, restoreSkill, restoreVendorTarball } from "../lib/snapshot.js";
@@ -3600,6 +3592,56 @@ async function main() {
 	cacheInstaller._mcpUpdatesAt = Date.now() - 31 * 60 * 1000;
 	eq("R37 合并检查：超过 30 分钟不再复用（不显示过期结论）", cacheInstaller.mcpUpdatesCached(), null);
 	ok("R37 合并检查：GET /mcp 把更新缓存一起回传", /mcpUpdatesCached\(\)/.test(indexSrcR37));
+
+	/* R38：Skill 来源台账 —— 装的时候记来源/commit/路径/指纹；更新检查按路径比 commit；
+	   本地改过要能被识别（重装会覆盖）；没有台账的存量技能不许编造「最新」。 */
+	const ledgerSkillDir = join(root, "ledger-skill");
+	await mkdir(ledgerSkillDir, { recursive: true });
+	await writeFile(join(ledgerSkillDir, "SKILL.md"), "---\nname: ledger-skill\ndescription: test\n---\nbody", "utf8");
+	const digest1 = await hashSkillDir(ledgerSkillDir);
+	await writeFile(join(ledgerSkillDir, "notes.md"), "local edit", "utf8");
+	const digest2 = await hashSkillDir(ledgerSkillDir);
+	ok("R38 台账：目录指纹能感知非 SKILL.md 的改动", digest1 !== digest2 && digest1.length === 64);
+	const ledgerEntry = buildSkillLedgerEntry({ dir: "ledger-skill", skill: "ledger-skill", root, source: { type: "github", kind: "source-archive", spec: "github:o/r", owner: "o", repo: "r", ref: "main", commit: "a".repeat(40), path: "skills/ledger-skill" }, digest: digest2, jobId: "job-x" });
+	ok("R38 台账：记录里带 GitHub 坐标 + 仓库内路径 + 指纹", ledgerEntry.source.owner === "o" && ledgerEntry.source.path === "skills/ledger-skill" && Boolean(ledgerEntry.digest));
+	const ledgerFile = join(root, "skill-sources.json");
+	await recordSkillSource(ledgerFile, ledgerEntry);
+	const ledger = await readSkillLedger(ledgerFile);
+	ok("R38 台账：原子写之后读得回、键小写", Boolean(ledger.items["ledger-skill"]));
+	const localEntry = buildSkillLedgerEntry({ dir: "local-skill", skill: "local-skill", source: { type: "local", spec: "D:/x" }, digest: "d" });
+	const ledger2 = { version: 1, items: { ...ledger.items, "local-skill": localEntry } };
+	const same = await checkSkillUpdates({ items: [{ dir: "ledger-skill", name: "ledger-skill" }, { dir: "local-skill", name: "local-skill" }, { dir: "stock", name: "stock" }], ledger: ledger2, digests: { "ledger-skill": digest2 }, fetchPathCommits: async () => ({ sha: "a".repeat(40) }) });
+	eq("R38 更新：commit 相同判 current", same.items.find((x) => x.dir === "ledger-skill").relation, "current");
+	eq("R38 更新：本地来源判 unknown（不编造最新）", same.items.find((x) => x.dir === "local-skill").relation, "unknown");
+	eq("R38 更新：没有台账的存量技能不进表，只在摘要里记数", [same.summary.tracked, same.summary.untracked], [2, 1]);
+	const outd = await checkSkillUpdates({ items: [{ dir: "ledger-skill", name: "ledger-skill" }], ledger, digests: { "ledger-skill": digest1 }, fetchPathCommits: async () => ({ sha: "b".repeat(40) }) });
+	eq("R38 更新：commit 不同判 outdated", outd.items[0].relation, "outdated");
+	eq("R38 更新：目录指纹变了 = 本地改过（重装会覆盖）", outd.items[0].locallyEdited, true);
+	const oneFail = await checkSkillUpdates({ items: [{ dir: "ledger-skill", name: "ledger-skill" }], ledger, digests: {}, fetchPathCommits: async () => { throw new Error("rate limited"); } });
+	eq("R38 更新：单条查询失败只把自己标 unknown", [oneFail.items[0].relation, /rate limited/.test(oneFail.items[0].error || "")], ["unknown", true]);
+	ok("R38 重装：来源完整时给出 owner/repo/ref/路径", (() => { const p = planSkillReinstall(ledgerEntry); return p.ok && p.owner === "o" && p.ref === "main" && p.subdir === "skills/ledger-skill"; })());
+	ok("R38 重装：Release 资产来源拒绝自动重装", planSkillReinstall({ dir: "x", source: { type: "github", kind: "release-asset", owner: "o", repo: "r", ref: "v1", path: "s" } }).reason === "asset-source");
+	ok("R38 重装：没记路径时拒绝（避免装错技能）", planSkillReinstall({ dir: "x", source: { type: "github", kind: "source-archive", owner: "o", repo: "r", ref: "main", path: null } }).reason === "no-path");
+	const ledgerView = buildSkillView({
+		roots: [root],
+		items: [{ dir: "ledger-skill", name: "ledger-skill", hasFile: true, valid: true, hostVisible: false }],
+		host: null,
+		hostError: "no-service",
+		ledger,
+		digests: { "ledger-skill": digest1 },
+		updates: { at: "x", summary: {}, items: [{ dir: "ledger-skill", relation: "outdated" }] }
+	});
+	eq("R38 视图：行上带来源 / 本地改过 / 可升级标记", [ledgerView.items[0].tracked, ledgerView.items[0].locallyEdited, ledgerView.items[0].update.relation], [true, true, "outdated"]);
+	const reinstallInstaller = new Installer({ ctx: {}, options: {} });
+	eq("R38 重装：没有台账时明确拒绝", (await reinstallInstaller.reinstallSkill("nope")).reason, "no-ledger");
+	const pipelineSrcR38 = await readFile(join(pluginRoot, "lib", "pipeline.js"), "utf8");
+	const indexSrcR38 = await readFile(join(pluginRoot, "index.js"), "utf8");
+	const clientSrcR38 = await readFile(join(pluginRoot, "client.js"), "utf8");
+	ok("R38 接线：安装成功后写台账", /recordSkillSource\(job, detected, result\)/.test(pipelineSrcR38) && /buildSkillLedgerEntry/.test(pipelineSrcR38));
+	ok("R38 接线：index 暴露 reinstall-skill 动作", /reinstall-skill/.test(indexSrcR38));
+	ok("R38 接线：面板发 reinstall-skill 且带 confirmEdited", /reinstall-skill/.test(clientSrcR38) && /confirmEdited/.test(clientSrcR38));
+	ok("R38 接线：合并检查里加了第三条链", /checkSkillUpdates\(\)/.test(pipelineSrcR38) && /skillUpdates/.test(pipelineSrcR38));
+	ok("R38 接线：GET /skills 的视图带 ledger 与 updates", /ledger,/.test(pipelineSrcR38) && /updates: this\.skillUpdatesCached\(\)/.test(pipelineSrcR38));
 
 	await rm(root, { recursive: true, force: true });
 

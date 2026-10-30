@@ -48,10 +48,10 @@ export const FROZEN_DEFAULTS = {
 };
 
 /** 文档里声明的自检项数（改断言就先跑一次 host_selfcheck，再同步这个数）。 */
-export const EXPECTED_ASSERTIONS = 1045;
+export const EXPECTED_ASSERTIONS = 1064;
 
 /** 界面自检项数（dev/render-check.cjs）。同样是「文档对表」的一半。 */
-const EXPECTED_RENDER_ASSERTIONS = 243;
+const EXPECTED_RENDER_ASSERTIONS = 254;
 
 /** 期望注册的宿主工具（漏一个 = 模型看不见一项能力）。R32 起 6 个（新增只读探针）。 */
 const EXPECTED_TOOLS = [
@@ -206,6 +206,19 @@ async function main() {
 		/check-all-updates/.test(clientSrc) && !/action: "check-mcp-updates"/.test(clientSrc));
 	ok("R37：宿主提供 checkAllUpdates 且 index 暴露动作",
 		/async checkAllUpdates\(/.test(pipelineSrc) && /check-all-updates/.test(indexSrc2));
+
+	/* R38：Skill 来源台账 + 第三条更新链 + 按来源重装。判据在 lib/skillledger.js，
+	   接线最怕「装了但没写台账」或「面板有按钮、宿主没动作」。 */
+	const ledgerSrcR38 = await readText(join("lib", "skillledger.js"));
+	ok("R38：Skill 来源台账模块存在（读/写/指纹/更新判据）",
+		Boolean(ledgerSrcR38) && /export async function readSkillLedger/.test(ledgerSrcR38) &&
+			/export async function hashSkillDir/.test(ledgerSrcR38) && /export async function checkSkillUpdates/.test(ledgerSrcR38));
+	ok("R38：安装成功后写台账（pipeline 接上）",
+		/async recordSkillSource\(/.test(pipelineSrc) && /recordSkillSource\(job, detected, result\)/.test(pipelineSrc));
+	ok("R38：合并检查第三条链 + 按来源重装动作",
+		/async checkSkillUpdates\(/.test(pipelineSrc) && /reinstall-skill/.test(indexSrc2));
+	ok("R38：面板把 Skill 能力接上（reinstall-skill / confirmEdited）",
+		/reinstall-skill/.test(clientSrc) && /confirmEdited/.test(clientSrc));
 	eq("界面自检项数与文档一致", await declaredRenderAssertions(), EXPECTED_RENDER_ASSERTIONS);
 
 	/* R12.1：指纹只在 codestamp.js 加载时算一次，而宿主是**逐文件**换新的 ——
@@ -272,7 +285,10 @@ async function main() {
 	ok("体检接了 rev 对账（web-boot 点名的每个包）", /resolveClientArtifact/.test(profileSrc) && /classifyBundle/.test(profileSrc));
 	ok("体检把 rev 结论写进 crash.bundles（工具面看得见）", /crash\.bundles = bundles/.test(profileSrc));
 	ok("摘要行按字节状态改口（还在 / 已重建）", /字节还在/.test(profileSrc) && /字节已重建/.test(profileSrc));
-	ok("动作复用原流水线（index 没有新开安装旁路）", !/reinstall/.test(indexSrc2) && /submitInput\("npm:"/.test(clientSrc));
+	/* 原判据是「index 里不许出现 reinstall 这个词」—— R38 的 reinstall-skill 是**走流水线**的
+	   合法动作（pipeline.reinstallSkill → this.submit），所以改成钉真正要防的那件事：
+	   不在路由层直接调 installBundle / 自己跑 pnpm 开旁路。 */
+	ok("动作复用原流水线（index 没有新开安装旁路）", !/installBundle\(|spawn\("pnpm"|execFile\("pnpm"/.test(indexSrc2) && /submitInput\("npm:"/.test(clientSrc));
 	ok("面板渲染 finding.actions", clientSrc.includes("f.actions") && clientSrc.includes("runFindingAction"));
 	ok("体检报告把「面板动作」写出来（模型点不了按钮，但能指路）", /面板动作/.test(toolsSrc));
 

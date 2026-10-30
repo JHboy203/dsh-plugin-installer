@@ -7,9 +7,9 @@
 
 | 层 | 命令 | 期望 |
 |---|---|---|
-| 自洽（不碰宿主、不 spawn、不写盘） | `node dev/audit.mjs` **或** `host_selfcheck({plugin:"dsh-plugin-installer", script:"dev/audit.mjs"})` | `SUMMARY audit passed`（190 项） |
-| 行为（真跑宿主逻辑） | `host_selfcheck({plugin:"dsh-plugin-installer"})` | 日志 `SUMMARY 1045 passed, 0 failed`（工具头部 PASS 数是按输出尾部数的，会少算，**看日志**） |
-| 界面（无头渲染） | `node dev/render-check.cjs` **或** `host_selfcheck({..., script:"dev/render-check.cjs"})` | `TOTAL 243 checks` / `all render checks passed` |
+| 自洽（不碰宿主、不 spawn、不写盘） | `node dev/audit.mjs` **或** `host_selfcheck({plugin:"dsh-plugin-installer", script:"dev/audit.mjs"})` | `SUMMARY audit passed`（194 项） |
+| 行为（真跑宿主逻辑） | `host_selfcheck({plugin:"dsh-plugin-installer"})` | 日志 `SUMMARY 1064 passed, 0 failed`（工具头部 PASS 数是按输出尾部数的，会少算，**看日志**） |
+| 界面（无头渲染） | `node dev/render-check.cjs` **或** `host_selfcheck({..., script:"dev/render-check.cjs"})` | `TOTAL 254 checks` / `all render checks passed` |
 
 改断言数就必须同步：`dev/audit.mjs` 的 `EXPECTED_ASSERTIONS` / `EXPECTED_RENDER_ASSERTIONS`、
 `dev/render-check.cjs` 的 `EXPECTED_TOTAL`、`README.md` 与本插件交接文件里的数字（audit 会当场对表）。
@@ -18,6 +18,13 @@
 > 「已装 MCP」浮窗里的那个按钮已删除（只显示同一份结果 + 本地「刷新」）；宿主侧
 > `Installer.checkAllUpdates()` 用 `allSettled` 跑两条链，哪一半失败都不拖垮另一半
 > （错误写进 `inventory.error` / `mcpError`）。接线判据在 hosttest 的 R37 组与 audit 两条静态断言。
+
+> **R38（2026-10-31）**：Skill 来源台账（`lib/skillledger.js` → `data/skill-sources.json`）：
+> 安装成功时记 `owner/repo/ref/commit/仓库内路径/目录指纹`；更新检查只对台账里**有 GitHub 坐标 + commit**
+> 的技能调 `commits?path=`，其余如实 unknown；存量技能没有记录 → 只在摘要里算 `untracked`。
+> `reinstallSkill()` 先比目录指纹，本地改过要 `confirmEdited:true`，任何重装都要 `confirm:true`
+> （覆盖前旧目录进安装前快照）。更新条改名「插件 / MCP / Skill 更新」并挪到「历史」与「环境体检」之间。
+> 判据在 hosttest 的 R38 组（19 条）、render-check 的 R38 组（10 条）与 audit 4 条静态接线。
 
 ## 探针（离线优先：不用重启也能验判据）
 

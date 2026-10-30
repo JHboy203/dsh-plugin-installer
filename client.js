@@ -23,7 +23,7 @@ window.__ModuleLoader__.load({
 		/* 客户端 build 号（R5.1）：改 client.js 就提一位。
 		   client 会热重载、但没人保证「当前页面跑的是哪一版」—— 这个号随 client-state
 		   一起上报，宿主 /health 的 clientReport.build 就是答案（宿主侧另有 mtime 标签）。 */
-		const BUILD = "r37.2";
+		const BUILD = "r38.1";
 
 		/* ── 迷你 store（模块级，面板关着时图标也在用）──────────────────── */
 
@@ -1674,15 +1674,16 @@ window.__ModuleLoader__.load({
 		}
 
 		/**
-		 * R37：合并检查完成后的一句话摘要（toast 用）。
+		 * R37/R38：合并检查完成后的一句话摘要（toast 用）。
 		 *
 		 * 单独抽成纯函数，是因为这里有一个很容易说假话的判据：**0 条可检查 ≠ 都是最新的**。
 		 * 本机没有 MCP 时，第一版就把 checked=0 说成了「MCP 都是最新的」—— 面板上那条却写着
-		 * 「没有可检查的条目」，两处自相矛盾。现在两处共用同一套措辞，并由 render-check 钉住。
+		 * 「没有可检查的条目」；R38 的 Skill 同理：没有来源记录时不能说「都是最新的」。
 		 */
-		function checkAllSummaryText(inventory, mcpUpdates, mcpError) {
+		function checkAllSummaryText(inventory, mcpUpdates, mcpError, skillUpdates, skillError) {
 			const sum = inventory && inventory.summary;
 			const msum = mcpUpdates && mcpUpdates.summary;
+			const ssum = skillUpdates && skillUpdates.summary;
 			const parts = [];
 			if (inventory && inventory.ok === false) parts.push("插件检查失败");
 			else if (sum) parts.push(sum.outdated > 0 ? "插件可升级 " + sum.outdated + " 个" : "插件都是最新的");
@@ -1694,16 +1695,22 @@ window.__ModuleLoader__.load({
 						? "MCP 可升级 " + msum.outdated + " 台"
 						: "MCP 都是最新的");
 			}
+			if (skillError) parts.push(skillError);
+			else if (ssum) {
+				if (ssum.tracked === 0) parts.push("Skill 没有来源记录（存量补不回来）");
+				else if (ssum.outdated > 0) parts.push("Skill 可升级 " + ssum.outdated + " 个" + (ssum.unknown > 0 ? "（无法判断 " + ssum.unknown + "）" : ""));
+				else parts.push("Skill 都跟来源一致" + (ssum.unknown > 0 ? "（无法判断 " + ssum.unknown + "）" : ""));
+			}
 			return parts.length ? parts.join(" · ") : "检查完成";
 		}
 
 		/**
-		 * R37：一次点击检查两类更新（插件 + MCP）。
+		 * R37：一次点击检查更新（插件 + MCP；R38 起再加 Skill）。
 		 *
 		 * 以前主面板一个「检查更新」、已装 MCP 浮窗里又一个，各查各的 ——
 		 * 用户得记住「MCP 的更新在另一个窗口里查」。现在只有这一个入口：
-		 * 宿主侧 checkAllUpdates() 把两条链都跑完（一条失败不拖垮另一条），
-		 * 这里一次写回两边的结果，摘要也在同一条里说清。
+		 * 宿主侧 checkAllUpdates() 把三条链都跑完（一条失败不拖垮其它），
+		 * 这里一次写回三边的结果，摘要也在同一条里说清。
 		 */
 		function runCheckAllUpdates() {
 			setLocal({ invBusy: true, mcpBusy: true });
@@ -1718,7 +1725,10 @@ window.__ModuleLoader__.load({
 					if (r.inventory) setLocal({ inventory: r.inventory });
 					if (r.mcp) setLocal({ mcp: r.mcp });
 					if (r.mcpUpdates) setLocal({ mcpUpdates: r.mcpUpdates });
-					toast(checkAllSummaryText(r.inventory, r.mcpUpdates, r.mcpError));
+					if (r.skills) setLocal({ skills: r.skills });
+					if (r.skillUpdates) setLocal({ skillUpdates: r.skillUpdates });
+					setLocal({ skillError: r.skillError || null });
+					toast(checkAllSummaryText(r.inventory, r.mcpUpdates, r.mcpError, r.skillUpdates, r.skillError));
 					return r;
 				})
 				.catch((e) => {
@@ -1804,7 +1814,8 @@ window.__ModuleLoader__.load({
 						setLocal({ skills: view });
 						return view;
 					}
-					setLocal({ skills: r.skills });
+					/* R38：视图里带着来源台账与最近一次更新检查（30 分钟内）—— 面板重开不丢结果 */
+					setLocal(r.skills && r.skills.updates ? { skills: r.skills, skillUpdates: r.skills.updates } : { skills: r.skills });
 					return r.skills;
 				})
 				.catch((e) => {
@@ -2510,6 +2521,9 @@ window.__ModuleLoader__.load({
 			const [parking, setParking] = useState(null);
 			/* 待确认「修 frontmatter」的目录名（R16）：先备份原文再改，同样两段式。 */
 			const [fixing, setFixing] = useState(null);
+			/* R38：待确认「按来源重装」的目录。第一次点只展开后果；宿主发现本地改过时
+			   会再拒绝一次，这里换成「确认覆盖」的第二段（绝不因为面板看到的是旧状态就覆盖掉新改动）。 */
+			const [reinstall, setReinstall] = useState(null);
 			const fix = (dir) => {
 				setLocal({ skillsBusy: true });
 				api("/action", { method: "POST", body: JSON.stringify({ action: "fix-skill-frontmatter", dir }) })
@@ -2543,6 +2557,32 @@ window.__ModuleLoader__.load({
 					.finally(() => setLocal({ skillsBusy: false }));
 			};
 			const load = (force) => loadSkills(force);
+			/* R38：按来源重装（两段式确认；宿主判据才是权威 —— 它说「本地改过」就再确认一次）。 */
+			const doReinstall = (row, forceEdited) => {
+				setLocal({ skillsBusy: true });
+				api("/action", { method: "POST", body: JSON.stringify({
+					action: "reinstall-skill",
+					name: row.dir,
+					confirm: true,
+					confirmEdited: forceEdited === true || row.locallyEdited === true
+				}) })
+					.then((r) => {
+						if (r && r.state) setStore({ data: r.state });
+						if (!r || r.ok === false) {
+							if (r && r.reason === "locally-edited") {
+								/* 面板打开之后本地又改过：宿主拒绝。换成更明确的第二段确认。 */
+								setReinstall({ dir: row.dir, force: true, message: r.message || "" });
+								return;
+							}
+							toast((r && r.error) || "重装失败");
+							return;
+						}
+						setReinstall(null);
+						toast("已提交重装任务：重新下载来源并覆盖这个技能（看上面的进度）");
+					})
+					.catch((e) => toast("重装失败：" + String((e && e.message) || e)))
+					.finally(() => setLocal({ skillsBusy: false }));
+			};
 			useEffect(() => {
 				if (!s.local.skills && !s.local.skillsBusy) loadSkills();
 			}, []);
@@ -2576,7 +2616,18 @@ window.__ModuleLoader__.load({
 						: h("button", { className: "dpi-btn dpi-btn-sm", disabled: !counts, onClick: () => setOpen(!open) }, open ? "收起" : "展开")),
 				detail ? h("div", { className: "dpi-muted" }, detail) : null,
 				h("div", { className: "dpi-muted" },
-					"更新：Skill 没有统一版本源；来自插件包的随插件更新，其余需要先记录来源仓库才能比对（本面板暂未记录）。"),
+					counts && counts.tracked > 0
+						? "来源台账：" + counts.tracked + " 个技能有来源记录（可查更新 / 可重装），" + counts.untracked + " 个没有记录（存量技能补不回来）。更新检查在主面板「检查更新」里一起跑。"
+						: "来源台账：还没有技能有来源记录（存量技能补不回来）。今后从 GitHub 仓库装的技能会记下来源与 commit；更新检查在主面板「检查更新」里一起跑。"),
+				view && view.updates && view.updates.summary
+					? h("div", { className: "dpi-muted" },
+						view.updates.summary.tracked === 0
+							? "更新：没有可比的来源（0 个技能有来源记录），不能判断有没有更新"
+							: "更新：" + (view.updates.summary.outdated > 0 ? "可升级 " + view.updates.summary.outdated + " 个" : "都跟来源一致") +
+								"（已跟踪 " + view.updates.summary.tracked + " · 无法判断 " + view.updates.summary.unknown +
+								(view.updates.summary.locallyEdited ? " · 本地改过 " + view.updates.summary.locallyEdited : "") +
+								(view.updates.at ? " · " + ago(view.updates.at) : "") + "）")
+					: null,
 				view && view.notes && view.notes.length > 0
 					? h("div", { className: "dpi-muted" }, view.notes.join(" · "))
 					: null,
@@ -2620,8 +2671,23 @@ window.__ModuleLoader__.load({
 								row.hostVisible && row.modelInvocable === false ? tag("dpi-tag-medium", "不会自动调用", "宿主把它标成 modelInvocable=false；最常见的原因是 SKILL.md 里写了 disable-model-invocation: true") : null,
 								/* 备份行不标来源：宿主认的是同名的那份正式技能，不是这个目录 —— 标上去会误导 */
 								row.sourceLabel && !row.backup ? tag("dpi-tag", row.sourceLabel) : null,
+								/* R38：安装时记下的来源（GitHub owner/repo@commit + 仓库内路径） */
+								row.tracked && !row.backup ? tag("dpi-tag", row.ledgerSource || "已记来源", "安装时记下的来源；更新检查按这个仓库 / 路径比") : null,
+								row.locallyEdited && !row.backup ? tag("dpi-tag-medium", "本地改过", "装完之后目录被改过；按来源重装会覆盖这些改动") : null,
+								row.update && row.update.relation === "outdated"
+									? h("span", {
+										className: "dpi-pill dpi-pill-warn",
+										title: "来源 " + String(row.update.localCommit || "?").slice(0, 8) + " → " + String(row.update.latestCommit || "?").slice(0, 8) +
+											(row.locallyEdited ? "；本地也改过，重装会覆盖" : "")
+									}, "可升级 → " + String(row.update.latestCommit || "").slice(0, 7))
+									: null,
+								row.update && row.update.relation === "current" ? h("span", { className: "dpi-pill dpi-pill-ok" }, "最新") : null,
+								row.update && row.update.relation === "unknown" ? tag("dpi-tag", "无法判断", row.update.reason || row.update.error || "") : null,
 								row.installedByPanel ? tag("dpi-tag-kind", "本面板装的") : null),
 							h("div", { className: "dpi-skill-desc" }, row.description || (row.reasons && row.reasons[0]) || "（没有描述：模型不会自动挑它）"),
+							row.update && (row.update.reason || row.update.error)
+								? h("div", { className: "dpi-detail" }, "更新：" + (row.update.error ? "查不到（" + row.update.error + "）" : row.update.reason))
+								: null,
 							row.yamlIssue
 								? h("div", { className: "dpi-detail" }, "改法：" + row.yamlIssue.fix)
 								: null,
@@ -2653,6 +2719,26 @@ window.__ModuleLoader__.load({
 										h("button", { className: "dpi-btn dpi-btn-sm", onClick: () => setParking(null) }, "取消"))
 									: h("div", { className: "dpi-actions dpi-actions-tight" },
 										h("button", { className: "dpi-btn dpi-btn-sm", onClick: () => setParking(row.dir) }, "移出技能根…"))
+								: null,
+							/* R38：台账里有 GitHub 来源的技能才给「按来源重装」（两段式；本地改过会再确认一次）。
+							   它不自动升级：覆盖前会进安装前快照，但本地改动仍会丢，必须人说清楚。 */
+							row.tracked && !row.backup && row.hasFile
+								? reinstall && reinstall.dir === row.dir
+									? h("div", { className: "dpi-actions dpi-actions-tight" },
+										h("span", { className: "dpi-muted", style: { color: "var(--dsw-alias-state-warning-primary)" } },
+											reinstall.force
+												? "宿主刚检测到目录与台账不一致（面板打开后又改过），覆盖会丢掉这些改动（装前快照里有旧版）。"
+												: "会重新下载来源仓库并覆盖这个目录" + (row.locallyEdited ? "；检测到本地改过，这些改动会被覆盖" : "") + "（装前快照里有旧版）。"),
+										h("button", {
+											className: "dpi-btn dpi-btn-sm dpi-btn-primary",
+											disabled: Boolean(s.local.skillsBusy),
+											onClick: () => doReinstall(row, reinstall.force === true)
+										}, reinstall.force ? "我确认覆盖" : "我确认重装"),
+										h("button", { className: "dpi-btn dpi-btn-sm", onClick: () => setReinstall(null) }, "取消"))
+									: h("div", { className: "dpi-actions dpi-actions-tight" },
+										row.update && row.update.relation === "outdated"
+											? h("button", { className: "dpi-btn dpi-btn-sm", onClick: () => setReinstall({ dir: row.dir }) }, "按来源更新…")
+											: h("button", { className: "dpi-btn dpi-btn-sm", onClick: () => setReinstall({ dir: row.dir }) }, "按来源重装…"))
 								: null,
 							h("div", { className: "dpi-detail" },
 								row.dir + (row.bytes ? " · " + Math.max(1, Math.round(row.bytes / 1024)) + " KB" : "") +
@@ -2691,21 +2777,43 @@ window.__ModuleLoader__.load({
 			return bits.join(" · ");
 		}
 
+		/** Skill 更新摘要 —— 关键是「没有来源记录」不能写成「都是最新的」（存量技能补不回来）。 */
+		function skillUpdateText(summary, at) {
+			if (!summary) return "";
+			if (summary.skills === 0) return "技能根里还没有技能";
+			if (summary.tracked === 0) {
+				return "没有来源记录（" + summary.skills + " 个存量技能补不回来；今后从 GitHub 仓库装的才会记）";
+			}
+			const bits = [
+				summary.outdated > 0 ? "可升级 " + summary.outdated + " 个" : "都跟来源一致",
+				"已跟踪 " + summary.tracked + "/" + summary.skills,
+				"无法判断 " + summary.unknown
+			];
+			if (summary.locallyEdited) bits.push("本地改过 " + summary.locallyEdited);
+			if (at) bits.push(ago(at));
+			return bits.join(" · ");
+		}
+
 		/**
-		 * R37：主面板上**唯一**的更新入口 —— 一次点击同时检查插件与 MCP。
+		 * R37/R38：主面板上**唯一**的更新入口 —— 一次点击同时检查插件、MCP 与 Skill。
 		 *
 		 * 以前这里是「插件更新」，MCP 的更新检查藏在「已装 MCP」浮窗里；两处都叫
-		 * 「检查更新」，用户得记住去哪个窗口查。现在一个按钮、两条链、一份结果。
+		 * 「检查更新」，用户得记住去哪个窗口查。现在一个按钮、三条链、一份结果。
 		 */
 		function UpdateBar({ onOpenList } = {}) {
 			const s = useStore();
 			const inv = s.local.inventory || null;
 			const mcp = s.local.mcp || null;
 			const mcpUpdates = s.local.mcpUpdates || null;
+			const skills = s.local.skills || null;
+			const skillUpdates = s.local.skillUpdates || null;
 			const counts = (inv && inv.counts) || null;
 			const mcpCounts = (mcp && mcp.counts) || null;
+			const skillCounts = (skills && skills.counts) || null;
 			const summary = (inv && inv.summary) || null;
 			const mcpSummary = (mcpUpdates && mcpUpdates.summary) || null;
+			const skillSummary = (skillUpdates && skillUpdates.summary) || null;
+			const skillError = s.local.skillError || null;
 			const items = (inv && inv.items) || [];
 			const outdated = items.filter((item) => item.update && item.update.relation === "outdated");
 			const busy = Boolean(s.local.invBusy || s.local.mcpBusy);
@@ -2715,22 +2823,25 @@ window.__ModuleLoader__.load({
 				if (!s.local.inventory && !s.local.invBusy) loadInventory();
 				/* R37：MCP 的规模也要在这一条里看见 —— 合并之后，这里就是唯一的更新入口。 */
 				if (!s.local.mcp && !s.local.mcpBusy) loadMcp();
+				/* R38：Skill 台账的覆盖情况同理（本地读，30 秒缓存） */
+				if (!s.local.skills && !s.local.skillsBusy) loadSkills();
 			}, []);
 			const headline = inv && inv.ok === false
 				? "读不到：" + (inv.error || inv.note || "未知原因")
 				: counts
 					? counts.total + " 个依赖 · " + counts.bundle + " 个在 bundle 行里" +
-						(mcpCounts ? " · " + mcpCounts.total + " 台 MCP" : "")
+						(mcpCounts ? " · " + mcpCounts.total + " 台 MCP" : "") +
+						(skillCounts ? " · " + skillCounts.skills + " 个技能" : "")
 					: "读取中…";
 			return h("div", { className: "dpi-card dpi-updatebar" },
 				h("div", { className: "dpi-card-head" },
-					h("strong", null, "插件与 MCP 更新"),
+					h("strong", null, "插件 / MCP / Skill 更新"),
 					h("span", { className: "dpi-muted" }, headline),
 					h("button", {
 						className: "dpi-btn dpi-btn-primary dpi-btn-sm",
 						style: { marginLeft: "auto" },
 						disabled: busy,
-						title: "一次联网比对：npm 上每个插件包的最新版 + MCP（Registry / 锁版本的 npx 包）；30 分钟内同结果走缓存。MCP 没有版本源的会如实标「无法判断」",
+						title: "一次联网比对：npm 上每个插件包的最新版 + MCP（Registry / 锁版本的 npx 包）+ Skill（来源台账里记过 GitHub 坐标的）。30 分钟内同结果走缓存；没有版本源/来源记录的会如实标「无法判断」",
 						onClick: runCheckAllUpdates
 					}, busy ? "检查中…" : "检查更新"),
 					outdated.length > 0
@@ -2760,6 +2871,14 @@ window.__ModuleLoader__.load({
 							: mcpCounts && mcpCounts.total > 0
 								? "MCP：还没检查过（" + mcpCounts.total + " 台；没有版本源的会如实标「无法判断」）。"
 								: "MCP：还没配置（没有条目可比对）。"),
+				skillError
+					? h("div", { className: "dpi-muted", style: { color: "var(--dsw-alias-state-error-primary)" } }, "Skill：" + skillError)
+					: skillSummary
+						? h("div", { className: "dpi-muted" }, "Skill：" + skillUpdateText(skillSummary, skillUpdates && skillUpdates.at))
+						: h("div", { className: "dpi-muted" },
+							skillCounts && skillCounts.tracked > 0
+								? "Skill：还没检查过（" + skillCounts.tracked + " 个有来源记录，可查更新；" + skillCounts.untracked + " 个没有记录）。"
+								: "Skill：还没检查过" + (skillCounts ? "（" + skillCounts.skills + " 个技能都没有来源记录，存量补不回来）" : "") + "。"),
 				outdated.length > 0
 					? h("div", { className: "dpi-muted" },
 						collabOk
@@ -3337,10 +3456,6 @@ window.__ModuleLoader__.load({
 
 				h(Composer),
 
-				/* R36/R37：「检查更新」单独一条，且**只有这一条** —— 插件与 MCP 一起查。
-				   清单已经在浮窗里，更新入口必须留在主面板。 */
-				h(UpdateBar, { onOpenList: (key) => setListWindow(key) }),
-
 				data.active ? h("div", { className: "dpi-card dpi-active" }, h(JobDetail, { job: data.active })) : null,
 
 				attention.count > 0 && attention.items && attention.items.length > 0
@@ -3350,8 +3465,11 @@ window.__ModuleLoader__.load({
 
 				h(AiBox),
 				h(History),
-				/* R36：已装插件 / 已装 Skill 已收进右上角「清单」浮窗（低频入口），
-				   主面板只留「插件与 MCP 更新」这一条。 */
+				/* R38：更新条按用户要求挪到「历史」与「环境体检」之间 ——
+				   先看历史（刚发生了什么），再看更新（要不要动手），最后才是体检（环境有没有病）。
+				   它仍是面板上**唯一**的检查入口：插件 + MCP + Skill 一起查。 */
+				h(UpdateBar, { onOpenList: (key) => setListWindow(key) }),
+				/* R36：已装插件 / 已装 Skill 已收进右上角「清单」浮窗（低频入口）。 */
 				h(DoctorBox),
 
 				h("footer", { className: "dpi-footer" },

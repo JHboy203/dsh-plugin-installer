@@ -455,6 +455,28 @@ export async function apply(ctx) {
 						return json(res, 200, fixed.ok
 							? { ok: true, fixed, skills: fixed.skills || null, state: await installer.snapshotState() }
 							: { ok: false, error: fixed.reason || "修不了", fixed });
+					} else if (action === "reinstall-skill") {
+						/* R38：按来源台账重装一个 Skill（重新下载来源仓库 → 覆盖同目录）。
+						   两条硬闸在 pipeline 里：必须是 GitHub 源码归档来源；本地改过要 confirmEdited。
+						   **不暴露给模型** —— 会覆盖用户目录，只能人按。 */
+						if (typeof installer.reinstallSkill !== "function") {
+							return json(res, 503, { ok: false, error: "宿主还没重启：Skill 重装是新代码（lib/pipeline.js 不热重载）" });
+						}
+						const reinstalled = await installer.reinstallSkill(String(body.name || body.dir || ""), {
+							confirm: body.confirm === true,
+							confirmEdited: body.confirmEdited === true
+						});
+						return json(res, 200, reinstalled.ok
+							? { ok: true, job: reinstalled.job, locallyEdited: Boolean(reinstalled.locallyEdited), state: await installer.snapshotState() }
+							: {
+								ok: false,
+								error: reinstalled.message || reinstalled.reason || "重装失败",
+								reason: reinstalled.reason || "failed",
+								message: reinstalled.message || null,
+								locallyEdited: Boolean(reinstalled.locallyEdited),
+								ledgerDigest: reinstalled.ledgerDigest || null,
+								currentDigest: reinstalled.currentDigest || null
+							});
 					} else if (action === "update-all") {
 						/* R26：批量升级 —— 只升「npm 来源 + 已落地 + 有明确 latest」的那一类，
 						   串行排队（一次只跑一单）。复用 30 分钟更新缓存；队列在宿主重启后不续跑。

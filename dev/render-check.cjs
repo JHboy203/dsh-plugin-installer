@@ -175,7 +175,7 @@ function textOf(node, acc) {
  * 正常不执行，所以**数源码不等于数断言**（实测 103 处、只跑 80 条）。真正的判据只能是
  * 「这次实际跑了几条」，所以由脚本自己报总数、并由自己比对。
  */
-const EXPECTED_TOTAL = 243;
+const EXPECTED_TOTAL = 254;
 
 let failed = 0;
 let passed = 0;
@@ -812,7 +812,8 @@ if (typeof t.Skills === "function") {
 		roots: ["D:/x/.dsh/skills"],
 		counts: {
 			roots: 1, dirs: 5, skills: 4, valid: 3, backups: 1, hostTotal: 3, hostVisible: 1,
-			notVisible: 1, yamlBroken: 1, invalid: 1, duplicates: 1, duplicateDirs: 2, modelInvisible: 1, hostOnly: 0, byPanel: 1
+			notVisible: 1, yamlBroken: 1, invalid: 1, duplicates: 1, duplicateDirs: 2, modelInvisible: 1, hostOnly: 0, byPanel: 1,
+			tracked: 1, untracked: 3, locallyEdited: 1, updatable: 1
 		},
 		summary: "4 个技能 · 宿主认 3 个 · 1 个没被认 · 1 个 frontmatter 写坏了（宿主读不了） · 1 个备份残留 · 1 组重名 · 1 个不会自动调用",
 		notes: [],
@@ -824,7 +825,9 @@ if (typeof t.Skills === "function") {
 				yamlIssue: { code: "colon-space", key: "description", line: 3, message: "`description` 的值里有「冒号 + 空格」", fix: "改成块标量（`description: >`）" } }),
 			skillItem({ dir: "alpha.bak-1", name: "alpha", backup: true, backupOf: "alpha", duplicate: true,
 				description: "旧副本", bytes: 2048 }),
-			skillItem({ dir: "delta", name: "delta", modelInvocable: false, sourceLabel: "自定义根", description: "折叠描述" })
+			skillItem({ dir: "delta", name: "delta", modelInvocable: false, sourceLabel: "自定义根", description: "折叠描述",
+			tracked: true, ledgerSource: "GitHub a/b @abc12345 · skills/delta", locallyEdited: true,
+			update: { dir: "delta", relation: "outdated", localCommit: "aaaaaaaaaaaaaaaa", latestCommit: "bbbbbbbbbbbbbbbb", reason: "", error: null } })
 		],
 		host: { available: true, total: 3, complete: true, error: null },
 		duplicates: [{ name: "alpha", dirs: ["alpha", "alpha.bak-1"], backups: ["alpha.bak-1"] }],
@@ -862,6 +865,19 @@ if (typeof t.Skills === "function") {
 		check("已装 Skill：点名其中几个（R26）", hostOnlyText.includes("builtin-a"), hostOnlyText.slice(0, 500));
 		t.store.local = { skills: skillsFixture };
 		resetHooks();
+		/* R38：0 个有来源记录时不许说「都跟来源一致」（本机 58 个存量技能就是这个状态） */
+		t.store.local = { skills: { ...skillsFixture, updates: {
+			at: "2026-10-30T00:00:00.000Z",
+			summary: { skills: 4, tracked: 0, untracked: 4, checked: 0, current: 0, outdated: 0, unknown: 0, locallyEdited: 0 },
+			items: []
+		} } };
+		resetHooks();
+		const zeroLedgerText = textOf(t.Skills({})).join(" | ");
+		check("R38 Skill：0 个有来源记录时不说「都跟来源一致」",
+			zeroLedgerText.includes("没有可比的来源") && !zeroLedgerText.includes("都跟来源一致"),
+			zeroLedgerText.slice(0, 600));
+		t.store.local = { skills: skillsFixture };
+		resetHooks();
 	} catch (e) {
 		check("已装 Skill：折叠态渲染不抛异常", false, String((e && e.message) || e));
 	}
@@ -882,6 +898,9 @@ if (typeof t.Skills === "function") {
 		check("已装 Skill：缺 SKILL.md 的行说清原因", skillExpanded.includes("没有 SKILL.md"));
 		check("已装 Skill：描述真的渲染出来（不是只给名字）", skillExpanded.includes("折叠描述") && skillExpanded.includes("宿主没认的技能"));
 		check("已装 Skill：来源翻成人话", skillExpanded.includes("用户级"));
+		check("R38 Skill：标出安装时记下的来源（GitHub + commit）", skillExpanded.includes("GitHub a/b @abc12345"), skillExpanded.slice(0, 500));
+		check("R38 Skill：本地改过单独标出（重装会覆盖）", skillExpanded.includes("本地改过"));
+		check("R38 Skill：可升级行给来源最新 commit 与「按来源更新」入口", skillExpanded.includes("可升级 → bbbbbbb") && skillExpanded.includes("按来源更新…"), skillExpanded.slice(0, 700));
 		check("已装 Skill：展开后能收起", skillExpanded.includes("收起"));
 	} catch (e) {
 		check("已装 Skill：展开态渲染不抛异常", false, String((e && e.message) || e));
@@ -912,6 +931,35 @@ if (typeof t.Skills === "function") {
 		check("已装 Skill：确认时说清「先备份原文、不删内容」", skillFixConfirm.includes("先备份原文") && skillFixConfirm.includes("不删任何内容"), skillFixConfirm.slice(0, 400));
 	} catch (e) {
 		check("已装 Skill：修复确认态渲染不抛异常", false, String((e && e.message) || e));
+	}
+
+	/* ②c2 R38：按来源重装（两段式；本地改过时把「会覆盖」说清；宿主再判一次后要第二次确认） */
+	resetHooks();
+	hooks[2] = true;
+	hooks[5] = { dir: "delta" };
+	let skillReinstall = "";
+	try {
+		skillReinstall = textOf(t.Skills({})).join(" | ");
+		check("R38 Skill：重装前有二次确认", skillReinstall.includes("我确认重装"), skillReinstall.slice(0, 600));
+		check("R38 Skill：确认时说明会覆盖、本地改过、快照有旧版",
+			skillReinstall.includes("会重新下载来源仓库") && skillReinstall.includes("本地改过") && skillReinstall.includes("装前快照"),
+			skillReinstall.slice(0, 800));
+		check("R38 Skill：确认态可取消", skillReinstall.includes("取消"));
+	} catch (e) {
+		check("R38 Skill：重装确认态渲染不抛异常", false, String((e && e.message) || e));
+	}
+
+	resetHooks();
+	hooks[2] = true;
+	hooks[5] = { dir: "delta", force: true };
+	let skillReinstallForce = "";
+	try {
+		skillReinstallForce = textOf(t.Skills({})).join(" | ");
+		check("R38 Skill：宿主判本地改过后要第二次确认（我确认覆盖）",
+			skillReinstallForce.includes("我确认覆盖") && skillReinstallForce.includes("面板打开后又改过"),
+			skillReinstallForce.slice(0, 800));
+	} catch (e) {
+		check("R38 Skill：覆盖确认态渲染不抛异常", false, String((e && e.message) || e));
 	}
 
 	/* ②d R21：不可自动改写的 YAML 错误（Tab 缩进 / 重复键 / 引号没闭合）——
@@ -1476,15 +1524,23 @@ if (typeof t.UpdateBar === "function") {
 			at: "2026-10-30T14:00:00.000Z",
 			summary: { checked: 1, outdated: 1, current: 0, ahead: 0, undetectable: 0, failed: 0 },
 			items: []
+		},
+		skills: { ok: true, counts: { skills: 4, tracked: 1, untracked: 3, locallyEdited: 1, updatable: 1 }, items: [] },
+		skillUpdates: {
+			at: "2026-10-30T14:00:00.000Z",
+			summary: { skills: 4, tracked: 1, untracked: 3, checked: 1, current: 0, outdated: 1, unknown: 0, locallyEdited: 1 },
+			items: []
 		}
 	};
 	t.store.data = { collaborator: { ok: true, line: "卸载协作：可用" } };
 	resetHooks();
 	const bar = t.UpdateBar({ onOpenList: () => {} });
 	const barText = textOf(bar).join(" | ");
-	check("R37 更新条：标题是「插件与 MCP 更新」（一个入口两条链）", barText.includes("插件与 MCP 更新"), barText.slice(0, 100));
+	check("R38 更新条：标题是「插件 / MCP / Skill 更新」（一个入口三条链）", barText.includes("插件 / MCP / Skill 更新"), barText.slice(0, 100));
 	check("R36 更新条：检查更新独立出现", barText.includes("检查更新"));
-	check("R37 更新条：同一条里同时报插件与 MCP 的更新结果", barText.includes("插件：可升级 1 个") && barText.includes("MCP：可升级 1 台"), barText.slice(0, 400));
+	check("R38 更新条：同一条里同时报插件、MCP 与 Skill 的更新结果",
+		barText.includes("插件：可升级 1 个") && barText.includes("MCP：可升级 1 台") && barText.includes("Skill：可升级 1 个"),
+		barText.slice(0, 600));
 	check("R36 更新条：可升级时给「全部升级」", barText.includes("全部升级 1"));
 	check("R36 更新条：留一个「看清单」入口", barText.includes("看清单"));
 	t.store.local = saved;
@@ -1501,6 +1557,10 @@ if (typeof t.checkAllSummaryText === "function") {
 		t.checkAllSummaryText({ ok: true, summary: { outdated: 2 } }, { summary: { checked: 1, outdated: 1 } }, null) === "插件可升级 2 个 · MCP 可升级 1 台");
 	check("R37 合并摘要：一条链失败不吞掉另一条",
 		t.checkAllSummaryText({ ok: false }, null, "MCP 更新检查失败：registry down") === "插件检查失败 · MCP 更新检查失败：registry down");
+	check("R38 合并摘要：没有来源记录时不许说「Skill 都是最新的」",
+		t.checkAllSummaryText({ ok: true, summary: { outdated: 2 } }, null, null, { summary: { skills: 58, tracked: 0, unknown: 0, outdated: 0 } }, null) === "插件可升级 2 个 · Skill 没有来源记录（存量补不回来）");
+	check("R38 合并摘要：Skill 可升级时带上「无法判断」计数",
+		t.checkAllSummaryText({ ok: true, summary: { outdated: 2 } }, null, null, { summary: { skills: 58, tracked: 3, unknown: 1, outdated: 1 } }, null) === "插件可升级 2 个 · Skill 可升级 1 个（无法判断 1）");
 } else {
 	check("__test 暴露了 checkAllSummaryText", false);
 }
@@ -1606,8 +1666,14 @@ if (typeof t.Panel === "function") {
 		panelText = textOf(t.Panel({})).join(" | ");
 		check("R36 Panel：头部三件套「设置 / 清单 / 刷新」都在", panelText.includes("设置") && panelText.includes("清单") && panelText.includes("刷新"), panelText.slice(0, 200));
 		check("R36 Panel：「清单」在「设置」之后、「刷新」之前", panelText.indexOf("设置") < panelText.indexOf("清单") && panelText.indexOf("清单") < panelText.indexOf("刷新"), panelText.slice(0, 200));
-		check("R37 Panel：主面板有「插件与 MCP 更新」条（唯一入口）", panelText.includes("插件与 MCP 更新") && panelText.includes("检查更新"), panelText.slice(0, 300));
-		check("R37 Panel：「检查更新」在整页只出现一次（两个入口已合并）", (panelText.match(/检查更新/g) || []).length === 1, (panelText.match(/检查更新/g) || []).length);
+		check("R38 Panel：主面板有「插件 / MCP / Skill 更新」条（唯一入口）", panelText.includes("插件 / MCP / Skill 更新") && panelText.includes("检查更新"), panelText.slice(0, 300));
+		check("R38 Panel：更新条在「历史」与「环境体检」之间", (() => {
+			const iHist = panelText.indexOf("历史");
+			const iUpd = panelText.indexOf("插件 / MCP / Skill 更新");
+			const iDoc = panelText.indexOf("环境体检");
+			return iHist >= 0 && iHist < iUpd && iUpd < iDoc;
+		})(), panelText.slice(0, 600));
+		check("R37 Panel：「检查更新」在整页只出现一次（入口已合并）", (panelText.match(/检查更新/g) || []).length === 1, (panelText.match(/检查更新/g) || []).length);
 		check("R36 Panel：清单窗口默认不挂载（低频内容不占主面板）", !panelText.includes("看一段能直接抄") && !panelText.includes("只读 profile 的两份组合文件"));
 	} catch (e) {
 		check("R36 Panel：渲染不抛异常", false, String((e && e.message) || e));
