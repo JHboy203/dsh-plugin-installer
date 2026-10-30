@@ -7,9 +7,9 @@
 
 | 层 | 命令 | 期望 |
 |---|---|---|
-| 自洽（不碰宿主、不 spawn、不写盘） | `node dev/audit.mjs` **或** `host_selfcheck({plugin:"dsh-plugin-installer", script:"dev/audit.mjs"})` | `SUMMARY audit passed`（155 项） |
-| 行为（真跑宿主逻辑） | `host_selfcheck({plugin:"dsh-plugin-installer"})` | 日志 `SUMMARY 835 passed, 0 failed`（工具头部 PASS 数是按输出尾部数的，会少算，**看日志**） |
-| 界面（无头渲染） | `node dev/render-check.cjs` **或** `host_selfcheck({..., script:"dev/render-check.cjs"})` | `TOTAL 141 checks` / `all render checks passed` |
+| 自洽（不碰宿主、不 spawn、不写盘） | `node dev/audit.mjs` **或** `host_selfcheck({plugin:"dsh-plugin-installer", script:"dev/audit.mjs"})` | `SUMMARY audit passed`（188 项） |
+| 行为（真跑宿主逻辑） | `host_selfcheck({plugin:"dsh-plugin-installer"})` | 日志 `SUMMARY 1034 passed, 0 failed`（工具头部 PASS 数是按输出尾部数的，会少算，**看日志**） |
+| 界面（无头渲染） | `node dev/render-check.cjs` **或** `host_selfcheck({..., script:"dev/render-check.cjs"})` | `TOTAL 237 checks` / `all render checks passed` |
 
 改断言数就必须同步：`dev/audit.mjs` 的 `EXPECTED_ASSERTIONS` / `EXPECTED_RENDER_ASSERTIONS`、
 `dev/render-check.cjs` 的 `EXPECTED_TOTAL`、`README.md` 与本插件交接文件里的数字（audit 会当场对表）。
@@ -18,6 +18,11 @@
 
 | 探针 | 回答什么 | 跑法 |
 |---|---|---|
+| `dev/probe-mcp.mjs` | **MCP 判据 42 项（R36）**：组合文件解析 / Registry→安装参数 / 追加文本 / 临时 profile 真写 / 来源台账 / 更新检查三层（Registry、锁版本 npx、未锁→unknown） | `host_selfcheck({..., script:"dev/probe-mcp.mjs"})` |
+| `dev/probe-mcp-live.mjs` | 真实 profile 上 MCP 视图（本机 0 台）+ 真查一次 Registry；只读 | 同上，script 换 `dev/probe-mcp-live.mjs` |
+| `dev/probe-mcp-wire.mjs` | 真 search 并入 MCP 候选、假 LLM 保留 `kind/installPath/requiredEnv`（11 项） | 同上，script 换 `dev/probe-mcp-wire.mjs` |
+| `dev/probe-mcp-append-real.mjs` | 复制真实 579 行 `cordis.patch.yml` 到临时目录，走一遍追加 → 原文不少 / 备份=原文 / 写后复核（5 项） | 同上，script 换 `dev/probe-mcp-append-real.mjs` |
+| `dev/fixtures/stacking/index.html` | **R36 层叠夹具**：`?old=1` 复现「下拉被后面卡片盖住」，不带 query 是修复后；看 `window.__stackResult.menuItemHit`。可用浏览器打开，或 `lemofilm_stills` 出 old/new 静帧 | 直接打开 / `lemofilm_stills({project:"…/dev/fixtures/stacking", q:"old=1"})` |
 | `dev/probe-crash.mjs` | 真实崩溃日志上，`readNewestCrash` + `inspectProfile` 现在怎么判（两类日志 / sibling / stale / 来源处置） | `host_selfcheck({plugin, script:"dev/probe-crash.mjs"})` |
 | `dev/probe-skills.mjs` | 真实技能根上，YAML 判据会不会误报、`fixable` 怎么分 | 同上，script 换 `dev/probe-skills.mjs` |
 | `dev/probe-search.mjs` | 本机官方 `@deepseek-ai/*` basename 有哪些；影子包标注对不对。带 `DSH_PROBE_SEARCH="<查询>"` 会真联网搜一次 | `host_selfcheck({..., script:"dev/probe-search.mjs", env:{DSH_PROBE_SEARCH:"dsh-base"}})` |
@@ -61,7 +66,7 @@ GUI 端口每次重启会变：看 `install_hub_status` 最后一行的「远程
    - `旧（磁盘已改：…，但最后一次 apply 是 …）` = 没换新，重启或等宿主 re-apply。
 2. 再补一刀：`probe-live.mjs` 打运行中的宿主，看新字段/新计数有没有回话（`code.fresh` 为 `false` 就是旧代码）。
 
-`lib/*` 改完通常要重启；`client.js` 改完刷新页面即可（记得提 `BUILD` 号，行为自检会验它单调前进）。
+`lib/*` 改完通常要重启；`client.js` 改完**必须整体重启 DSH**（不要只刷新页面：宿主按内容 hash 发的 bundle rev 会 404，整页卡在 Loading plugins；记得提 `BUILD` 号）。
 
 ## 端到端验收（装 / 升级真插件）
 

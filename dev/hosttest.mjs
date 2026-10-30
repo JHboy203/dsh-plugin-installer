@@ -2680,7 +2680,7 @@ async function main() {
 	ok("inventory: index 暴露 check-updates 动作", /check-updates/.test(indexSrcR12));
 	ok("inventory: 状态工具带「已装」一行", /已装：/.test(toolsSrcR12) && /inventoryView/.test(toolsSrcR12));
 	ok("inventory: 状态工具有 updates 开关（默认不联网）", /updates: \{ type: "boolean"/.test(toolsSrcR12));
-	ok("inventory: 面板组件真的接进 Panel", /h\(Inventory\)/.test(clientSrcR12));
+	ok("inventory: 面板组件挂进「清单」浮窗（R36）", /h\(Inventory, \{ inWindow: true \}\)/.test(clientSrcR12));
 	ok("inventory: 面板有「检查更新」与「升级到」", clientSrcR12.includes("检查更新") && clientSrcR12.includes("升级到 "));
 	ok("inventory: 面板显示来源与「不比对最新版」的理由", clientSrcR12.includes("item.kindLabel") && clientSrcR12.includes("item.why"));
 
@@ -2812,7 +2812,7 @@ async function main() {
 	ok("skill: 刷新会绕过 30 秒缓存", /fresh/.test(indexSrcR14) && /searchParams\.get\("fresh"\)/.test(indexSrcR14));
 	ok("skill: 状态工具有「Skill：」一行", /· Skill：/.test(toolsSrcR14) && /skillsLine/.test(toolsSrcR14));
 	ok("skill: 状态工具点名 frontmatter 写坏的那几个", /frontmatter 写坏/.test(toolsSrcR14) && /yamlBroken/.test(toolsSrcR14));
-	ok("skill: 面板组件真的接进 Panel", /h\(Skills\)/.test(clientSrcR14));
+	ok("skill: 面板组件挂进「清单」浮窗（R36）", /h\(Skills, \{ inWindow: true \}\)/.test(clientSrcR14));
 	ok("skill: 面板列出备份 / 宿主没认 / 不会自动调用", clientSrcR14.includes("备份残留") && clientSrcR14.includes("宿主没认") && clientSrcR14.includes("不会自动调用"));
 	ok("skill: 面板有读不到时的兜底", clientSrcR14.includes("读不到技能清单") && clientSrcR14.includes("重试"));
 

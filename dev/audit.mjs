@@ -51,7 +51,7 @@ export const FROZEN_DEFAULTS = {
 export const EXPECTED_ASSERTIONS = 1034;
 
 /** 界面自检项数（dev/render-check.cjs）。同样是「文档对表」的一半。 */
-const EXPECTED_RENDER_ASSERTIONS = 201;
+const EXPECTED_RENDER_ASSERTIONS = 237;
 
 /** 期望注册的宿主工具（漏一个 = 模型看不见一项能力）。R32 起 6 个（新增只读探针）。 */
 const EXPECTED_TOOLS = [
@@ -198,7 +198,7 @@ async function main() {
 	ok("更新比对：失败逐条隔离（不许一坏全空）", /catch \(e\)/.test(updSrc || "") && /relation: "unknown"/.test(updSrc || ""));
 	ok("更新比对：有 TTL 缓存（不重复打 registry）", /memoizeTtl/.test(updSrc || ""));
 	ok("check-updates 只在动作里跑（不挂在 /state 轮询上）", /check-updates/.test(indexSrc2) && !/checkUpdates\(|inventory\(/.test(((pipelineSrc.match(/async snapshotState[\s\S]{0,900}/) || [""])[0])));
-	ok("面板真的把已装清单接进 Panel", /h\(Inventory\)/.test(clientSrc) && /"\/inventory"/.test(clientSrc));
+	ok("面板把已装清单接进「清单」浮窗（R36）", /h\(Inventory, \{ inWindow: true \}\)/.test(clientSrc) && /"\/inventory"/.test(clientSrc));
 	eq("界面自检项数与文档一致", await declaredRenderAssertions(), EXPECTED_RENDER_ASSERTIONS);
 
 	/* R12.1：指纹只在 codestamp.js 加载时算一次，而宿主是**逐文件**换新的 ——
@@ -224,7 +224,7 @@ async function main() {
 	ok("已装 Skill：体检并入技能结论", /skillFindings\(/.test(pipelineSrc));
 	ok("已装 Skill：index 暴露 GET /skills（刷新可绕过缓存）", /path === "\/skills"/.test(indexSrc2) && /fresh/.test(indexSrc2));
 	ok("已装 Skill：状态工具有「Skill：」一行", /· Skill：/.test(toolsSrc) && /skillsLine/.test(toolsSrc));
-	ok("已装 Skill：面板把卡片接进 Panel", /h\(Skills\)/.test(clientSrc) && /\bSkills,/.test(clientSrc));
+	ok("已装 Skill：面板把卡片接进「清单」浮窗（R36）", /h\(Skills, \{ inWindow: true \}\)/.test(clientSrc) && /\bSkills,/.test(clientSrc));
 	ok("已装 Skill：面板标出备份 / 宿主没认 / 不会自动调用", clientSrc.includes("备份残留") && clientSrc.includes("宿主没认") && clientSrc.includes("不会自动调用"));
 
 	/* ⑤h R15：两件「把判据改对」的事 ——
@@ -281,7 +281,7 @@ async function main() {
 	ok("已装标记带上来源形态", /installedKindLabel: known\.kindLabel/.test(invSrc || ""));
 	ok("不同来源塞 name-collision 红旗", /id: "name-collision"/.test(invSrc || ""));
 	ok("只在本机：搜本机插件时给一句解释", /export function localOnlyHint/.test(invSrc || "") && /不会出现在 npm \/ GitHub/.test(invSrc || ""));
-	ok("pipeline 的 search 把 repoUrl 与 localOnly 带出去", /repoUrl: item\.repoUrl/.test(pipelineSrc) && /localOnly: localOnlyHint\(inv, query, items\)/.test(pipelineSrc));
+	ok("pipeline 的 search 把 repoUrl 与 localOnly 带出去", /repoUrl: item\.repoUrl/.test(pipelineSrc) && /localOnly: localOnlyHint\(inv, normalized, pluginItems\)/.test(pipelineSrc));
 	ok("搜索结果带上游仓库地址（三个 shaper 都带）", (sourcesSrc.match(/repoUrl/g) || []).length >= 3);
 	ok("工具输出不再丢掉「已装」（模型也要看得见）", /已装 " \+ \(item\.installed/.test(toolsSrc) && /result\.localOnly/.test(toolsSrc));
 	ok("面板 chip 写出来源形态，并把提示渲染出来", clientSrc.includes("installedKindLabel") && clientSrc.includes("localOnly.text"));

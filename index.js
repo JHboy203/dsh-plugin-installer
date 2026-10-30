@@ -186,6 +186,8 @@ function makeFaces(ctx) {
 		get llm() { return svc(ctx, "llm"); },
 		get agentDefaultModel() { return svc(ctx, "agentDefaultModel"); },
 		get skills() { return svc(ctx, "skills"); },
+		/* R36：MCP 的「跑没跑」只能看工具表里有没有 mcp__<server>__* —— 工具服务已在 inject 里。 */
+		get tools() { return svc(ctx, "tools"); },
 		get pluginManager() { return svc(ctx, "pluginManager"); },
 		get webApp() { return svc(ctx, "webApp"); },
 		get remoteAccess() { return svc(ctx, "remoteAccess"); },
@@ -304,6 +306,18 @@ export async function apply(ctx) {
 					}
 					const skills = await installer.skills(url && url.searchParams && url.searchParams.get("fresh") === "1");
 					return json(res, 200, { ok: true, skills });
+				}
+
+				/* R36：已装 MCP —— 不是 profile 依赖，而是组合文件里 `@deepseek-ai/dsh-mcp-client`
+				   的条目。每台给 serverName / transport / command/url / 在哪个文件第几行 /
+				   是否真的跑起来了（工具表里有没有 mcp__<serverName>__*）。
+				   只读，每次现读（两份文件很便宜），写完条目要能立刻看见。 */
+				if (path === "/mcp" && method === "GET") {
+					if (typeof installer.mcpView !== "function") {
+						return json(res, 503, { ok: false, error: "宿主还没重启：MCP 清单是新代码（lib/pipeline.js 不热重载）" });
+					}
+					const mcp = await installer.mcpView();
+					return json(res, 200, { ok: true, mcp });
 				}
 
 				/* R13：激活视图 —— 「我装的东西现在都在跑吗」。
@@ -445,6 +459,30 @@ export async function apply(ctx) {
 					} else if (action === "integrations") {
 						const eco = await installer.integrations(true);
 						return json(res, 200, { ok: true, integrations: eco, state: await installer.snapshotState() });
+					} else if (action === "check-mcp-updates") {
+						/* R36：只读检查 —— 有来源台账的查 Registry、锁版本的 npx 包查 npm；
+						   其余如实标「无法判断」。不写盘、不装东西。 */
+						if (typeof installer.checkMcpUpdates !== "function") {
+							return json(res, 503, { ok: false, error: "宿主还没重启：MCP 更新检查是新代码（lib/pipeline.js 不热重载）" });
+						}
+						const result = await installer.checkMcpUpdates();
+						return json(res, 200, { ...result, state: await installer.snapshotState() });
+					} else if (action === "add-mcp") {
+						/* R36：把一台 MCP 服务器写进 profile 组合文件。
+						   面板只能给「Registry 名字 + 版本」—— command / args / url 由宿主重新查
+						   Registry 得到，客户端塞不进来任意命令。写入带备份、写后复核；
+						   写完要重启 DSH 才加载（patch 层不热更）。
+						   **不暴露给模型**（动组合文件只能人按）。 */
+						if (typeof installer.addMcp !== "function") {
+							return json(res, 503, { ok: false, error: "宿主还没重启：MCP 安装是新代码（lib/pipeline.js 不热重载）" });
+						}
+						const input = body.candidate && typeof body.candidate === "object"
+							? { name: body.candidate.name || body.candidate.registryName, version: body.candidate.version }
+							: String(body.spec || body.name || "");
+						const added = await installer.addMcp(input);
+						return json(res, 200, added.ok
+							? { ok: true, added: added.added, mcp: added.mcp || null, note: added.note, restartRequired: true, state: await installer.snapshotState() }
+							: { ok: false, error: added.reason || "写不进组合文件", added });
 					} else return json(res, 400, { ok: false, error: "unknown action: " + action });
 					const state = await installer.snapshotState();
 					return json(res, 200, { ...result, state });

@@ -175,7 +175,7 @@ function textOf(node, acc) {
  * 正常不执行，所以**数源码不等于数断言**（实测 103 处、只跑 80 条）。真正的判据只能是
  * 「这次实际跑了几条」，所以由脚本自己报总数、并由自己比对。
  */
-const EXPECTED_TOTAL = 201;
+const EXPECTED_TOTAL = 237;
 
 let failed = 0;
 let passed = 0;
@@ -709,7 +709,7 @@ if (typeof t.Inventory === "function") {
 		check("已装清单：标题是「已装插件」", collapsed.includes("已装插件"), collapsed.slice(0, 80));
 		check("已装清单：折叠态报规模", collapsed.includes("3 个依赖") && collapsed.includes("2 个在 bundle 行里"), collapsed.slice(0, 120));
 		check("已装清单：折叠态不铺开逐条", !collapsed.includes("dsh-ffmpeg"));
-		check("已装清单：有「检查更新」入口", collapsed.includes("检查更新"));
+		check("已装清单：检查更新已移出（R36 单独入口），卡里不再重复", !collapsed.includes("检查更新"));
 		check("已装清单：有「展开」入口", collapsed.includes("展开"));
 		check("已装清单：折叠态提示「声明了但没落地」", collapsed.includes("声明了但没落地"), collapsed.slice(0, 200));
 		check("已装清单：检查过就说可升级几个", collapsed.includes("可升级 1 个"), collapsed.slice(0, 200));
@@ -1025,6 +1025,13 @@ check("窄屏：设置面板宽度流体 + 内部可滚动 + 有高度上限",
 	/\.dpi-settings\{[^}]*max-height:/.test(cssText));
 check("窄屏：没有超过 320px 的固定宽度（360 宽下必溢出）",
 	!/\.dpi-[\w-]+\{[^}]*\bwidth:\s*(?:3[3-9]\d|[4-9]\d\d|\d{4,})px/.test(cssText));
+
+/* R36：清单下拉必须把 header 抬成层叠上下文，否则会被后面的卡片盖住。
+   真机 Playwright 夹具见 dev/fixtures/stacking/index.html（old=1 复现，new 修复后）。 */
+check("R36 层叠：header 有 position + z-index（下拉不被卡片盖住）",
+	/\.dpi-header\{[^}]*position:relative[^}]*z-index:\s*30/.test(cssText), cssText.match(/\.dpi-header\{[^}]*\}/)?.[0]);
+check("R36 层叠：菜单 z-index 高于 header 的 30",
+	/\.dpi-menu\{[^}]*z-index:\s*(?:[3-9]\d|\d{3,})/.test(cssText), cssText.match(/\.dpi-menu\{[^}]*\}/)?.[0]);
 
 /* ── R30：界面打磨（两行历史 / 状态胶囊 / 空态 / 展开边界 / 自绘图标）──────────────
    这一组钉的是「公开之前的观感契约」：它们不改变任何判据，但改坏了用户第一眼就看得出来，
@@ -1417,6 +1424,174 @@ if (typeof t.JobDetail === "function") {
 		noisyText.includes("ERR_PNPM_RESOLUTION_POLICY_VIOLATIONS_UNHANDLED") && !noisyText.includes("Progress: resolved"), noisyText.slice(0, 220));
 	check("R35 老任务：保留「卸载旧版失败：」这层前缀（知道是哪一步挂的）",
 		noisyText.includes("卸载旧版失败：") && !noisyText.includes("✓ Lockfile"), noisyText.slice(0, 200));
+}
+
+/* ── R36：清单菜单 / 浮窗 / 已装 MCP / 独立更新条 ─────────────────────────
+ * 这一轮改的是「入口的位置」：三个低频清单从主面板搬进浮窗，检查更新单独留一条。
+ * 位置错了用户会以为功能没了，所以这组断言钉的是「入口在、内容在、关得掉」。 */
+if (typeof t.ListMenu === "function") {
+	const picked = [];
+	resetHooks();
+	hooks[0] = true; /* useState(open) */
+	const menu = t.ListMenu({ counts: { plugins: 3, skills: 4, mcp: 2 }, onPick: (key) => picked.push(key), onOpen: () => {} });
+	const menuText = textOf(menu).join(" | ");
+	check("R36 清单：按钮文字是「清单」", menuText.includes("清单"), menuText.slice(0, 120));
+	check("R36 清单：三个条目齐全", menuText.includes("已装插件") && menuText.includes("已装 Skill") && menuText.includes("已装 MCP"), menuText.slice(0, 200));
+	check("R36 清单：条目带计数", menuText.includes("3") && menuText.includes("4") && menuText.includes("2"));
+	const items = findNodes(menu, (props) => props && props.className === "dpi-menu-item");
+	check("R36 清单：三项都可点", items.length === 3, items.length);
+	if (items[0] && items[0].props.onClick) items[0].props.onClick();
+	check("R36 清单：点一项回调到对应清单", picked[0] === "plugins", picked);
+} else {
+	check("__test 暴露了 ListMenu", false);
+}
+
+if (typeof t.FloatWindow === "function") {
+	let closed = 0;
+	resetHooks();
+	const win = t.FloatWindow({ title: "已装 MCP", subtitle: "浮窗副标题", onClose: () => { closed += 1; }, children: "内容" });
+	const winText = textOf(win).join(" | ");
+	check("R36 浮窗：标题与副标题都渲染", winText.includes("已装 MCP") && winText.includes("浮窗副标题"), winText.slice(0, 120));
+	check("R36 浮窗：有右上角关闭按钮", findNodes(win, (props) => props && props.className === "dpi-float-x").length === 1);
+	const xBtn = findNodes(win, (props) => props && props.className === "dpi-float-x")[0];
+	if (xBtn && xBtn.props.onClick) xBtn.props.onClick();
+	check("R36 浮窗：点 X 会关", closed === 1, closed);
+	const overlay = findNodes(win, (props) => typeof props.className === "string" && props.className.includes("dpi-float-overlay"))[0];
+	if (overlay && overlay.props.onClick) overlay.props.onClick();
+	check("R36 浮窗：点周围空白也会关", closed === 2, closed);
+}
+
+if (typeof t.UpdateBar === "function") {
+	const saved = t.store.local;
+	const savedData = t.store.data;
+	t.store.local = {
+		inventory: {
+			ok: true,
+			counts: { total: 3, bundle: 2 },
+			summary: { checked: 2, outdated: 1, current: 1, ahead: 0, failed: 0 },
+			items: [{ name: "a", update: { relation: "outdated" } }]
+		}
+	};
+	t.store.data = { collaborator: { ok: true, line: "卸载协作：可用" } };
+	resetHooks();
+	const bar = t.UpdateBar({ onOpenList: () => {} });
+	const barText = textOf(bar).join(" | ");
+	check("R36 更新条：标题是「插件更新」", barText.includes("插件更新"), barText.slice(0, 100));
+	check("R36 更新条：检查更新独立出现", barText.includes("检查更新"));
+	check("R36 更新条：可升级时给「全部升级」", barText.includes("全部升级 1"));
+	check("R36 更新条：留一个「看清单」入口", barText.includes("看清单"));
+	t.store.local = saved;
+	t.store.data = savedData;
+} else {
+	check("__test 暴露了 UpdateBar", false);
+}
+
+if (typeof t.McpList === "function") {
+	const saved = t.store.local;
+	t.store.local = {
+		mcp: {
+			ok: true,
+			counts: { total: 2, running: 1, configured: 1, disabled: 0, problems: 0 },
+			notes: ["只读 profile 的两份组合文件"],
+			items: [
+				{ id: "mcp-a", serverName: "alpha", transport: "stdio", command: "npx", args: ["-y", "@mcp/fs"], running: true, state: "running", envKeys: ["TOKEN"], file: "cordis.patch.yml", line: 1, problems: [] },
+				{ id: "mcp-b", serverName: "beta", transport: "streamable-http", url: "https://b/mcp", running: false, state: "configured", envKeys: [], file: "cordis.patch.yml", line: 9, problems: [] }
+			],
+			template: "- id: mcp-x\n  name: '@deepseek-ai/dsh-mcp-client'"
+		},
+		mcpUpdates: {
+			at: "2026-10-30T14:00:00.000Z",
+			summary: { checked: 2, outdated: 1, current: 1, ahead: 0, undetectable: 1, failed: 0 },
+			items: [
+				{ serverName: "alpha", relation: "outdated", localVersion: "1.0.0", latestVersion: "2.0.0", gap: { text: "主版本 1 → 2" }, error: null, reason: "" },
+				{ serverName: "beta", relation: "unknown", error: null, reason: "远程端点没有版本号，无法与本地配置比对" }
+			]
+		}
+	};
+	resetHooks();
+	const mcpText = textOf(t.McpList({})).join(" | ");
+	check("R36 MCP：卡片标题是「已装 MCP」", mcpText.includes("已装 MCP"), mcpText.slice(0, 120));
+	check("R36 MCP：报「几台 · 几台在跑」", mcpText.includes("2 台") && mcpText.includes("1 台在跑"), mcpText.slice(0, 160));
+	check("R36 MCP：运行中与未加载分开标", mcpText.includes("运行中") && mcpText.includes("已配置 · 未加载"));
+	check("R36 MCP：显示启动命令与来源文件行", mcpText.includes("npx -y @mcp/fs") && mcpText.includes("cordis.patch.yml:1"));
+	check("R36 MCP：env 只显示键名（不显示值）", mcpText.includes("env TOKEN") && !mcpText.includes("sk-"), mcpText.slice(0, 300));
+	check("R36 MCP 更新：有独立的「检查更新」按钮", mcpText.includes("检查更新"));
+	check("R36 MCP 更新：摘要报可升级 / 无法判断", mcpText.includes("可升级 1 台") && mcpText.includes("无法判断 1"), mcpText.slice(0, 400));
+	check("R36 MCP 更新：可升级行给目标版本", mcpText.includes("可升级 → 2.0.0"), mcpText.slice(0, 500));
+	check("R36 MCP 更新：无法判断时写明原因", mcpText.includes("无法判断") && mcpText.includes("远程端点没有版本号"), mcpText.slice(0, 600));
+
+	t.store.local = {
+		mcp: { ok: true, counts: { total: 0, running: 0, configured: 0, disabled: 0, problems: 0 }, notes: [], items: [], template: "- id: mcp-x" }
+	};
+	resetHooks();
+	const emptyText = textOf(t.McpList({})).join(" | ");
+	check("R36 MCP：空态给出两种加法", emptyText.includes("还没有配置 MCP 服务器") && emptyText.includes("mcp:<registry"));
+	check("R36 MCP：空态能看并复制组合片段", emptyText.includes("看一段能直接抄") && emptyText.includes("复制"));
+	check("R36 MCP 更新：没检查过时说清「没有统一版本源」", emptyText.includes("还没检查过 MCP 更新") && emptyText.includes("没有统一的版本源"), emptyText.slice(0, 300));
+
+	t.store.local = { mcp: { ok: false, error: "宿主还没重启：MCP 清单是新代码", items: [], counts: { total: 0 } } };
+	resetHooks();
+	const errText = textOf(t.McpList({})).join(" | ");
+	check("R36 MCP：读不到时说清原因并给重试", errText.includes("读不到：宿主还没重启") && errText.includes("重试"), errText.slice(0, 160));
+	t.store.local = saved;
+} else {
+	check("__test 暴露了 McpList", false);
+}
+
+if (typeof t.AiBox === "function") {
+	const saved = t.store.local;
+	t.store.local = {
+		aiBusy: false,
+		ai: {
+			reply: "搜索：time（2 条）",
+			searchOnly: true,
+			recommendations: [
+				{ kind: "mcp", name: "ai.b77/time", displayName: "time", version: "1.0.0", source: "mcp-registry", serverName: "time", transport: "streamable-http", installPath: "https://time.b77.ai/mcp", installable: true, why: "远程时间服务", requiredEnv: [], trust: { badges: [{ label: "官方 MCP Registry", tone: "ok" }], flags: [] }, url: "https://example.com/repo" },
+				{ kind: "mcp", name: "ai.example/auth", displayName: "auth", version: "1.0.0", source: "mcp-registry", serverName: "auth", transport: "stdio", installPath: "npx -y auth-mcp", installable: false, blockedReason: "需要先设置环境变量：TOKEN", requiredEnv: ["TOKEN"], configYaml: "- id: mcp-auth", why: "需要密钥", trust: { badges: [], flags: [] } }
+			]
+		}
+	};
+	resetHooks();
+	const aiMcp = textOf(t.AiBox({})).join(" | ");
+	check("R36 MCP 推荐：标出 MCP 服务器与 transport", aiMcp.includes("MCP 服务器") && aiMcp.includes("streamable-http"), aiMcp.slice(0, 300));
+	check("R36 MCP 推荐：给出安装路径", aiMcp.includes("安装路径：") && aiMcp.includes("https://time.b77.ai/mcp"));
+	check("R36 MCP 推荐：可装的有「装成 MCP」", aiMcp.includes("装成 MCP"));
+	check("R36 MCP 推荐：不可装的有「复制组合片段」+ 原因", aiMcp.includes("复制组合片段") && aiMcp.includes("需要环境变量：TOKEN"), aiMcp.slice(0, 500));
+	t.store.local = saved;
+} else {
+	check("__test 暴露了 AiBox", false);
+}
+
+if (typeof t.Panel === "function") {
+	const savedData = t.store.data;
+	const savedLocal = t.store.local;
+	t.store.data = {
+		host: { dsh: "0.2.1-rc.5", profile: "desktop", profileDir: "D:/p", skillRoots: ["D:/s"], dataDir: "D:/d", build: "0.8.0" },
+		jobs: [], active: null, warnings: [], queue: { count: 0 },
+		attention: { dot: false, count: 0, items: [] },
+		collaborator: { ok: true, line: "卸载协作：可用" }
+	};
+	t.store.local = {
+		inventory: { ok: true, counts: { total: 3, bundle: 2 }, items: [], problems: [], summary: null },
+		skills: { ok: true, counts: { skills: 4, hostTotal: 5 }, items: [], hostOnly: [], summary: "4 个技能 · 宿主认 5 个" },
+		mcp: { ok: true, counts: { total: 1, running: 1 }, items: [] },
+		toast: null
+	};
+	resetHooks();
+	let panelText = "";
+	try {
+		panelText = textOf(t.Panel({})).join(" | ");
+		check("R36 Panel：头部三件套「设置 / 清单 / 刷新」都在", panelText.includes("设置") && panelText.includes("清单") && panelText.includes("刷新"), panelText.slice(0, 200));
+		check("R36 Panel：「清单」在「设置」之后、「刷新」之前", panelText.indexOf("设置") < panelText.indexOf("清单") && panelText.indexOf("清单") < panelText.indexOf("刷新"), panelText.slice(0, 200));
+		check("R36 Panel：主面板有独立的「插件更新」条", panelText.includes("插件更新") && panelText.includes("检查更新"), panelText.slice(0, 300));
+		check("R36 Panel：清单窗口默认不挂载（低频内容不占主面板）", !panelText.includes("看一段能直接抄") && !panelText.includes("只读 profile 的两份组合文件"));
+	} catch (e) {
+		check("R36 Panel：渲染不抛异常", false, String((e && e.message) || e));
+	}
+	t.store.data = savedData;
+	t.store.local = savedLocal;
+} else {
+	check("__test 暴露了 Panel", false);
 }
 
 /* 条数自对表：断言被删/被加都会在这里当场红（数源码不可靠，见 EXPECTED_TOTAL 的注释） */

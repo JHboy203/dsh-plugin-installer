@@ -23,7 +23,7 @@ window.__ModuleLoader__.load({
 		/* 客户端 build 号（R5.1）：改 client.js 就提一位。
 		   client 会热重载、但没人保证「当前页面跑的是哪一版」—— 这个号随 client-state
 		   一起上报，宿主 /health 的 clientReport.build 就是答案（宿主侧另有 mtime 标签）。 */
-		const BUILD = "r34.0";
+		const BUILD = "r36.1";
 
 		/* ── 迷你 store（模块级，面板关着时图标也在用）──────────────────── */
 
@@ -647,6 +647,14 @@ window.__ModuleLoader__.load({
 					h("path", { key: "c", d: "M4.8 19.2h14.4", ...common })
 				],
 				chevron: [h("path", { key: "a", d: "M9.5 6.5 15 12l-5.5 5.5", ...common })],
+				/* R36：右上角「清单」与浮窗关闭 —— 自绘，不用 unicode 字符 */
+				list: [
+					h("path", { key: "a", d: "M5 7h14M5 12h14M5 17h14", ...common }),
+					h("circle", { key: "b", cx: 3.2, cy: 7, r: 0.9, ...common, fill: "currentColor", stroke: "none" }),
+					h("circle", { key: "c", cx: 3.2, cy: 12, r: 0.9, ...common, fill: "currentColor", stroke: "none" }),
+					h("circle", { key: "d", cx: 3.2, cy: 17, r: 0.9, ...common, fill: "currentColor", stroke: "none" })
+				],
+				x: [h("path", { key: "a", d: "M6.5 6.5l11 11M17.5 6.5l-11 11", ...common })],
 				info: [
 					h("circle", { key: "a", cx: 12, cy: 12, r: 8.2, ...common }),
 					h("path", { key: "b", d: "M12 11v5.2", ...common }),
@@ -1600,6 +1608,16 @@ window.__ModuleLoader__.load({
 		function submitInput(raw) {
 			const text = String(raw || "").trim();
 			if (!text) return Promise.resolve();
+			/* R36：`mcp:<registry 名字>` = 装一台 MCP 服务器（写组合文件，不是装插件包）。 */
+			if (/^mcp:/i.test(text)) {
+				return installMcpSpec(text).then((result) => {
+					if (result && result.ok) {
+						inputValue = "";
+						setLocal({ search: null });
+					}
+					return result;
+				});
+			}
 			setLocal({ busy: true });
 			return api("/submit", { method: "POST", body: JSON.stringify({ input: text, source: "panel" }) })
 				.then((result) => {
@@ -1620,6 +1638,225 @@ window.__ModuleLoader__.load({
 					toast("提交失败：" + String((e && e.message) || e));
 				})
 				.finally(() => setLocal({ busy: false }));
+		}
+
+		/* ── 已装清单 / 更新检查 / MCP（R36：三个清单都已收纳到「清单」浮窗）──
+		 *
+		 * 以前 Inventory / Skills 是主面板里的两张常驻卡，面板打开就各拉一次数据。
+		 * 用户说它们「用的不多」—— 现在只在点开浮窗时才挂载并拉取；但「检查更新」
+		 * 与已装规模仍是主流程要看见的，所以留了一个独立的 UpdateBar（不依赖浮窗）。
+		 */
+		let invLoading = false;
+		function loadInventory(force) {
+			if (invLoading) return Promise.resolve(null);
+			if (!force && store.local.inventory && store.local.inventory.ok !== false) return Promise.resolve(store.local.inventory);
+			invLoading = true;
+			setLocal({ invBusy: true });
+			return api("/inventory")
+				.then((r) => {
+					if (!r || r.ok === false) {
+						const view = { ok: false, error: (r && r.error) || "读不到已装清单" };
+						setLocal({ inventory: view });
+						return view;
+					}
+					setLocal({ inventory: r.inventory });
+					return r.inventory;
+				})
+				.catch((e) => {
+					const view = { ok: false, error: String((e && e.message) || e) };
+					setLocal({ inventory: view });
+					return view;
+				})
+				.finally(() => {
+					invLoading = false;
+					setLocal({ invBusy: false });
+				});
+		}
+
+		function runCheckUpdates() {
+			setLocal({ invBusy: true });
+			return api("/action", { method: "POST", body: JSON.stringify({ action: "check-updates" }) })
+				.then((r) => {
+					if (r && r.state) setStore({ data: r.state });
+					if (!r || r.ok === false) {
+						toast((r && r.error) || "检查更新失败");
+						return r;
+					}
+					if (r.inventory) setLocal({ inventory: r.inventory });
+					const sum = r.inventory && r.inventory.summary;
+					if (!sum) toast("检查完成");
+					else if (sum.outdated > 0) toast("发现 " + sum.outdated + " 个可升级");
+					else toast("都是最新的（比对 " + sum.checked + " 个，查不到 " + sum.failed + " 个）");
+					return r;
+				})
+				.catch((e) => {
+					toast("检查更新失败：" + String((e && e.message) || e));
+				})
+				.finally(() => setLocal({ invBusy: false }));
+		}
+
+		/* R26：批量升级 —— 串行排队、一次一单；只升 npm 来源（本地 .tgz 要重新打包，排不了队）。
+		   R36：从「已装插件」卡里搬出来（清单已收进浮窗），入口在 UpdateBar。 */
+		function upgradeAllOutdated(includeRisky) {
+			const inv = store.local.inventory || {};
+			const items = Array.isArray(inv.items) ? inv.items : [];
+			const targets = items.filter((item) => item.update && item.update.relation === "outdated");
+			if (!targets.length) return;
+			const collab = (store.data && store.data.collaborator) || null;
+			if (!collab || !collab.ok) {
+				toast("批量升级需要「插件目录」卸载旧版 —— " + ((collab && collab.reason) || "它当前不可用"));
+				return;
+			}
+			if (includeRisky !== true) {
+				const ok = typeof window !== "undefined" && window.confirm
+					? window.confirm("把可升级的 " + targets.length + " 个 npm 包排进队列，逐个换版本？\n\n" +
+						"· 每个都是「先卸载旧版（由「插件目录」执行并复核）→ 再装新版」\n" +
+						"· 卸载到装回之间，那个插件不可用；新版本要下次启动 DSH 才加载\n" +
+						"· 装失败会自动尝试装回旧版\n" +
+						"· 每个都会先做安全预检与安装前快照；需要确认的会停下来等你\n" +
+						"· 宿主重启后队列不自动续跑\n" +
+						"· 跨大版本 / 0.x 小版本的会单独再问你一次\n" +
+						"· 本地 .tgz / Git / link 来源不排队（需要时按单条「升级」走）")
+					: true;
+				if (!ok) return;
+			}
+			setLocal({ invBusy: true });
+			api("/action", { method: "POST", body: JSON.stringify({ action: "update-all", includeRisky: includeRisky === true }) })
+				.then((r) => {
+					if (r && r.state) setStore({ data: r.state });
+					if (!r || r.ok === false) {
+						toast((r && r.error) || "排队失败");
+						return;
+					}
+					const n = (r.queued || []).length;
+					const risky = (r.needsAttention || []);
+					const startedInfo = r.started || null;
+					const startNote = startedInfo && startedInfo.started
+						? "第一个已开始"
+						: startedInfo && startedInfo.reason
+							? "第一个没有开始（" + ({ busy: "已有任务在跑", "awaiting-confirm": "有一单在等你确认", empty: "队列是空的" }[startedInfo.reason] || startedInfo.reason) + "）"
+							: "排队完成";
+					if (risky.length > 0) {
+						const list = risky.slice(0, 5).map((x) => "· " + x.name + " " + (x.from || "?") + " → " + x.to + (x.gap ? "（" + x.gap + "）" : "")).join("\n");
+						const go = typeof window !== "undefined" && window.confirm
+							? window.confirm("已把 " + n + " 个常规升级排进队列。\n\n另有 " + risky.length +
+								" 个跨越较大的版本（可能含破坏性变更）：\n" + list +
+								(risky.length > 5 ? "\n· …等 " + risky.length + " 个" : "") +
+								"\n\n仍要一起升级吗？点「取消」就只装前面那些。")
+							: false;
+						if (go) {
+							upgradeAllOutdated(true);
+							return;
+						}
+						toast("已排队 " + n + " 个；跨版本的 " + risky.length + " 个没有排");
+						return;
+					}
+					toast(n > 0
+						? "已排队 " + n + " 个（" + startNote + "，后面的自动接着跑）"
+						: (includeRisky === true ? "没有可排队的升级" : "没有可排队的升级（跨版本的需单独确认）"));
+				})
+				.catch((e) => toast("排队失败：" + String((e && e.message) || e)))
+				.finally(() => setLocal({ invBusy: false }));
+		}
+
+		let skillsLoading = false;
+		function loadSkills(force) {
+			if (skillsLoading) return Promise.resolve(null);
+			if (!force && store.local.skills && store.local.skills.ok !== false) return Promise.resolve(store.local.skills);
+			skillsLoading = true;
+			setLocal({ skillsBusy: true });
+			return api("/skills" + (force ? "?fresh=1" : ""))
+				.then((r) => {
+					if (!r || r.ok === false) {
+						const view = { ok: false, error: (r && r.error) || "读不到技能清单" };
+						setLocal({ skills: view });
+						return view;
+					}
+					setLocal({ skills: r.skills });
+					return r.skills;
+				})
+				.catch((e) => {
+					const view = { ok: false, error: String((e && e.message) || e) };
+					setLocal({ skills: view });
+					return view;
+				})
+				.finally(() => {
+					skillsLoading = false;
+					setLocal({ skillsBusy: false });
+				});
+		}
+
+		let mcpLoading = false;
+		function loadMcp(force) {
+			if (mcpLoading) return Promise.resolve(null);
+			if (!force && store.local.mcp && store.local.mcp.ok !== false) return Promise.resolve(store.local.mcp);
+			mcpLoading = true;
+			setLocal({ mcpBusy: true });
+			return api("/mcp" + (force ? "?fresh=1" : ""))
+				.then((r) => {
+					if (!r || r.ok === false) {
+						const view = { ok: false, error: (r && r.error) || "读不到 MCP 清单", items: [], counts: { total: 0, running: 0 } };
+						setLocal({ mcp: view });
+						return view;
+					}
+					setLocal({ mcp: r.mcp });
+					return r.mcp;
+				})
+				.catch((e) => {
+					const view = { ok: false, error: String((e && e.message) || e), items: [], counts: { total: 0, running: 0 } };
+					setLocal({ mcp: view });
+					return view;
+				})
+				.finally(() => {
+					mcpLoading = false;
+					setLocal({ mcpBusy: false });
+				});
+		}
+
+		/** 写一台 MCP 服务器进 profile 组合文件（R36）。spec 可以是 `mcp:foo` / `foo@1.2.3`。 */
+		function installMcpSpec(spec, options) {
+			const text = String(spec || "").trim().replace(/^mcp:/i, "");
+			if (!text) return Promise.resolve({ ok: false, error: "缺 MCP 名字" });
+			const where = "profile 的 cordis.patch.yml";
+			const ok = typeof window === "undefined" || !window.confirm
+				? true
+				: window.confirm(
+					"把这台 MCP 服务器写进 " + where + "？\n\n" +
+					"· 服务器：" + text + "\n" +
+					"· 写的是组合文件里的一条 dsh-mcp-client 配置（不是装插件包）\n" +
+					"· 会先备份原文件；写完要重启 DSH 才加载\n" +
+					"· 只写 Registry 给的 command / URL；不会写任何密钥\n\n" +
+					(options && options.installPath ? "安装路径：" + options.installPath + "\n\n" : "") +
+					"继续？"
+				);
+			if (!ok) return Promise.resolve({ ok: false, cancelled: true });
+			setLocal({ busy: true });
+			return api("/action", { method: "POST", body: JSON.stringify({ action: "add-mcp", spec: text }) })
+				.then((r) => {
+					if (r && r.state) setStore({ data: r.state });
+					if (!r || r.ok === false) {
+						toast((r && (r.error || r.message)) || "写不进组合文件");
+						return r;
+					}
+					if (r.mcp) setLocal({ mcp: r.mcp, mcpUpdates: null });
+					else loadMcp(true);
+					toast("已写入组合文件" + (r.added && r.added.file ? "：" + r.added.file : "") + "，重启 DSH 后生效");
+					setLocal({ ai: null, search: null });
+					return r;
+				})
+				.catch((e) => {
+					toast("写入失败：" + String((e && e.message) || e));
+				})
+				.finally(() => setLocal({ busy: false }));
+		}
+
+		function installMcpCandidate(item) {
+			if (!item) return Promise.resolve();
+			if (item.installable === false) {
+				if (typeof window !== "undefined" && window.confirm) window.confirm((item.blockedReason || "这台服务器不能自动装") + "\n\n可以点「复制组合片段」，自己填好再粘进 cordis.patch.yml。");
+				return Promise.resolve();
+			}
+			return installMcpSpec((item.registryName || item.name) + (item.version ? "@" + item.version : ""), { installPath: item.installPath });
 		}
 
 		/* ── 面板 ─────────────────────────────────────────────────────── */
@@ -1750,7 +1987,7 @@ window.__ModuleLoader__.load({
 					ref: areaRef,
 					className: "dpi-input",
 					rows: 2,
-					placeholder: "GitHub 链接 / Release 页 / .tgz·.zip 直链 / 本机绝对路径 / 包名。也可以直接把文件拖进来。",
+					placeholder: "GitHub 链接 / Release 页 / .tgz·.zip 直链 / 本机绝对路径 / 包名 / mcp:<MCP Registry 名字>。也可以直接把文件拖进来。",
 					value: text,
 					onChange: (e) => setText(e.target.value),
 					onKeyDown: (e) => {
@@ -1774,9 +2011,39 @@ window.__ModuleLoader__.load({
 				   而它说的正是「哪些链接不处理」，属于应该在的地方。 */
 				h("div", { className: "dpi-composer-note" },
 					h(Glyph, { name: "info", size: 13 }),
-					h("span", null, "网盘链接不自动下载（自己下好再拖进来）；只给名字会先搜候选。全程只有确定性的下载 / 解包 / 预检 / 安装 —— 唯一会花 token 的是下面的 AI 推荐。")),
+					h("span", null, "网盘链接不自动下载（自己下好再拖进来）；只给名字会先搜候选。MCP 服务器也走这里：搜到会标 MCP，安装 = 往 profile 组合文件写一条配置（重启后生效）。全程只有确定性的下载 / 解包 / 预检 / 安装 —— 唯一会花 token 的是下面的 AI 推荐。")),
 				dragging ? h("div", { className: "dpi-drop-veil" }, "松手：我会把它交给宿主解包识别") : null
 			);
+		}
+
+		/** R36：MCP 推荐的「安装路径 / 环境变量 / 不能自动装」三行。 */
+		function mcpRecoDetails(item) {
+			const rows = [];
+			if (!item || item.kind !== "mcp") return rows;
+			rows.push(h("div", { className: "dpi-mcp-path" },
+				h("span", { className: "dpi-muted" }, "安装路径："),
+				h("code", null, item.installPath || (item.transport === "stdio" ? item.spec : "（registry 没给）")),
+				h("span", { className: "dpi-muted" }, " · 写进 profile 的 cordis.patch.yml，重启后生效")));
+			if (item.requiredEnv && item.requiredEnv.length > 0) {
+				rows.push(h("div", { className: "dpi-muted" }, "需要环境变量：" + item.requiredEnv.join("、") + "（面板不会替你写值）"));
+			}
+			if (item.installable === false) {
+				rows.push(h("div", { className: "dpi-flag is-warn" }, "⚠ " + (item.blockedReason || "这台服务器不能自动装")));
+			}
+			return rows;
+		}
+
+		/** R36：推荐卡底部动作 —— MCP 走「装成 MCP / 复制片段」，插件走「安装这个」。 */
+		function recoActions(item, isMcp) {
+			if (!isMcp) return h("button", { className: "dpi-btn dpi-btn-primary dpi-btn-sm", onClick: () => submitInput(item.spec || item.name) }, "安装这个");
+			if (item.installedKnown) return h("span", { className: "dpi-muted" }, "已经在「已装 MCP」里（重启后才会出现在工具表）");
+			if (item.installable === false) {
+				return h("button", {
+					className: "dpi-btn dpi-btn-sm",
+					onClick: () => { copyText(item.configYaml || ""); toast("已复制组合片段，粘进 cordis.patch.yml 后重启"); }
+				}, "复制组合片段");
+			}
+			return h("button", { className: "dpi-btn dpi-btn-primary dpi-btn-sm", onClick: () => installMcpCandidate(item) }, "装成 MCP");
 		}
 
 		function AiBox() {
@@ -1818,27 +2085,25 @@ window.__ModuleLoader__.load({
 					? h("div", { className: "dpi-muted dpi-local-only", title: result.localOnly.spec || "" }, "· " + result.localOnly.text)
 					: null,
 				result && result.recommendations && result.recommendations.length > 0
-					? h("div", { className: "dpi-recos" }, result.recommendations.map((item, i) =>
-						h("div", { className: "dpi-reco", key: "reco" + i },
+					? h("div", { className: "dpi-recos" }, result.recommendations.map((item, i) => {
+						const isMcp = item.kind === "mcp";
+						return h("div", { className: "dpi-reco" + (isMcp ? " dpi-reco-mcp" : ""), key: "reco" + i },
 							h("div", { className: "dpi-reco-head" },
-								h("b", null, item.name),
-								/* R12：已经装过的包要当场说出来 —— 否则「安装这个」看起来永远像第一次装。
-								   R25：还要说清装的是**哪一种来源**：本机 24 个依赖是 link: 的本机目录，
-								   「已装」按名字对上不等于同一个包 —— 同名 npm 包能靠这行被认清。 */
-								item.installedKnown
-									? h("span", {
-										className: "dpi-tag dpi-tag-kind",
-										title: "本机已装这个包" + (item.installedSpec ? "（" + item.installedSpec + "）" : "") +
-											(item.installedSource === "different" ? " —— 同名但来源不同，见下面的红旗" : "")
-									}, "已装" + (item.installed ? " v" + item.installed : "") +
-										(item.installedKindLabel ? " · " + item.installedKindLabel : ""))
-									: null,
-								item.stars ? h("span", { className: "dpi-tag" }, "★" + item.stars) : null,
-								item.downloads ? h("span", { className: "dpi-tag" }, "⬇" + item.downloads + "/周") : null,
-								item.installs ? h("span", { className: "dpi-tag", title: "商店统计的确认安装次数（比 stars 更接近真实使用量）" }, "装过 " + item.installs) : null,
-								item.rating && item.rating.average ? h("span", { className: "dpi-tag", title: "商店用户评分（样本 " + (item.rating.count || 0) + " 条）" }, "★" + item.rating.average + "(" + (item.rating.count || 0) + ")") : null,
+								h("b", null, item.displayName || item.name),
 								h("span", { className: "dpi-tag" }, item.source || "?"),
-								item.rankScore ? h("span", { className: "dpi-tag dpi-tag-kind", title: "本面板按「可信度 + 知名度 + 相关度」算的综合分，不是市场评分" }, "评分 " + Math.round(item.rankScore)) : null),
+								isMcp ? h("span", { className: "dpi-tag dpi-tag-kind" }, "MCP 服务器") : null,
+								isMcp && item.transport ? h("span", { className: "dpi-tag" }, item.transport) : null,
+								isMcp && item.installable === false ? h("span", { className: "dpi-tag dpi-tag-medium" }, "需先填参数") : null,
+								item.installedKnown ? h("span", {
+									className: "dpi-tag dpi-tag-kind",
+									title: isMcp
+										? "profile 组合文件里已经有这台服务器（serverName=" + (item.serverName || item.installed) + "）"
+										: "本机已装这个包" + (item.installedSpec ? "（" + item.installedSpec + "）" : "") +
+											(item.installedSource === "different" ? " —— 同名但来源不同，见下面的红旗" : "")
+								}, isMcp ? "已配置" : "已装" + (item.installed ? " v" + item.installed : "") +
+									(item.installedKindLabel ? " · " + item.installedKindLabel : "")) : null,
+								item.stars ? h("span", { className: "dpi-tag" }, "★" + item.stars) : null,
+								item.downloads ? h("span", { className: "dpi-tag" }, "⬇" + item.downloads + "/周") : null),
 							/* 可信度徽章与红旗（R3）：官方 / 许可证 / 有源码 / 近期更新，以及无仓库、刷星这类红旗。
 							   这些都来自确定性数据，不来自模型，可以当事实读。 */
 							item.trust && item.trust.badges && item.trust.badges.length
@@ -1850,9 +2115,15 @@ window.__ModuleLoader__.load({
 									h("div", { key: "fl" + fi, className: "dpi-flag is-" + (f.tone || "warn") }, "⚠ " + f.text)))
 								: null,
 							item.why ? h("div", { className: "dpi-reco-why" }, item.why) : null,
+							/* R36：MCP 的「下载路径」直接摆出来 —— 是 npx 命令还是远程 URL，
+							   以及它会被写进哪里。不能一键装时给可复制的组合片段。 */
+							mcpRecoDetails(item),
 							h("div", { className: "dpi-actions dpi-actions-tight" },
-								h("button", { className: "dpi-btn dpi-btn-primary dpi-btn-sm", onClick: () => submitInput(item.spec || item.name) }, "安装这个"),
-								item.url ? h("a", { className: "dpi-link", href: item.url, target: "_blank", rel: "noreferrer" }, "看来源") : null))))
+								recoActions(item, isMcp),
+								item.url ? h("a", { className: "dpi-link", href: item.url, target: "_blank", rel: "noreferrer" }, "看来源") : null)
+						);
+							})
+						)
 					: null,
 				result && result.searchSuggestions && result.searchSuggestions.length ? h("div", { className: "dpi-muted" }, "换个搜索词：" + result.searchSuggestions.join("、")) : null,
 				result && result.degraded ? h("div", { className: "dpi-muted" }, "（AI 不可用，这里给的是确定性搜索的结果）") : null
@@ -1973,49 +2244,21 @@ window.__ModuleLoader__.load({
 		 * 点「检查更新」才走 POST action:check-updates（registry 结果另有 30 分钟 TTL）。
 		 * 判据在 lib/inventory.js + lib/updates.js —— link: / file: / git 这三类**不参与**比对，
 		 * 它们没有「registry 上的新版本」，硬比会产出假的「落后」。 */
-		function Inventory() {
+		function Inventory({ inWindow } = {}) {
 			const s = useStore();
 			const inv = s.local.inventory || null;
-			const [open, setOpen] = useState(false);
+			/* R36：主面板里不再挂这张卡；浮窗里默认展开，且在浮窗里没有「收起」按钮。 */
+			const [open, setOpen] = useState(Boolean(inWindow));
+			const isOpen = Boolean(inWindow) || open;
 			/* R26：80 条上限原本是静默截断 —— 本机 47 条时看不出来，插件多了以后会「有更新却找不到」 */
 			const [showAll, setShowAll] = useState(false);
-			const busy = s.local.invBusy;
 			const queue = (s.data && s.data.queue) || null;
 			/* R27：换版本要「插件目录」配合卸载 —— 不在就没法升级（宿主按包名判已装） */
 			const collab = (s.data && s.data.collaborator) || null;
 			const collabOk = Boolean(collab && collab.ok);
-			const load = () => {
-				api("/inventory")
-					.then((r) => {
-						if (!r || r.ok === false) {
-							setLocal({ inventory: { ok: false, error: (r && r.error) || "读不到已装清单" } });
-							return;
-						}
-						setLocal({ inventory: r.inventory });
-					})
-					.catch((e) => setLocal({ inventory: { ok: false, error: String((e && e.message) || e) } }));
-			};
 			useEffect(() => {
-				if (!s.local.inventory && !s.local.invBusy) load();
+				if (!s.local.inventory && !s.local.invBusy) loadInventory();
 			}, []);
-			const checkUpdates = () => {
-				setLocal({ invBusy: true });
-				api("/action", { method: "POST", body: JSON.stringify({ action: "check-updates" }) })
-					.then((r) => {
-						if (r && r.state) setStore({ data: r.state });
-						if (!r || r.ok === false) {
-							toast((r && r.error) || "检查更新失败");
-							return;
-						}
-						if (r.inventory) setLocal({ inventory: r.inventory });
-						const sum = r.inventory && r.inventory.summary;
-						if (!sum) toast("检查完成");
-						else if (sum.outdated > 0) toast("发现 " + sum.outdated + " 个可升级");
-						else toast("都是最新的（比对 " + sum.checked + " 个，查不到 " + sum.failed + " 个）");
-					})
-					.catch((e) => toast("检查更新失败：" + String((e && e.message) || e)))
-					.finally(() => setLocal({ invBusy: false }));
-			};
 			const counts = (inv && inv.counts) || null;
 			const summary = (inv && inv.summary) || null;
 			const items = (inv && inv.items) || [];
@@ -2107,29 +2350,17 @@ window.__ModuleLoader__.load({
 					: "读取中…";
 			return h(
 				"div",
-				{ className: "dpi-card dpi-inventory" },
+				{ className: "dpi-card dpi-inventory" + (inWindow ? " dpi-in-window" : "") },
 				h("div", { className: "dpi-card-head" },
-					h("strong", null, "已装插件"),
+					/* 浮窗标题由 FloatWindow 负责，卡里不再重复一遍「已装插件」 */
+					inWindow ? null : h("strong", null, "已装插件"),
 					h("span", { className: "dpi-muted" }, headline),
-					h("button", {
-						className: "dpi-btn dpi-btn-sm",
-						style: { marginLeft: "auto" },
-						disabled: busy,
-						title: "联网比对 npm registry 上每个包的最新版（30 分钟内同结果走缓存）",
-						onClick: checkUpdates
-					}, busy ? "检查中…" : "检查更新"),
-					outdated.length > 0
-						? h("button", {
-							className: "dpi-btn dpi-btn-sm",
-							disabled: busy || !collabOk,
-							title: collabOk
-								? "把可升级的 npm 包排进队列，逐个换版本（每个都是先卸载旧版再由「插件目录」复核；跨大版本的会单独再问你一次）"
-								: "需要「插件目录」才能升级：" + ((collab && collab.reason) || "它当前不可用"),
-							onClick: () => upgradeAll(false)
-						}, "全部升级 " + outdated.length)
-						: null,
-					h("button", { className: "dpi-btn dpi-btn-sm", disabled: !counts, onClick: () => setOpen(!open) },
-						open ? "收起" : "展开")),
+					/* R36：「检查更新」「全部升级」已搬到主面板的 UpdateBar（清单收进浮窗后，
+					   这两个动作不能跟着一起藏起来）。这里只留窗口内自己的「展开/收起」。 */
+					inWindow
+						? null
+						: h("button", { className: "dpi-btn dpi-btn-sm", style: { marginLeft: "auto" }, disabled: !counts, onClick: () => setOpen(!open) },
+							open ? "收起" : "展开")),
 				summary
 					? h("div", { className: "dpi-muted" },
 						"更新：" + (summary.outdated > 0 ? "可升级 " + summary.outdated + " 个" : "都是最新的") +
@@ -2140,8 +2371,8 @@ window.__ModuleLoader__.load({
 					: h("div", { className: "dpi-muted" },
 						inv && inv.ok === false
 							? ""
-							: "还没比对过最新版。点「检查更新」才联网（只查 npm 来源的包；本机目录 / 本面板装的 .tgz / Git 来源不参与）。"),
-				problems.length > 0 && !open
+							: "还没比对过最新版。点主面板的「检查更新」才联网（只查 npm 来源的包；本机目录 / 本面板装的 .tgz / Git 来源不参与）。"),
+				problems.length > 0 && !isOpen
 					? h("div", { className: "dpi-muted" }, "· " + problems.length + " 个依赖「声明了但没落地」（展开看，或用环境体检细查）")
 					: null,
 				/* R27：换版本的卸载协作方（插件目录）—— 它决定了「升级」可不可点。
@@ -2168,9 +2399,9 @@ window.__ModuleLoader__.load({
 					: null,
 				inv && inv.ok === false
 					? h("div", { className: "dpi-actions dpi-actions-tight" },
-						h("button", { className: "dpi-btn dpi-btn-sm", onClick: load }, "重试"))
+						h("button", { className: "dpi-btn dpi-btn-sm", onClick: () => loadInventory(true) }, "重试"))
 					: null,
-				open && sorted.length > 0
+				isOpen && sorted.length > 0
 					? h("ul", { className: "dpi-list dpi-list-info dpi-inv-list" }, sorted.slice(0, showAll ? sorted.length : 80).map((item) =>
 						h("li", { key: "inv" + item.name },
 							h("div", { className: "dpi-reco-head" },
@@ -2215,14 +2446,14 @@ window.__ModuleLoader__.load({
 								: null,
 							h("div", { className: "dpi-detail" }, item.spec + (item.checkable ? "" : " · " + item.why)))))
 					: null,
-				open && sorted.length > 80
+				isOpen && sorted.length > 80
 					? h("div", { className: "dpi-muted" },
 						"只显示前 80 个（共 " + sorted.length + " 个）。按「有更新 → 没落地 → 其它」排序，所以可升级的不会被折叠掉。",
 						showAll
 							? null
 							: h("button", { className: "dpi-btn dpi-btn-sm", style: { marginLeft: "8px" }, onClick: () => setShowAll(true) }, "显示全部"))
 					: null,
-				open && sorted.length === 0
+				isOpen && sorted.length === 0
 					? h("div", { className: "dpi-muted" }, "这个 profile 里没有依赖声明（或还没装上任何东西）。")
 					: null
 			);
@@ -2235,10 +2466,11 @@ window.__ModuleLoader__.load({
 		 *
 		 * 数据：GET /skills（宿主本地读技能根 + ctx.skills.list() 对账，30 秒缓存，不联网）。
 		 * 判据在 lib/skills.js：磁盘有而宿主没认 / 同名 / 备份残留 / modelInvocable=false。 */
-		function Skills() {
+		function Skills({ inWindow } = {}) {
 			const s = useStore();
 			const view = s.local.skills || null;
-			const [open, setOpen] = useState(false);
+			const [open, setOpen] = useState(Boolean(inWindow));
+			const isOpen = Boolean(inWindow) || open;
 			/* 待确认「移出」的备份目录名（R15）。两段式是刻意的：动文件前先说清后果。 */
 			const [parking, setParking] = useState(null);
 			/* 待确认「修 frontmatter」的目录名（R16）：先备份原文再改，同样两段式。 */
@@ -2275,21 +2507,9 @@ window.__ModuleLoader__.load({
 					.catch((e) => toast("移不动：" + String((e && e.message) || e)))
 					.finally(() => setLocal({ skillsBusy: false }));
 			};
-			const load = (force) => {
-				setLocal({ skillsBusy: true });
-				api("/skills" + (force ? "?fresh=1" : ""))
-					.then((r) => {
-						if (!r || r.ok === false) {
-							setLocal({ skills: { ok: false, error: (r && r.error) || "读不到技能清单" } });
-							return;
-						}
-						setLocal({ skills: r.skills });
-					})
-					.catch((e) => setLocal({ skills: { ok: false, error: String((e && e.message) || e) } }))
-					.finally(() => setLocal({ skillsBusy: false }));
-			};
+			const load = (force) => loadSkills(force);
 			useEffect(() => {
-				if (!s.local.skills && !s.local.skillsBusy) load();
+				if (!s.local.skills && !s.local.skillsBusy) loadSkills();
 			}, []);
 			const counts = (view && view.counts) || null;
 			const items = (view && view.items) || [];
@@ -2305,19 +2525,23 @@ window.__ModuleLoader__.load({
 			   这里把开头那一段剥掉，否则卡上会出现两遍「55 个技能 · 宿主认 64 个」。 */
 			const detail = summary.replace(/^\d+ 个技能(?: · (?:宿主认 \d+ 个|宿主清单读不到))?/, "").replace(/^ · /, "");
 			const tag = (cls, text, title) => h("span", { className: "dpi-tag " + cls, title: title || null }, text);
-			return h("div", { className: "dpi-card dpi-skills" },
+			return h("div", { className: "dpi-card dpi-skills" + (inWindow ? " dpi-in-window" : "") },
 				h("div", { className: "dpi-card-head" },
-					h("strong", null, "已装 Skill"),
+					inWindow ? null : h("strong", null, "已装 Skill"),
 					h("span", { className: "dpi-muted" }, headline),
 					h("button", {
 						className: "dpi-btn dpi-btn-sm",
 						style: { marginLeft: "auto" },
 						disabled: Boolean(s.local.skillsBusy),
 						title: "重扫技能根并重新对账（宿主会自己重扫目录；不重启也能看到新增的技能）",
-						onClick: () => load(true)
+						onClick: () => loadSkills(true)
 					}, s.local.skillsBusy ? "刷新中…" : "刷新"),
-					h("button", { className: "dpi-btn dpi-btn-sm", disabled: !counts, onClick: () => setOpen(!open) }, open ? "收起" : "展开")),
+					inWindow
+						? null
+						: h("button", { className: "dpi-btn dpi-btn-sm", disabled: !counts, onClick: () => setOpen(!open) }, open ? "收起" : "展开")),
 				detail ? h("div", { className: "dpi-muted" }, detail) : null,
+				h("div", { className: "dpi-muted" },
+					"更新：Skill 没有统一版本源；来自插件包的随插件更新，其余需要先记录来源仓库才能比对（本面板暂未记录）。"),
 				view && view.notes && view.notes.length > 0
 					? h("div", { className: "dpi-muted" }, view.notes.join(" · "))
 					: null,
@@ -2346,9 +2570,9 @@ window.__ModuleLoader__.load({
 					: null,
 				view && view.ok === false
 					? h("div", { className: "dpi-actions dpi-actions-tight" },
-						h("button", { className: "dpi-btn dpi-btn-sm", onClick: () => load(true) }, "重试"))
+						h("button", { className: "dpi-btn dpi-btn-sm", onClick: () => loadSkills(true) }, "重试"))
 					: null,
-				open && items.length > 0
+				isOpen && items.length > 0
 					? h("ul", { className: "dpi-list dpi-list-info" }, items.slice(0, 120).map((row) =>
 						h("li", { key: "sk" + row.dir },
 							h("div", { className: "dpi-reco-head" },
@@ -2399,8 +2623,289 @@ window.__ModuleLoader__.load({
 								row.dir + (row.bytes ? " · " + Math.max(1, Math.round(row.bytes / 1024)) + " KB" : "") +
 								(row.duplicate ? " · 与另一份同名" : "")))))
 					: null,
-				open && items.length === 0
+				isOpen && items.length === 0
 					? h("div", { className: "dpi-muted" }, "技能根里还没有技能（或者宿主扫不到这个目录）。")
+					: null
+			);
+		}
+
+		/* ── R36：独立更新条 / 清单菜单 / 浮窗 / 已装 MCP ─────────────────── */
+
+		/**
+		 * 「检查更新」不再藏在「已装插件」卡里 —— 清单收进浮窗后，这是主面板上唯一
+		 * 的更新入口。顺带保留「全部升级」与「看清单」，不用先打开浮窗。
+		 */
+		function UpdateBar({ onOpenList } = {}) {
+			const s = useStore();
+			const inv = s.local.inventory || null;
+			const counts = (inv && inv.counts) || null;
+			const summary = (inv && inv.summary) || null;
+			const items = (inv && inv.items) || [];
+			const outdated = items.filter((item) => item.update && item.update.relation === "outdated");
+			const busy = s.local.invBusy;
+			const collab = (s.data && s.data.collaborator) || null;
+			const collabOk = Boolean(collab && collab.ok);
+			useEffect(() => {
+				if (!s.local.inventory && !s.local.invBusy) loadInventory();
+			}, []);
+			const headline = inv && inv.ok === false
+				? "读不到：" + (inv.error || inv.note || "未知原因")
+				: counts
+					? counts.total + " 个依赖 · " + counts.bundle + " 个在 bundle 行里"
+					: "读取中…";
+			return h("div", { className: "dpi-card dpi-updatebar" },
+				h("div", { className: "dpi-card-head" },
+					h("strong", null, "插件更新"),
+					h("span", { className: "dpi-muted" }, headline),
+					h("button", {
+						className: "dpi-btn dpi-btn-primary dpi-btn-sm",
+						style: { marginLeft: "auto" },
+						disabled: busy,
+						title: "联网比对 npm registry 上每个包的最新版（30 分钟内同结果走缓存）",
+						onClick: runCheckUpdates
+					}, busy ? "检查中…" : "检查更新"),
+					outdated.length > 0
+						? h("button", {
+							className: "dpi-btn dpi-btn-sm",
+							disabled: busy || !collabOk,
+							title: collabOk
+								? "把可升级的 npm 包排进队列，逐个换版本（每个都是先卸载旧版再由「插件目录」复核；跨大版本的会单独再问你一次）"
+								: "需要「插件目录」才能升级：" + ((collab && collab.reason) || "它当前不可用"),
+							onClick: () => upgradeAllOutdated(false)
+						}, "全部升级 " + outdated.length)
+						: null,
+					onOpenList
+						? h("button", { className: "dpi-btn dpi-btn-sm", onClick: () => onOpenList("plugins") }, "看清单")
+						: null),
+				summary
+					? h("div", { className: "dpi-muted" },
+						"更新：" + (summary.outdated > 0 ? "可升级 " + summary.outdated + " 个" : "都是最新的") +
+						"（比对 " + summary.checked + " · 最新 " + summary.current +
+						(summary.ahead ? " · 比 registry 新 " + summary.ahead : "") +
+						(summary.failed ? " · 查不到 " + summary.failed : "") + "）" +
+						(inv && inv.updatesAt ? " · " + ago(inv.updatesAt) : ""))
+					: h("div", { className: "dpi-muted" },
+						inv && inv.ok === false
+							? ""
+							: "还没比对过最新版。点「检查更新」才联网（只查 npm 来源的包；本机目录 / 本面板装的 .tgz / Git 来源不参与）。"),
+				outdated.length > 0
+					? h("div", { className: "dpi-muted" },
+						collabOk
+							? "升级 = 先卸载旧版（由「插件目录」执行并复核依赖行）→ 再装新版。宿主按包名判已装，所以不能原地换版本；新版本要重启 DSH 才加载。"
+							: "⚠ 这批升级暂时做不了：宿主按包名判已装，换版本必须先卸载，而卸载要「插件目录」配合 —— 它当前不可用。")
+					: null
+			);
+		}
+
+		/**
+		 * 右上角「清单」下拉（在「设置」与「刷新」之间）。三个清单都是低频的，
+		 * 点哪一项才挂载哪个浮窗 —— 不再常驻占主面板。
+		 */
+		function ListMenu({ counts, onPick, onOpen } = {}) {
+			const [open, setOpen] = useState(false);
+			const ref = useRef(null);
+			useEffect(() => {
+				if (!open) return;
+				const onDoc = (event) => {
+					if (ref.current && event && event.target && ref.current.contains(event.target)) return;
+					setOpen(false);
+				};
+				document.addEventListener("pointerdown", onDoc);
+				return () => document.removeEventListener("pointerdown", onDoc);
+			}, [open]);
+			const pick = (key) => {
+				setOpen(false);
+				if (onPick) onPick(key);
+			};
+			const counts2 = counts || {};
+			const rows = [
+				["plugins", "已装插件", counts2.plugins],
+				["skills", "已装 Skill", counts2.skills],
+				["mcp", "已装 MCP", counts2.mcp]
+			];
+			return h("div", { className: "dpi-menu-wrap", ref },
+				h("button", {
+					type: "button",
+					className: "dpi-btn dpi-btn-ghost dpi-btn-sm",
+					"aria-haspopup": "menu",
+					"aria-expanded": open ? "true" : "false",
+					onClick: () => {
+						const next = !open;
+						setOpen(next);
+						if (next && onOpen) onOpen();
+					}
+				}, h(Glyph, { name: "list", size: 13 }), "清单",
+					h("span", { className: "dpi-chev", style: { transform: open ? "rotate(90deg)" : "none" } }, h(Glyph, { name: "chevron", size: 11 }))),
+				open
+					? h("div", { className: "dpi-menu", role: "menu" }, rows.map(([key, label, count]) =>
+						h("button", { key, type: "button", role: "menuitem", className: "dpi-menu-item", onClick: () => pick(key) },
+							h("span", null, label),
+							count === null || count === undefined ? null : h("span", { className: "dpi-count" }, count))))
+					: null
+			);
+		}
+
+		/** 浮在界面上的固定窗口：点右上角 X、点周围空白、按 Esc 都关。 */
+		function FloatWindow({ title, subtitle, onClose, children } = {}) {
+			useEffect(() => {
+				const onKey = (event) => {
+					if (event && event.key === "Escape" && onClose) onClose();
+				};
+				document.addEventListener("keydown", onKey);
+				return () => document.removeEventListener("keydown", onKey);
+			}, [onClose]);
+			return h("div", { className: "dpi-overlay dpi-float-overlay", role: "presentation", onClick: onClose },
+				h("div", {
+					className: "dpi-float",
+					role: "dialog",
+					"aria-label": title,
+					onClick: (event) => { if (event && event.stopPropagation) event.stopPropagation(); }
+				},
+					h("div", { className: "dpi-float-head" },
+						h("div", { className: "dpi-float-title" },
+							h("strong", null, title || "清单"),
+							subtitle ? h("div", { className: "dpi-muted" }, subtitle) : null),
+						h("button", { type: "button", className: "dpi-float-x", title: "关闭（Esc）", "aria-label": "关闭", onClick: onClose },
+							h(Glyph, { name: "x", size: 15 }))),
+					h("div", { className: "dpi-float-body" }, children)));
+		}
+
+		/**
+		 * R36：已装 MCP —— 读的是 profile 组合文件里的 dsh-mcp-client 条目，
+		 * 并用「工具表里有没有 mcp__<server>__*」判断它到底跑没跑。
+		 */
+		/** R36：MCP 行上的更新标记（可升级 / 最新 / 无法判断）。 */
+		function mcpUpdateTag(item, updates) {
+			const up = ((updates && updates.items) || []).find((entry) => entry.serverName === item.serverName);
+			if (!up) return null;
+			if (up.relation === "outdated") {
+				return h("span", { className: "dpi-pill dpi-pill-warn", title: "来源版本 " + (up.localVersion || "?") + " → " + (up.latestVersion || "?") + (up.gap && up.gap.text ? "（" + up.gap.text + "）" : "") },
+					"可升级 → " + (up.latestVersion || "?"));
+			}
+			if (up.relation === "current") return h("span", { className: "dpi-pill dpi-pill-ok" }, "最新");
+			if (up.relation === "ahead") return h("span", { className: "dpi-pill dpi-pill-idle" }, "比来源新");
+			if (up.error) return h("span", { className: "dpi-tag dpi-tag-medium", title: up.error }, "查不到");
+			return h("span", { className: "dpi-tag", title: up.reason || "" }, "无法判断");
+		}
+
+		function mcpUpdateDetail(item, updates) {
+			const up = ((updates && updates.items) || []).find((entry) => entry.serverName === item.serverName);
+			if (!up) return null;
+			const text = up.error ? "更新检查失败：" + up.error : up.reason || "";
+			return text ? h("div", { className: "dpi-detail" }, text) : null;
+		}
+
+		function McpList({ inWindow } = {}) {
+			const s = useStore();
+			const view = s.local.mcp || null;
+			const updates = s.local.mcpUpdates || null;
+			const busy = s.local.mcpBusy;
+			useEffect(() => {
+				if (!s.local.mcp && !s.local.mcpBusy) loadMcp();
+			}, []);
+			const check = () => {
+				setLocal({ mcpBusy: true });
+				api("/action", { method: "POST", body: JSON.stringify({ action: "check-mcp-updates" }) })
+					.then((r) => {
+						if (r && r.mcp) setLocal({ mcp: r.mcp });
+						if (r && r.updates) setLocal({ mcpUpdates: r.updates });
+						if (!r || r.ok === false) {
+							toast((r && (r.error || r.message)) || "MCP 更新检查失败");
+							return;
+						}
+						const sum = r.updates && r.updates.summary;
+						if (!sum) toast("检查完成");
+						else toast("MCP 更新：可升级 " + sum.outdated + " · 最新 " + sum.current +
+							" · 无法判断 " + (sum.undetectable + sum.failed));
+					})
+					.catch((e) => toast("MCP 更新检查失败：" + String((e && e.message) || e)))
+					.finally(() => setLocal({ mcpBusy: false }));
+			};
+			const counts = (view && view.counts) || null;
+			const items = (view && view.items) || [];
+			const summary = (updates && updates.summary) || null;
+			const updateOf = (serverName) => ((updates && updates.items) || []).find((entry) => entry.serverName === serverName) || null;
+			const headline = view && view.ok === false
+				? "读不到：" + (view.error || "未知原因")
+				: counts
+					? counts.total + " 台 · " + counts.running + " 台在跑"
+					: "读取中…";
+			return h("div", { className: "dpi-card dpi-mcp" + (inWindow ? " dpi-in-window" : "") },
+				h("div", { className: "dpi-card-head" },
+					inWindow ? null : h("strong", null, "已装 MCP"),
+					h("span", { className: "dpi-muted" }, headline),
+					h("button", {
+						className: "dpi-btn dpi-btn-sm",
+						style: { marginLeft: "auto" },
+						disabled: busy,
+						title: "有来源台账的查 Registry、锁版本的 npx 包查 npm；其余如实标「无法判断」",
+						onClick: check
+					}, busy ? "检查中…" : "检查更新"),
+					h("button", {
+						className: "dpi-btn dpi-btn-sm",
+						disabled: busy,
+						title: "重新读 profile 的两份组合文件（本地，不联网）",
+						onClick: () => loadMcp(true)
+					}, busy ? "刷新中…" : "刷新")),
+				summary
+					? h("div", { className: "dpi-muted" },
+						summary.checked === 0
+							? "没有可检查的 MCP 条目（先装一台再点「检查更新」）"
+							: "更新：" + (summary.outdated > 0 ? "可升级 " + summary.outdated + " 台" : "都是最新的") +
+								"（比对 " + summary.checked + " · 无法判断 " + (summary.undetectable + summary.failed) +
+								(summary.failed ? "（其中查不到 " + summary.failed + "）" : "") +
+								(updates && updates.at ? " · " + ago(updates.at) : "") + "）")
+					: h("div", { className: "dpi-muted" },
+						"还没检查过 MCP 更新。MCP 没有统一的版本源：面板从 Registry 装的会记版本；手工 npx 未锁版本 / 远程端点只能标「无法判断」。"),
+				h("div", { className: "dpi-muted" },
+					"MCP 条目写在 profile 的 cordis.patch.yml；改完要重启 DSH 才加载。env / headers 的值不会显示（只显示键名）。"),
+				view && view.notes && view.notes.length > 0
+					? h("div", { className: "dpi-muted" }, view.notes.join(" · "))
+					: null,
+				counts && counts.problems > 0
+					? h("div", { className: "dpi-muted", style: { color: "var(--dsw-alias-state-error-primary)" } },
+						"⚠ " + counts.problems + " 台配置有问题（缺 serverName / transport / 命令；看下面标红的条目）")
+					: null,
+				view && view.ok === false
+					? h("div", { className: "dpi-actions dpi-actions-tight" },
+						h("button", { className: "dpi-btn dpi-btn-sm", onClick: () => loadMcp(true) }, "重试"))
+					: null,
+				items.length > 0
+					? h("ul", { className: "dpi-list dpi-list-info dpi-mcp-list" }, items.map((item) =>
+						h("li", { key: "mcp" + (item.id || item.serverName || item.line) },
+							h("div", { className: "dpi-reco-head" },
+								h("b", null, item.serverName || item.id || "（没有 serverName）"),
+								item.transport ? h("span", { className: "dpi-tag" }, item.transport) : null,
+								mcpUpdateTag(item, updates),
+								item.disabled
+									? h("span", { className: "dpi-pill dpi-pill-idle" }, "已停用")
+									: item.running
+										? h("span", { className: "dpi-pill dpi-pill-ok" }, "运行中")
+										: h("span", { className: "dpi-pill dpi-pill-warn" }, "已配置 · 未加载"),
+								item.envKeys && item.envKeys.length > 0
+									? h("span", { className: "dpi-tag", title: "只显示键名，值不会出现在这里" }, "env " + item.envKeys.join("/"))
+									: null,
+								item.headerKeys && item.headerKeys.length > 0
+									? h("span", { className: "dpi-tag", title: "只显示键名，值不会出现在这里" }, "headers " + item.headerKeys.join("/"))
+									: null),
+							h("div", { className: "dpi-detail" },
+								item.transport === "stdio"
+									? [item.command].concat(item.args || []).filter(Boolean).join(" ")
+									: (item.url || "（缺 url）")),
+							h("div", { className: "dpi-detail" },
+								(item.file || "?") + (item.line ? ":" + item.line : "") + (item.id ? " · id " + item.id : "")),
+							mcpUpdateDetail(item, updates),
+							item.problems && item.problems.length > 0
+								? item.problems.map((problem, pi) => h("div", { key: "p" + pi, className: "dpi-detail", style: { color: "var(--dsw-alias-state-error-primary)" } }, "⚠ " + problem.text))
+								: null)))
+					: null,
+				items.length === 0 && view && view.ok !== false
+					? h("div", null,
+						h("div", { className: "dpi-muted" }, "还没有配置 MCP 服务器。两种加法：① 在 AI 推荐 / 只搜索里搜（结果里会标 MCP）；② 在输入框里写 mcp:<registry 名字>。"),
+						h("details", { className: "dpi-mcp-template" },
+							h("summary", null, "看一段能直接抄的组合片段"),
+							h("pre", { className: "dpi-code" }, view.template || ""),
+							h("button", { className: "dpi-btn dpi-btn-sm", onClick: () => { copyText(view.template || ""); toast("已复制组合片段"); } }, "复制")))
 					: null
 			);
 		}
@@ -2686,6 +3191,19 @@ window.__ModuleLoader__.load({
 			const settings = currentSettings();
 			const pollMs = settings.pollMs;
 			const prevStatus = useRef({});
+			/* R36：清单浮窗当前打开的是哪一个（plugins / skills / mcp / null） */
+			const [listWindow, setListWindow] = useState(null);
+			const listCounts = {
+				plugins: s.local.inventory && s.local.inventory.counts ? s.local.inventory.counts.total : null,
+				skills: s.local.skills && s.local.skills.counts ? s.local.skills.counts.skills : null,
+				mcp: s.local.mcp && s.local.mcp.counts ? s.local.mcp.counts.total : null
+			};
+			/* 打开菜单时顺手补一下三个计数（都走缓存；已加载过的不会再发请求） */
+			const prefetchLists = () => {
+				loadInventory();
+				loadSkills();
+				loadMcp();
+			};
 			useEffect(() => {
 				setLocal({ open: true });
 				reportClientState();
@@ -2745,6 +3263,8 @@ window.__ModuleLoader__.load({
 					h("div", { className: "dpi-header-actions" },
 						h("button", { className: "dpi-btn dpi-btn-ghost dpi-btn-sm", onClick: () => setLocal({ settingsOpen: true }) },
 							h(Glyph, { name: "sliders", size: 13 }), "设置"),
+						/* R36：清单菜单在「设置」与「刷新」之间 —— 三个低频清单收进浮窗 */
+						h(ListMenu, { counts: listCounts, onPick: (key) => setListWindow(key), onOpen: prefetchLists }),
 						h("button", { className: "dpi-btn dpi-btn-ghost dpi-btn-sm", onClick: () => refresh() },
 							h(Glyph, { name: "refresh", size: 13 }), "刷新"),
 						attention.dot ? h("button", { className: "dpi-btn dpi-btn-ghost dpi-btn-sm", onClick: () => api("/action", { method: "POST", body: JSON.stringify({ action: "ack" }) }).then((r) => r.state && setStore({ data: r.state })) }, "清除红点") : null)),
@@ -2770,6 +3290,10 @@ window.__ModuleLoader__.load({
 
 				h(Composer),
 
+				/* R36：「检查更新」单独一条，不再藏在清单卡里 —— 清单已经在浮窗中，
+				   更新入口必须留在主面板。 */
+				h(UpdateBar, { onOpenList: (key) => setListWindow(key) }),
+
 				data.active ? h("div", { className: "dpi-card dpi-active" }, h(JobDetail, { job: data.active })) : null,
 
 				attention.count > 0 && attention.items && attention.items.length > 0
@@ -2779,10 +3303,8 @@ window.__ModuleLoader__.load({
 
 				h(AiBox),
 				h(History),
-				/* R12：已装清单排在「历史」之后、「环境体检」之前 —— 先看装了什么，再看有没有坏 */
-				h(Inventory),
-				/* R14：Skill 那一半紧跟其后 —— 插件与技能是两条不同的判据（版本 vs 宿主认不认） */
-				h(Skills),
+				/* R36：已装插件 / 已装 Skill 已收进右上角「清单」浮窗（低频入口），
+				   主面板只留「插件更新」这一条。 */
 				h(DoctorBox),
 
 				h("footer", { className: "dpi-footer" },
@@ -2791,7 +3313,30 @@ window.__ModuleLoader__.load({
 					h("span", null, "数据：" + (host.dataDir || "?")),
 					s.local.toast ? h("span", { className: "dpi-toast" }, s.local.toast) : null),
 
-				s.local.settingsOpen ? h(SettingsModal) : null
+				s.local.settingsOpen ? h(SettingsModal) : null,
+
+				/* R36：三个低频清单 —— 点「清单」里的哪一项，才挂载哪一个浮窗。 */
+				listWindow === "plugins"
+					? h(FloatWindow, {
+						title: "已装插件",
+						subtitle: "profile 依赖 · 可升级的排在最前 · 更新入口在主面板「插件更新」",
+						onClose: () => setListWindow(null)
+					}, h(Inventory, { inWindow: true }))
+					: null,
+				listWindow === "skills"
+					? h(FloatWindow, {
+						title: "已装 Skill",
+						subtitle: "磁盘技能根 × 宿主认领结果 · 备份残留 / frontmatter / 不会自动调用都在这里",
+						onClose: () => setListWindow(null)
+					}, h(Skills, { inWindow: true }))
+					: null,
+				listWindow === "mcp"
+					? h(FloatWindow, {
+						title: "已装 MCP",
+						subtitle: "profile 组合文件里的 dsh-mcp-client 条目 · 写进去要重启 DSH 才加载",
+						onClose: () => setListWindow(null)
+					}, h(McpList, { inWindow: true }))
+					: null
 			);
 		}
 
@@ -2834,7 +3379,10 @@ window.__ModuleLoader__.load({
   .dpi-panel > *{animation:none}
   .dpi-btn,.dpi-history-row,.dpi-switch i{transition:none}
 }
-.dpi-header{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;margin-bottom:18px}
+/* R36：面板的入场动画让每个直接子元素各成一层（transform/opacity），
+   所以「清单」下拉必须把 header 自己也抬成一层，否则会被后面的卡片盖住。
+   z-index 30 > 卡片（auto），但 < 设置/浮窗遮罩（60）。 */
+.dpi-header{position:relative;z-index:30;display:flex;align-items:flex-start;justify-content:space-between;gap:14px;margin-bottom:18px}
 .dpi-brand{display:flex;gap:11px;align-items:center;min-width:0}
 .dpi-brand-icon{display:flex;align-items:center;justify-content:center;width:36px;height:36px;border-radius:11px;
   color:var(--dpi-accent);background:color-mix(in srgb,var(--dpi-accent) 12%,var(--dpi-surface-2));
@@ -3133,9 +3681,58 @@ window.__ModuleLoader__.load({
 .dpi-ask{display:flex;flex-direction:column;gap:6px;width:100%;margin-top:8px;padding:10px 12px;
   border-radius:10px;border:1px solid var(--dsw-alias-state-warn-primary,#d89614);
   background:var(--dsw-alias-bg-layer-2)}
+
+/* ── R36：右上角「清单」菜单 ───────────────────────────────────────── */
+.dpi-menu-wrap{position:relative;display:inline-flex;flex-shrink:0}
+.dpi-chev{display:inline-flex;transition:transform .14s ease}
+.dpi-menu{position:absolute;right:0;top:calc(100% + 7px);z-index:200;min-width:196px;padding:5px;
+  display:flex;flex-direction:column;gap:2px;border:1px solid var(--dpi-line-strong);border-radius:10px;
+  background:var(--dpi-surface);box-shadow:0 18px 42px -20px rgba(0,0,0,.62),0 2px 8px rgba(0,0,0,.16)}
+.dpi-menu-item{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;
+  border:none;background:transparent;color:inherit;text-align:left;font:inherit;font-size:12.5px;
+  padding:8px 10px;border-radius:7px;cursor:pointer}
+.dpi-menu-item:hover{background:color-mix(in srgb,var(--dpi-muted) 12%,transparent)}
+.dpi-menu-item .dpi-count{font-size:10.5px;padding:3px 6px}
+
+/* ── R36：浮动清单窗（点 X / 点周围空白 / Esc 关） ─────────────────── */
+.dpi-float-overlay{align-items:center;justify-content:center;padding:24px;overflow:hidden}
+.dpi-float{width:min(960px,100%);max-height:min(82vh,820px);display:flex;flex-direction:column;
+  overflow:hidden;color:var(--dsw-alias-label-primary);background:var(--dpi-surface);
+  border:1px solid var(--dpi-line-strong);border-radius:16px;
+  box-shadow:0 28px 70px -30px rgba(0,0,0,.65),0 4px 14px rgba(0,0,0,.2)}
+.dpi-float-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;
+  flex-shrink:0;padding:14px 16px 12px;border-bottom:1px solid var(--dpi-line);background:var(--dpi-surface)}
+.dpi-float-title{min-width:0;display:flex;flex-direction:column;gap:3px}
+.dpi-float-title strong{font-size:14.5px;font-weight:600}
+.dpi-float-x{display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;
+  flex-shrink:0;border-radius:8px;border:1px solid transparent;background:transparent;
+  color:var(--dpi-muted);cursor:pointer}
+.dpi-float-x:hover{color:var(--dsw-alias-label-primary);border-color:var(--dpi-line);
+  background:color-mix(in srgb,var(--dpi-muted) 12%,transparent)}
+.dpi-float-body{overflow:auto;min-height:0;padding:14px 16px 18px}
+.dpi-float-body .dpi-card{padding:0;margin-bottom:0;border:none;box-shadow:none;background:transparent}
+.dpi-in-window .dpi-card-head{margin-bottom:8px}
+.dpi-updatebar .dpi-card-head{margin-bottom:6px}
+.dpi-mcp-path{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px;margin-top:6px;
+  font-size:11.5px;line-height:1.6}
+.dpi-mcp-path code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11.5px;
+  padding:2px 6px;border-radius:5px;border:1px solid var(--dpi-line);background:var(--dpi-surface-2);
+  overflow-wrap:anywhere}
+.dpi-mcp-template{margin-top:8px}
+.dpi-mcp-template summary{cursor:pointer;font-size:12px;color:var(--dpi-muted)}
+.dpi-code{margin:8px 0;padding:10px 12px;overflow:auto;max-height:260px;border-radius:8px;
+  border:1px solid var(--dpi-line);background:var(--dpi-surface-2);font-size:11.5px;line-height:1.55;
+  font-family:ui-monospace,SFMono-Regular,Consolas,monospace;white-space:pre}
+.dpi-mcp-list .dpi-detail{overflow-wrap:anywhere}
+
 @media (max-width:760px){
   .dpi-overlay{padding:12px 8px}
   .dpi-settings{max-height:calc(100vh - 24px);padding:12px}
+  .dpi-float-overlay{padding:8px}
+  .dpi-float{max-height:calc(100vh - 16px);border-radius:12px}
+  .dpi-float-head{padding:12px 12px 10px}
+  .dpi-float-body{padding:12px}
+  .dpi-menu{min-width:170px}
 }
 @media (max-width:760px){
   .dpi-panel{padding:14px 12px 32px}
@@ -3232,6 +3829,13 @@ window.__ModuleLoader__.load({
 			AiBox,
 			/* R14：已装 Skill（无头渲染要能验：折叠/展开、备份标签、宿主没认、读不到兜底） */
 			Skills,
+			/* R36：清单菜单 / 浮窗 / 已装 MCP / 独立更新条（四个新界面都要能被无头渲染验到） */
+			UpdateBar,
+			ListMenu,
+			FloatWindow,
+			McpList,
+			mcpRecoDetails,
+			recoActions,
 			/* R6.1：自检快捷键（无头渲染与自测也要能摸到这几个） */
 			runSelfCheck,
 			bindHotkey,
