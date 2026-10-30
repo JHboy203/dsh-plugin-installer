@@ -34,6 +34,8 @@
 | `dev/probe-mcp-live.mjs` | 真实 profile 上 MCP 视图（本机 0 台）+ 真查一次 Registry；只读 | 同上，script 换 `dev/probe-mcp-live.mjs` |
 | `dev/probe-mcp-wire.mjs` | 真 search 并入 MCP 候选、假 LLM 保留 `kind/installPath/requiredEnv`（11 项） | 同上，script 换 `dev/probe-mcp-wire.mjs` |
 | `dev/probe-mcp-append-real.mjs` | 复制真实 579 行 `cordis.patch.yml` 到临时目录，走一遍追加 → 原文不少 / 备份=原文 / 写后复核（5 项） | 同上，script 换 `dev/probe-mcp-append-real.mjs` |
+| `dev/probe-archive-subdir.mjs` | **R38 收口判据（KNOWN-RED，R39 要先修）**：GitHub 归档的 `repo-<ref>/` 包装 × tree 链接的 `subdir`。真机 e2e 实测 `detectKind(tmp,{subdir})` 把 subdir 拼在解包根上 → kind=unknown；同时 `wrappers` 会把技能目录本身也折进去（不能当仓库内路径用）。`--strict` 在修好前应退 1 | `node dev/probe-archive-subdir.mjs [--strict]` |
+| `dev/probe-skill-e2e.mjs` | **R38 端到端**：装一个真实 GitHub Skill（默认 `anthropics/skills` 的 `brand-guidelines`）→ 校验台账坐标 → 三条链检查更新 → 改本地文件后重装应被拒 → `confirmEdited` 后重装 → 清理。**默认 dry-run**；`--apply` 才真写技能根（`--keep` 保留） | `host_selfcheck({..., script:"dev/probe-skill-e2e.mjs", args:["--base","http://127.0.0.1:<端口>","--apply"]})` |
 | `dev/fixtures/stacking/index.html` | **R36 层叠夹具**：`?old=1` 复现「下拉被后面卡片盖住」，不带 query 是修复后；看 `window.__stackResult.menuItemHit`。可用浏览器打开，或 `lemofilm_stills` 出 old/new 静帧 | 直接打开 / `lemofilm_stills({project:"…/dev/fixtures/stacking", q:"old=1"})` |
 | `dev/probe-crash.mjs` | 真实崩溃日志上，`readNewestCrash` + `inspectProfile` 现在怎么判（两类日志 / sibling / stale / 来源处置） | `host_selfcheck({plugin, script:"dev/probe-crash.mjs"})` |
 | `dev/probe-skills.mjs` | 真实技能根上，YAML 判据会不会误报、`fixable` 怎么分 | 同上，script 换 `dev/probe-skills.mjs` |
