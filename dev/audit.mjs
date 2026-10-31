@@ -54,7 +54,7 @@ export const FROZEN_DEFAULTS = {
 };
 
 /** 文档里声明的自检项数（改断言就先跑一次 host_selfcheck，再同步这个数）。 */
-export const EXPECTED_ASSERTIONS = 1136;
+export const EXPECTED_ASSERTIONS = 1141;
 
 /** 界面自检项数（dev/render-check.cjs）。同样是「文档对表」的一半。 */
 const EXPECTED_RENDER_ASSERTIONS = 262;
@@ -129,6 +129,10 @@ async function main() {
 	eq("R45：自定义来源默认空、网页解析默认关闭", [DEFAULTS.customSources.length, DEFAULTS.allowWebSources], [0, false]);
 	ok("R45：自定义来源坏条目被丢掉、合法的留下",
 		normalizeSettings({ customSources: [{ type: "npm", target: "https://registry.npmmirror.com" }, { type: "ftp", target: "ftp://x" }] }).customSources.length === 1);
+	/* R47：设置往返探针 —— 它改真设置，所以必须有 finally 恢复（否则换会话会看到 probe 来源） */
+	const probeSettingsLive = await readFile(join(root, "dev", "probe-settings-live.mjs"), "utf8").catch(() => "");
+	ok("R47：设置往返探针存在，且 finally 恢复原设置",
+		/--base/.test(probeSettingsLive) && /恢复原设置/.test(probeSettingsLive) && /finally/.test(probeSettingsLive));
 	ok("R41：摘要里能看出 AI 推荐的条数与广度", /AI 推荐 3 条 \/ 广度 标准/.test(describeSettings(DEFAULTS)), describeSettings(DEFAULTS));
 
 	/* ③ 工具契约（漏 output = 整个插件静默失活） */

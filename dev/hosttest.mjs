@@ -31,6 +31,8 @@ import { buildReviewInput } from "../lib/ai.js";
 import { estimateReviewTokens, reviewWorthIt } from "../lib/ai.js";
 /* R40：AI 候选的三类投影与「按类保底打包」都是纯函数 —— 这一层不联网、不花 token。 */
 import { packCandidates, runPanelAi, toAiCandidate } from "../lib/ai.js";
+/* R47：AI 辅助添加 / 网页解析的契约（未知输入 → 提案；网页只收公网 URL）。 */
+import { assistCustomSource, parseWebSource } from "../lib/ai.js";
 import { buildSkillCandidate, clearSkillSourceCache, scoreSkill, searchSkills } from "../lib/skillsource.js";
 import { packPluginTarball } from "../lib/pack.js";
 import { stagingRefsFromManifest, stagingKeepNames, rollbackPlan, splitUpgradeTargets, upgradeStalled, historyDropPlan, Installer, compactCollaborator } from "../lib/pipeline.js";
@@ -3936,6 +3938,52 @@ async function main() {
 	ok("R45 探针：probe-custom-sources 覆盖 URL 边界 / 归一化 / 四类型编排 / web 默认关",
 		/checkSourceUrl/.test(probeCustomSrc) && /normalizeCustomSources/.test(probeCustomSrc) &&
 		/searchCustomSources/.test(probeCustomSrc) && /默认关闭/.test(probeCustomSrc));
+
+	/* R47：AI 辅助添加 / 网页解析的**契约**（假 LLM，不花钱）——
+	   规则能认的不调模型；模型只出提案；网页解析只收公网 URL。 */
+	const rulesAssist = await assistCustomSource(null, { input: "https://github.com/topics/dsh-plugin" });
+	ok("R47 AI 辅助：规则能认的输入不调模型（连 ctx 都不需要）",
+		rulesAssist.ok === true && rulesAssist.via === "rules" && rulesAssist.proposal.type === "github" &&
+		rulesAssist.proposal.target === "topic:dsh-plugin", rulesAssist);
+	const fakeAssistCtx = {
+		agentDefaultModel: { currentSelection: () => ({ provider: "p", model: "m" }) },
+		llm: {
+			stream: async function* () {
+				yield { type: "text-delta", text: JSON.stringify({ type: "github", target: "topic:dsh-plugin", label: "plugin topic", note: "从一句话猜的" }) };
+			}
+		}
+	};
+	const aiAssist = await assistCustomSource(fakeAssistCtx, { input: "帮我加一个 dsh 插件合集" });
+	ok("R47 AI 辅助：认不出才调模型，模型结果也只是「提案」",
+		aiAssist.ok === true && aiAssist.via === "ai" && aiAssist.proposal.target === "topic:dsh-plugin", aiAssist);
+	const badAssistCtx = {
+		agentDefaultModel: { currentSelection: () => ({ provider: "p", model: "m" }) },
+		llm: { stream: async function* () { yield { type: "text-delta", text: JSON.stringify({ type: "ftp", target: "ftp://x" }) }; } }
+	};
+	const badAssist = await assistCustomSource(badAssistCtx, { input: "随便来个来源" });
+	ok("R47 AI 辅助：模型给了非法类型就拒绝（脏配置进不了设置）",
+		badAssist.ok === false && /没法校验/.test(badAssist.message), badAssist);
+	const fakeWebCtx = {
+		agentDefaultModel: { currentSelection: () => ({ provider: "p", model: "m" }) },
+		llm: {
+			stream: async function* () {
+				yield {
+					type: "text-delta",
+					text: JSON.stringify({ items: [
+						{ name: "ok-plugin", url: "https://github.com/o/r", description: "dsh" },
+						{ name: "localhost", url: "http://127.0.0.1/x", description: "bad" },
+						{ name: "", url: "https://example.com/x" }
+					] })
+				};
+			}
+		}
+	};
+	const parsedWeb = await parseWebSource(fakeWebCtx, { url: "https://example.com/list", query: "dsh", text: "..." });
+	ok("R47 网页解析：只留下「有名字 + 公网 URL」的条目",
+		parsedWeb.length === 1 && parsedWeb[0].name === "ok-plugin" && parsedWeb[0].url === "https://github.com/o/r", parsedWeb);
+	const assistRoute = indexSrcR45.slice(indexSrcR45.indexOf('path === "/sources/assist"'), indexSrcR45.indexOf('path === "/sources/assist"') + 500);
+	ok("R47 接线：/sources/assist 只返回提案，不写设置",
+		/assistCustomSource/.test(assistRoute) && !/updateSettings|saveSettings|writeFile/.test(assistRoute), assistRoute.slice(0, 120));
 
 	await rm(root, { recursive: true, force: true });
 
