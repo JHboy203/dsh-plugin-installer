@@ -154,7 +154,7 @@
 > **构建标记格式**（`0.1.0 · YYYY-MM-DD HH:MM`，且 `/health` 不许写死）/ 客户端设置与热键入口 /
 > `settings.json` 归一化后逐字不变 / 等待确认任务的 staging 现场还在 / README 与交接文件里的
 > 断言数是否等于 `EXPECTED_ASSERTIONS`。**不碰宿主、不 spawn、不写盘**，只打印
-> 「接着跑 host_selfcheck（1064）+ render-check（254）」。自洽检查现已 **194 项**。
+> 「接着跑 host_selfcheck（1087）+ render-check（254）」。自洽检查现已 **194 项**。
 > 三层分工至此固定：**audit = 自洽，host_selfcheck = 行为，render-check = 界面**。
 > 线上实测：构建标签 `0.1.0 · 2026-10-20 19:45`、客户端 `r6.0`、`GET/POST /settings` 正常
 > （非法值当场夹取回默认）、`clientReport` 里有 360×658 的窄屏实例。
@@ -1047,7 +1047,7 @@ node DSH-Plugin/dsh-plugin-installer/dev/audit.mjs
 #   换版本判据只在 lib/upgrade.js（自己换自己 / link / git 一律拒）；装失败自动装回旧版并**按版本核对**；
 #   中断可续跑（只对「卸载后/旧版还在」）；协作方是可选服务（没有就明确拒绝，不排无效队列）
 #
-# ② 1064 项确定性自检（解包围栏 / 识别短路 / 扫描与密度 / 快照回滚 / 重打包 / prune 保鲜 / 地雷 /
+# ② 1087 项确定性自检（解包围栏 / 识别短路 / 扫描与密度 / 快照回滚 / 重打包 / prune 保鲜 / 地雷 /
 #   契约扫描 / profile 体检与修复 / 已装版本对照 / 已装清单判据 / registry 最新版比对（打桩 fetch）/
 #   设置归一化与审核三档 / 红点与跳过审核门禁 / 热键 / 7z 往返与围栏 / 搜索缓存 / 工具契约 /
 #   pnpm 失败分诊 / allowBuilds 解析 / 批准重装 / 版本豁免读写与回读确认 / 兼容降级口径 /
@@ -1124,7 +1124,7 @@ DSH 每次启动换随机端口（`dsh-desktop-host` 里写死 `--port 0`），�
 
 | 场景 | 结果 |
 |---|---|
-| 确定性自检 | **1064/1064 通过**（`dev/hosttest.mjs`，含 zip/tar 构造、穿越与软链接拒绝、比例炸弹、5 种识别分支、快照还原、重打包往返、prune 引用保护、地雷处置、契约扫描、profile 体检与修复、设置归一化、审核三档、热键、pnpm 失败分诊、allowBuilds 解析、批准重装与三道闸、落盘串行、版本豁免读写与回读确认、兼容降级口径、预检「已授权不再阻断」回归、staging 生命周期、环境注意、运行中代码指纹、已装清单四类来源、registry 比对与缓存、npm: 前缀、**inject 六种写法与边界、激活失败分诊、fiberPhase 判据、SKILL.md 三种 frontmatter 形态、YAML 硬错误判据、技能备份识别与磁盘×宿主对账、指纹两栏（宿主/客户端）、备份处置的越权拒绝与真实搬运、frontmatter 改写的三道自检与真实修复、崩溃分诊两类日志与已知签名、崩溃结论的新鲜度（stale）、崩溃处置的来源判据（link:/tgz/git/npm）与两张新签名（prepare / lossless JSON）、YAML 三类新硬错误（Tab 缩进 / 重复键 / 引号没闭合）与「不可自动改写」分流、搜索结果影子包警戒（官方 @deepseek-ai/* 同名但不全等）、客户端包 rev 对账（真机向量 / combo 守卫 / same·rebuilt·unknown 与「同一份字节即使 stale 也报 error」/ 动作只给 npm 来源）、升级回滚四种模式与旧 .tgz 往返、批量队列去重/暂停/坏 spec 跳过、版本跨度三档、换版本判据（自己 / link / git / 无声明四类拒绝）、装回旧版按版本核对、中断续跑只给一种现场、协作方五种状态、更新结果按版本对账、profile 的 pnpm 世代三方对账（lockfile v9 importers × node_modules 实际版本 × `.modules.yaml` 的 prunedAt）、读不到≠通过（`pnpm-generation-unreadable` 单独成条）、`excludeLinksFromLockfile` 不误报、只报不修（动作表里没有「修 pnpm」的入口）、带外改动签名差分与归因台账（三个记账时机 / 只有终态才记 / 事件上限 / 首次只落基线不记噪声事件）、清历史的判据（只清终态 / 保留 queued·running·awaiting-confirm / 空值与非数组不炸）、**R31：trustPolicy 三种落点与「块里有非列表行就拒绝」、直连安装的判据/写盘/幂等/撤销全链路（含 junction 只能用 realpath 认、删链接只能 rmdir）、信任度降级的分诊与豁免条目解析、老任务失败分类的就地重判（只换解释不动事实）、用途 tool 档与「界面档必须有客户端代码」、兼容判据不一致时不打假 ✓**、**R33：Python 应用（第 8 类非 DSH 资产）的判据/依赖/入口/数据文件/数据库、`.py` 真的被扫、「连接数据库」这个能力、JS 规则不串到 .py、扫描覆盖诚实化（没扫全时不许说「未发现危险特征」）、构建产物降权（dist/ 降一档、手写代码不降）、Skill 的 templates/ 豁免与提示注入强弱分档**、**R34：「一片插件在等某个服务」这张表的解析与 required 标注、签名与处置（第一条就查 dsh-tools 地雷）、detail 说清 45 个插件在等 tools、装回旧版与续跑两条 pnpm 路径都要扫雷**、**R38：Skill 来源台账（目录指纹能感知非 SKILL.md 改动 / 台账原子写读回 / current·outdated·unknown 三态 / 本地来源不编造最新 / 存量技能不入表只计数 / 单条查询失败隔离 / 按来源重装三种拒绝 / 视图行上的来源与本地改过标记）**）**）；另 **254 项**无头渲染 + **194 项**自洽体检 |
+| 确定性自检 | **1087/1087 通过**（`dev/hosttest.mjs`，含 zip/tar 构造、穿越与软链接拒绝、比例炸弹、5 种识别分支、快照还原、重打包往返、prune 引用保护、地雷处置、契约扫描、profile 体检与修复、设置归一化、审核三档、热键、pnpm 失败分诊、allowBuilds 解析、批准重装与三道闸、落盘串行、版本豁免读写与回读确认、兼容降级口径、预检「已授权不再阻断」回归、staging 生命周期、环境注意、运行中代码指纹、已装清单四类来源、registry 比对与缓存、npm: 前缀、**inject 六种写法与边界、激活失败分诊、fiberPhase 判据、SKILL.md 三种 frontmatter 形态、YAML 硬错误判据、技能备份识别与磁盘×宿主对账、指纹两栏（宿主/客户端）、备份处置的越权拒绝与真实搬运、frontmatter 改写的三道自检与真实修复、崩溃分诊两类日志与已知签名、崩溃结论的新鲜度（stale）、崩溃处置的来源判据（link:/tgz/git/npm）与两张新签名（prepare / lossless JSON）、YAML 三类新硬错误（Tab 缩进 / 重复键 / 引号没闭合）与「不可自动改写」分流、搜索结果影子包警戒（官方 @deepseek-ai/* 同名但不全等）、客户端包 rev 对账（真机向量 / combo 守卫 / same·rebuilt·unknown 与「同一份字节即使 stale 也报 error」/ 动作只给 npm 来源）、升级回滚四种模式与旧 .tgz 往返、批量队列去重/暂停/坏 spec 跳过、版本跨度三档、换版本判据（自己 / link / git / 无声明四类拒绝）、装回旧版按版本核对、中断续跑只给一种现场、协作方五种状态、更新结果按版本对账、profile 的 pnpm 世代三方对账（lockfile v9 importers × node_modules 实际版本 × `.modules.yaml` 的 prunedAt）、读不到≠通过（`pnpm-generation-unreadable` 单独成条）、`excludeLinksFromLockfile` 不误报、只报不修（动作表里没有「修 pnpm」的入口）、带外改动签名差分与归因台账（三个记账时机 / 只有终态才记 / 事件上限 / 首次只落基线不记噪声事件）、清历史的判据（只清终态 / 保留 queued·running·awaiting-confirm / 空值与非数组不炸）、**R31：trustPolicy 三种落点与「块里有非列表行就拒绝」、直连安装的判据/写盘/幂等/撤销全链路（含 junction 只能用 realpath 认、删链接只能 rmdir）、信任度降级的分诊与豁免条目解析、老任务失败分类的就地重判（只换解释不动事实）、用途 tool 档与「界面档必须有客户端代码」、兼容判据不一致时不打假 ✓**、**R33：Python 应用（第 8 类非 DSH 资产）的判据/依赖/入口/数据文件/数据库、`.py` 真的被扫、「连接数据库」这个能力、JS 规则不串到 .py、扫描覆盖诚实化（没扫全时不许说「未发现危险特征」）、构建产物降权（dist/ 降一档、手写代码不降）、Skill 的 templates/ 豁免与提示注入强弱分档**、**R34：「一片插件在等某个服务」这张表的解析与 required 标注、签名与处置（第一条就查 dsh-tools 地雷）、detail 说清 45 个插件在等 tools、装回旧版与续跑两条 pnpm 路径都要扫雷**、**R38：Skill 来源台账（目录指纹能感知非 SKILL.md 改动 / 台账原子写读回 / current·outdated·unknown 三态 / 本地来源不编造最新 / 存量技能不入表只计数 / 单条查询失败隔离 / 按来源重装三种拒绝 / 视图行上的来源与本地改过标记）**、**R39：归档包装 × tree 链接 subdir（仓库根停在剥掉 `repo-<ref>/` 那一层 / subdir 相对仓库根拼 / 技能落在 `<extract>/repo-<ref>/skills/foo`）与台账仓库内路径（`repoRelativePath(repoRoot, payload.dir)` = `skills/foo`、不含包装目录、技能在仓库根记空串、算不出就记 null 不编造、接线不再拿 wrappers 拼）与目录基线（`commit` = 归档字节出处 / `pathCommit` = 技能目录最后一次提交、更新只比后者、HEAD 与基线不同也判 current、会话面板显示的就是被比较的那两个、旧记录缺基线只报 unknown、基线查不到不影响安装）**）**）；另 **254 项**无头渲染 + **194 项**自洽体检 |
 | 已装 Skill（R14 实测，本机） | 技能根 `.dsh/skills` 下 **59 个目录 = 55 个技能 + 4 个备份残留**；上线第一分钟抓出 **3 个 frontmatter 不是合法 YAML** 的技能（`github-private-backup` / `win-desktop-automation` / `windows-disk-reclaim`，PyYAML 复核：`mapping values are not allowed here`）→ 宿主读不出 name、整条跳过；用 `.tools/fix-skill-frontmatter.py --apply`（写前备份、写后 PyYAML 复核）改成块标量后，宿主重扫即认到 —— **`hostVisible` 55/55、`yamlBroken` 0、`notVisible` 0**；`domain-modeling` / `grill-me` / `grill-with-docs` / `grilling` 各有一份 `.bak-mp20261017-1350` 同名备份（尚未清）；11 个技能的 description 是 `>` 折叠块，旧解析把它们读成「>」 |
 | 激活失败的真实样本（R13 实测） | `dsh-imgops` 两次任务：①宿主返回 `application:"failed" / stage:"enable" / diagnostic:"1 entry did not activate … cannot get property \"tools\" without inject"`（pnpm exit 0、包已落地）→ 新分诊判 `activation-failed`，标题点名缺 `tools`，处置给出 `export const inject = ['tools']`；② `already-installed` → 判 noop + 照常诊断。同机 4 个健康插件（本插件 / dsh-screenshot / dsh-diag / dsh-ops）静态扫描**零误报**（canvas 的 `ctx.fillRect` 不计入） |
 | 重装静默无效（R13 第二个 bug） | 修好 `dsh-imgops` 并升到 0.1.1 重新提交，宿主仍回 `already-installed`（实测 `changed:false`、`elapsedMs:11`、pnpm 没跑）—— 判据是依赖行的 spec 字符串，不含版本文件名就永远是同一个 spec。修法：`pkg-<名字>-<版本>.tgz` + 只收「没人引用的旧包」 |
@@ -1188,7 +1188,7 @@ lib/collaborator.js      R27：换版本的**可选**协作方探测（插件目
 lib/upgrade.js           R27：换版本判据（要不要换/能不能换/旧版怎么装回），纯函数、一处定义
 dev/verify-r13.mjs       R13：端到端验收器（运行中代码 / 提交 / ⑧ 回执 / ⑨ 诊断 / 体检），逐条 PASS/FAIL
 lib/tools.js             六个宿主工具定义（含 output 契约）
-dev/hosttest.mjs         1064 项确定性自检（宿主进程跑）
+dev/hosttest.mjs         1087 项确定性自检（宿主进程跑）
 dev/probe-crash.mjs      R17：不进宿主、只读真实崩溃日志，看分诊判据（改 lib 后立刻能验）
 dev/probe-rev.mjs        R24：算法固定向量 + 最近一份 web-boot 日志里那份 client 包还在不在（`--full` 连体检结论）
 dev/probe-mcp.mjs        R36：MCP 纯函数 42 项（组合文件解析 / Registry→安装参数 / 追加文本 / 临时 profile 真写与冲突拒绝 / 更新检查三层判据）

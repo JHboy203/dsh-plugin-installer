@@ -152,11 +152,10 @@ try {
 			if (Array.isArray(detected.notes) && detected.notes.length) line("  notes = " + JSON.stringify(detected.notes));
 			if (detected.kind === "unknown") {
 				line("");
-				line("  ★ 已知问题（R38 收口时撞到，未修）：tree 链接的 subdir 被拼在**解包根**上，");
-				line("    而 GitHub 归档外面还有一层 repo-<ref>/ 包装 → 找不到 SKILL.md。");
-				line("    复现：node dev/probe-archive-subdir.mjs --strict（应红）。");
-				line("    修复方向：detectKind 先剥一层归档包装得到 repoRoot，再拼 subdir；");
-				line("    台账的仓库内路径改为 relative(repoRoot, payload.dir)，不要用 wrappers 当前缀。");
+				line("  ★ 回归方向（R39 已修，再红说明又退回去了）：tree 链接的 subdir 必须相对");
+				line("    **剥掉归档包装后的仓库根**（<extract>/repo-<ref>）定位，不能拼在解包根上。");
+				line("    离线复现：node dev/probe-archive-subdir.mjs --strict（这条现在应全绿）。");
+				line("    本轮 detected 里能直接看到剥到哪一层：repoRoot / archiveWrappers / notes。");
 			}
 			throw new Error("安装未完成，后续步骤不做");
 		}
@@ -169,8 +168,9 @@ try {
 		const entry = after.items[String(SKILL).toLowerCase()];
 		if (!entry) throw new Error("台账里没有 " + SKILL + " 的记录");
 		const src = entry.source || {};
-		line("  来源：" + [src.owner, src.repo, src.ref, src.commit && String(src.commit).slice(0, 8), src.path].filter(Boolean).join(" / "));
+		line("  来源：" + [src.owner, src.repo, src.ref, "HEAD " + String(src.commit || "?").slice(0, 8), "目录基线 " + String(src.pathCommit || "?").slice(0, 8), src.path].filter(Boolean).join(" / "));
 		if (src.type !== "github" || !src.commit || src.path === null) throw new Error("台账缺 GitHub 坐标 / commit / 路径");
+		if (!src.pathCommit) throw new Error("台账缺「技能目录的基线提交」（R39：更新检查只比它；缺了只能显示无法判断）");
 		if (src.path !== SUBDIR) throw new Error("台账仓库内路径不对：期望 " + SUBDIR + "，实际 " + JSON.stringify(src.path));
 
 		line("");
@@ -179,6 +179,9 @@ try {
 		const up = ((checked.skillUpdates && checked.skillUpdates.items) || []).find((item) => item.dir === SKILL);
 		if (!up) throw new Error("skillUpdates 里没有 " + SKILL);
 		line("  关系：" + up.relation + " · 本地改过：" + Boolean(up.locallyEdited) + (up.reason ? " · " + up.reason : ""));
+		/* 刚装完就该是「最新」：比的是技能目录的基线提交。若这里 outdated，多半是拿仓库 HEAD
+		   当基线了（别处的提交会让它天天变）—— 旧实现就是这么误报的。 */
+		if (up.relation !== "current") throw new Error("刚装完却不是「最新」（relation=" + up.relation + "，基线 " + String(up.localCommit || "?").slice(0, 8) + " vs 最新 " + String(up.latestCommit || "?").slice(0, 8) + "）");
 
 		line("");
 		line("⑤ 模拟本地改动，再请求重装（不带 confirmEdited）…");
@@ -198,8 +201,15 @@ try {
 		if (/e2e local edit/.test(text)) throw new Error("重装后本地改动还在（覆盖没发生？）");
 		const ledger3 = await readSkillLedger(LEDGER);
 		const entry3 = ledger3.items[String(SKILL).toLowerCase()];
-		if (!entry3 || entry3.digest === entry.digest) throw new Error("重装后台账 digest 没更新");
-		line("  重装完成，台账 digest " + String(entry.digest).slice(0, 8) + " → " + String(entry3.digest).slice(0, 8));
+		if (!entry3) throw new Error("重装后台账记录不见了");
+		/* 重装 = 覆盖成来源那一份：台账 digest 必须等于**现在的磁盘**，且不再是「本地改过」的值。
+		   别断言「digest 变了」—— 上游内容没变时，重装出来的就是与首次安装同一份字节
+		   （2026-10-31 真机撞到：这条假红会把一次成功的重装报成失败）。 */
+		const diskDigest = await hashSkillDir(skillDir);
+		if (entry3.digest !== diskDigest) throw new Error("重装后台账 digest 与磁盘不一致：" + String(entry3.digest).slice(0, 10) + " vs " + String(diskDigest).slice(0, 10));
+		if (entry3.digest === editedDigest) throw new Error("重装后台账 digest 还是「本地改过」那个值（记录没重写？）");
+		line("  重装完成，台账 digest " + String(entry.digest).slice(0, 8) + " → " + String(entry3.digest).slice(0, 8) +
+			"（与磁盘一致；" + (entry3.digest === entry.digest ? "上游内容未变" : "上游内容已变") + "）");
 
 		line("");
 		line("SUMMARY e2e 全通（安装 → 台账 → 更新 → 本地改动保护 → 重装 → 清理）");

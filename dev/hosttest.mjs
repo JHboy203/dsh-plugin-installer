@@ -19,7 +19,7 @@ import { spawn } from "node:child_process";
 import { satisfiesVersion, versionGap } from "../lib/semver.js";
 import { classifyInput } from "../lib/urls.js";
 import { DEFAULT_LIMITS, extractToDir, findBsdtar, sniffFormat } from "../lib/formats.js";
-import { detectKind } from "../lib/detect.js";
+import { detectKind, repoRelativePath } from "../lib/detect.js";
 import { parseSkillFrontmatter, yamlFrontmatterIssue } from "../lib/detect.js";
 import { buildSkillView, planSkillFix, planSkillPark, readSkillsOnDisk, rewriteSkillFrontmatter, skillBackupInfo, skillFindings, skillSourceLabel, summarizeSkills } from "../lib/skills.js";
 /* R38：Skill 来源台账 / 目录指纹 / 更新检查 / 重装判据 */
@@ -451,6 +451,22 @@ async function main() {
 	eq("detect: 单层包装被剥掉后识别为 bundle", detectedBundle.kind, "bundle");
 	eq("detect: 包装目录记录", detectedBundle.wrappers, ["repo-main"]);
 	eq("detect: 可安装", detectedBundle.installable, true);
+	/* R39：仓库根（剥掉归档包装之后那一层）单独记着 —— 台账的仓库内路径只认它 */
+	eq("R39 detect: 仓库根停在剥掉归档包装那一层", detectedBundle.repoRoot, join(bundleDir, "repo-main"));
+	eq("R39 detect: 归档包装单独记录（不进仓库内路径）", detectedBundle.archiveWrappers, ["repo-main"]);
+
+	/* R39：tree 链接（`/tree/<ref>/skills/foo`）—— subdir 必须相对**仓库根**拼；
+	   拼到解包根上会去找不存在的 `<extract>/skills/foo`（R38 真机 e2e 就是这么挂的）。 */
+	const treeDir = dir("tree");
+	await mkdir(join(treeDir, "repo-main", "skills", "foo"), { recursive: true });
+	await writeFile(join(treeDir, "repo-main", "skills", "foo", "SKILL.md"), "---\nname: foo\ndescription: 树链接\n---\n# body\n");
+	const detectedTree = await detectKind(treeDir, { subdir: "skills/foo" });
+	eq("R39 detect: tree 链接的 subdir 相对仓库根定位", detectedTree.kind, "skill");
+	eq("R39 detect: 技能落在 <extract>/repo-main/skills/foo", detectedTree.payload.dir, join(treeDir, "repo-main", "skills", "foo"));
+	eq("R39 detect: 仓库内路径 = skills/foo", repoRelativePath(detectedTree.repoRoot, detectedTree.payload.dir), "skills/foo");
+	const detectedTreePlain = await detectKind(treeDir);
+	eq("R39 detect: 不带 subdir 时台账路径同样是 skills/foo（wrappers 不能当路径）",
+		repoRelativePath(detectedTreePlain.repoRoot, detectedTreePlain.payload.dir), "skills/foo");
 
 	const profileDir = dir("profile");
 	await mkdir(profileDir, { recursive: true });
@@ -3602,8 +3618,11 @@ async function main() {
 	await writeFile(join(ledgerSkillDir, "notes.md"), "local edit", "utf8");
 	const digest2 = await hashSkillDir(ledgerSkillDir);
 	ok("R38 台账：目录指纹能感知非 SKILL.md 的改动", digest1 !== digest2 && digest1.length === 64);
-	const ledgerEntry = buildSkillLedgerEntry({ dir: "ledger-skill", skill: "ledger-skill", root, source: { type: "github", kind: "source-archive", spec: "github:o/r", owner: "o", repo: "r", ref: "main", commit: "a".repeat(40), path: "skills/ledger-skill" }, digest: digest2, jobId: "job-x" });
+	/* R39：`commit` 是仓库 HEAD（归档字节出处），`pathCommit` 是技能目录的基线 —— 两者故意不同：
+	   更新检查只比后者；拿前者比会让每个技能装完就显示「有更新」（真机撞到过）。 */
+	const ledgerEntry = buildSkillLedgerEntry({ dir: "ledger-skill", skill: "ledger-skill", root, source: { type: "github", kind: "source-archive", spec: "github:o/r", owner: "o", repo: "r", ref: "main", commit: "d".repeat(40), pathCommit: "a".repeat(40), path: "skills/ledger-skill" }, digest: digest2, jobId: "job-x" });
 	ok("R38 台账：记录里带 GitHub 坐标 + 仓库内路径 + 指纹", ledgerEntry.source.owner === "o" && ledgerEntry.source.path === "skills/ledger-skill" && Boolean(ledgerEntry.digest));
+	ok("R39 台账：仓库 HEAD 与目录基线分开记（不是同一个字段）", ledgerEntry.source.commit === "d".repeat(40) && ledgerEntry.source.pathCommit === "a".repeat(40));
 	const ledgerFile = join(root, "skill-sources.json");
 	await recordSkillSource(ledgerFile, ledgerEntry);
 	const ledger = await readSkillLedger(ledgerFile);
@@ -3612,6 +3631,11 @@ async function main() {
 	const ledger2 = { version: 1, items: { ...ledger.items, "local-skill": localEntry } };
 	const same = await checkSkillUpdates({ items: [{ dir: "ledger-skill", name: "ledger-skill" }, { dir: "local-skill", name: "local-skill" }, { dir: "stock", name: "stock" }], ledger: ledger2, digests: { "ledger-skill": digest2 }, fetchPathCommits: async () => ({ sha: "a".repeat(40) }) });
 	eq("R38 更新：commit 相同判 current", same.items.find((x) => x.dir === "ledger-skill").relation, "current");
+	ok("R39 更新：比的是目录基线、不是仓库 HEAD（HEAD 与基线不同也判 current）",
+		same.items.find((x) => x.dir === "ledger-skill").relation === "current" && ledgerEntry.source.commit !== ledgerEntry.source.pathCommit);
+	ok("R39 更新：「可升级 a → b」显示的是被比较的两个基线（localCommit = pathCommit）",
+		same.items.find((x) => x.dir === "ledger-skill").localCommit === "a".repeat(40) &&
+		same.items.find((x) => x.dir === "ledger-skill").repoCommit === "d".repeat(40));
 	eq("R38 更新：本地来源判 unknown（不编造最新）", same.items.find((x) => x.dir === "local-skill").relation, "unknown");
 	eq("R38 更新：没有台账的存量技能不进表，只在摘要里记数", [same.summary.tracked, same.summary.untracked], [2, 1]);
 	const outd = await checkSkillUpdates({ items: [{ dir: "ledger-skill", name: "ledger-skill" }], ledger, digests: { "ledger-skill": digest1 }, fetchPathCommits: async () => ({ sha: "b".repeat(40) }) });
@@ -3619,6 +3643,11 @@ async function main() {
 	eq("R38 更新：目录指纹变了 = 本地改过（重装会覆盖）", outd.items[0].locallyEdited, true);
 	const oneFail = await checkSkillUpdates({ items: [{ dir: "ledger-skill", name: "ledger-skill" }], ledger, digests: {}, fetchPathCommits: async () => { throw new Error("rate limited"); } });
 	eq("R38 更新：单条查询失败只把自己标 unknown", [oneFail.items[0].relation, /rate limited/.test(oneFail.items[0].error || "")], ["unknown", true]);
+	/* R39：R38 的存量记录没有 pathCommit —— 只能如实 unknown，不许拿仓库 HEAD 顶替 */
+	const legacyEntry = buildSkillLedgerEntry({ dir: "legacy", skill: "legacy", source: { type: "github", kind: "source-archive", owner: "o", repo: "r", ref: "main", commit: "a".repeat(40), path: "skills/legacy" } });
+	const legacyCheck = await checkSkillUpdates({ items: [{ dir: "legacy", name: "legacy" }], ledger: { version: 1, items: { legacy: legacyEntry } }, digests: {}, fetchPathCommits: async () => ({ sha: "a".repeat(40) }) });
+	eq("R39 更新：旧记录没记目录基线 → unknown（不拿仓库 HEAD 顶替）", legacyCheck.items[0].relation, "unknown");
+	ok("R39 更新：理由说清「缺目录基线」", /基线/.test(legacyCheck.items[0].reason || ""), legacyCheck.items[0].reason);
 	ok("R38 重装：来源完整时给出 owner/repo/ref/路径", (() => { const p = planSkillReinstall(ledgerEntry); return p.ok && p.owner === "o" && p.ref === "main" && p.subdir === "skills/ledger-skill"; })());
 	ok("R38 重装：Release 资产来源拒绝自动重装", planSkillReinstall({ dir: "x", source: { type: "github", kind: "release-asset", owner: "o", repo: "r", ref: "v1", path: "s" } }).reason === "asset-source");
 	ok("R38 重装：没记路径时拒绝（避免装错技能）", planSkillReinstall({ dir: "x", source: { type: "github", kind: "source-archive", owner: "o", repo: "r", ref: "main", path: null } }).reason === "no-path");
@@ -3642,6 +3671,59 @@ async function main() {
 	ok("R38 接线：面板发 reinstall-skill 且带 confirmEdited", /reinstall-skill/.test(clientSrcR38) && /confirmEdited/.test(clientSrcR38));
 	ok("R38 接线：合并检查里加了第三条链", /checkSkillUpdates\(\)/.test(pipelineSrcR38) && /skillUpdates/.test(pipelineSrcR38));
 	ok("R38 接线：GET /skills 的视图带 ledger 与 updates", /ledger,/.test(pipelineSrcR38) && /updates: this\.skillUpdatesCached\(\)/.test(pipelineSrcR38));
+
+	/* R39：台账的「仓库内路径」按 repoRoot 算 —— R38 真机 e2e 的另一个根因：
+	   `wrappers` 折叠的是「解包根 → 技能目录」整条链，拿它当前缀会记成
+	   `repo-abc/skills/foo`（仓库里不存在），更新检查按错路径查 commits?path=。 */
+	const recInstaller = new Installer({ ctx: {}, options: {} });
+	recInstaller.skillLedgerPath = () => join(root, "record-skill-sources.json");
+	/* 目录基线要联网查 —— 注入探针，顺带钉住它拿到的是**仓库内路径**与 ref */
+	const pathLookups = [];
+	recInstaller.lookupPathCommit = async (owner, repo, path, ref) => {
+		pathLookups.push([owner, repo, path, ref]);
+		return { sha: "e".repeat(40) };
+	};
+	const recRepoRoot = join(root, "rec-repo-abc");
+	const recJob = {
+		id: "job-r39",
+		source: { type: "github", kind: "source-archive", spec: "github:o/r", owner: "o", repo: "r", ref: "main", commit: "c".repeat(40) },
+		input: { desc: { kind: "github-repo", subdir: "skills/foo" }, raw: "https://github.com/o/r/tree/main/skills/foo" }
+	};
+	const rec = await recInstaller.recordSkillSource(recJob, {
+		root: join(recRepoRoot, "skills", "foo"),
+		repoRoot: recRepoRoot,
+		wrappers: ["rec-repo-abc", "skills", "foo"],
+		payload: { dir: join(recRepoRoot, "skills", "foo") }
+	}, { name: "rec-skill", root, dest: ledgerSkillDir });
+	eq("R39 台账：仓库内路径 = relative(repoRoot, 技能目录)", rec.item.source.path, "skills/foo");
+	ok("R39 台账：路径里不含归档包装目录", !/rec-repo-abc/.test(String(rec.item.source.path)), rec.item.source.path);
+	eq("R39 台账：目录基线记的是 commits?path 那条（不是仓库 HEAD）", rec.item.source.pathCommit, "e".repeat(40));
+	eq("R39 台账：查基线用的是 owner/repo/仓库内路径/ref", pathLookups[0], ["o", "r", "skills/foo", "main"]);
+	const recRootEntry = await recInstaller.recordSkillSource(
+		{ ...recJob, id: "job-r39-root", input: { desc: { kind: "github-repo", subdir: null }, raw: "github:o/r" } },
+		{ root: recRepoRoot, repoRoot: recRepoRoot, wrappers: ["rec-repo-abc"], payload: { dir: recRepoRoot } },
+		{ name: "rec-skill", root, dest: ledgerSkillDir }
+	);
+	eq("R39 台账：技能就在仓库根 → 空串（不是 null，也不是仓库名）", recRootEntry.item.source.path, "");
+	const recNoRoot = await recInstaller.recordSkillSource(recJob,
+		{ root: join(root, "no-root"), wrappers: ["no-root"], payload: { dir: join(root, "no-root") } },
+		{ name: "rec-skill", root, dest: ledgerSkillDir });
+	eq("R39 台账：算不出仓库根就记 null（不编造一个看起来对的路径）", recNoRoot.item.source.path, null);
+	recInstaller.lookupPathCommit = async () => { throw new Error("rate limited"); };
+	const recNoBaseline = await recInstaller.recordSkillSource(recJob,
+		{ root: join(recRepoRoot, "skills", "foo"), repoRoot: recRepoRoot, payload: { dir: join(recRepoRoot, "skills", "foo") } },
+		{ name: "rec-skill", root, dest: ledgerSkillDir });
+	eq("R39 台账：查不到目录基线就记 null、记录照样写成（安装不因此失败）", [recNoBaseline.ok, recNoBaseline.item.source.pathCommit], [true, null]);
+	eq("R39 台账：查不到基线时仓库内路径仍然正确", recNoBaseline.item.source.path, "skills/foo");
+	const pipelineSrcR39 = await readFile(join(pluginRoot, "lib", "pipeline.js"), "utf8");
+	ok("R39 接线：台账路径走 repoRelativePath(detected.repoRoot, payload.dir)",
+		/repoRelativePath\(detected && detected\.repoRoot, detected && detected\.payload && detected\.payload\.dir\)/.test(pipelineSrcR39));
+	ok("R39 接线：不再拿 wrappers 拼台账路径", !/\[desc\.subdir, \.\.\.\(detected && Array\.isArray\(detected\.wrappers\)/.test(pipelineSrcR39));
+	ok("R39 接线：repoRoot / archiveWrappers 进 job 状态（失败时看得清剥到哪一层）",
+		/repoRoot: detected\.repoRoot \|\| null/.test(pipelineSrcR39) && /archiveWrappers: detected\.archiveWrappers \|\| \[\]/.test(pipelineSrcR39));
+	ok("R39 接线：安装时查目录基线（可注入，默认 githubPathCommits）",
+		/typeof this\.lookupPathCommit === "function" \? this\.lookupPathCommit : githubPathCommits/.test(pipelineSrcR39) &&
+		/lookup\(source\.owner, source\.repo, source\.path, ref\)/.test(pipelineSrcR39));
 
 	await rm(root, { recursive: true, force: true });
 
