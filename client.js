@@ -23,7 +23,7 @@ window.__ModuleLoader__.load({
 		/* 客户端 build 号（R5.1）：改 client.js 就提一位。
 		   client 会热重载、但没人保证「当前页面跑的是哪一版」—— 这个号随 client-state
 		   一起上报，宿主 /health 的 clientReport.build 就是答案（宿主侧另有 mtime 标签）。 */
-		const BUILD = "r42.0";
+		const BUILD = "r43.0";
 
 		/* ── 迷你 store（模块级，面板关着时图标也在用）──────────────────── */
 
@@ -2113,7 +2113,6 @@ window.__ModuleLoader__.load({
 			const s = useStore();
 			const st = currentSettings();
 			const [text, setText] = useState("");
-			const [customText, setCustomText] = useState("");
 			const busy = s.local.aiBusy;
 			const result = s.local.ai;
 			const ask = () => {
@@ -2129,35 +2128,6 @@ window.__ModuleLoader__.load({
 			};
 			const breadthLabel = st.aiBreadth === "wide" ? "广" : st.aiBreadth === "max" ? "很广" : "标准";
 			const listing = result && result.listing;
-			/* R42：自定义条目 —— 推荐列表的最后一条永远是一个「自己填」的入口。
-			   它走的是与推荐卡**完全相同**的提交口（submitInput），所以 GitHub 链接 / tree 链接 /
-			   npm 包名 / `mcp:名字` / 本机 .tgz 都认，预检、快照、诊断、AI 审查照常走。
-			   为什么要有它：AI 与六个源都可能搜不到（本机自写、私有库、刚发布的），
-			   而「贴一个链接进来」本来就是面板最强的入口 —— 不该只藏在输入框里。 */
-			const submitCustom = () => {
-				const value = customText.trim();
-				if (!value || busy) return;
-				setCustomText("");
-				toast("已提交自定义条目：" + value);
-				submitInput(value);
-			};
-			const customRow = h("div", { className: "dpi-reco dpi-reco-custom", key: "custom" },
-				h("div", { className: "dpi-reco-head" },
-					h("b", null, "自定义条目"),
-					h("span", { className: "dpi-tag dpi-tag-kind" }, "自己填"),
-					h("span", { className: "dpi-muted" }, "链接 / 包名 / mcp:名字 / 本机 .tgz")),
-				h("div", { className: "dpi-reco-why" }, "不在上面的候选里也能直接提交；预检、快照、诊断与 AI 审查照常走。"),
-				h("div", { className: "dpi-composer-row" },
-					h("input", {
-						className: "dpi-input dpi-input-line",
-						placeholder: "https://github.com/o/r/tree/main/skills/x · @scope/pkg · mcp:filesystem · D:/pkg.tgz",
-						value: customText,
-						onChange: (e) => setCustomText(e.target.value),
-						onKeyDown: (e) => {
-							if (e.key === "Enter") submitCustom();
-						}
-					}),
-					h("button", { className: "dpi-btn dpi-btn-primary dpi-btn-sm", disabled: busy || !customText.trim(), onClick: submitCustom }, "装这个")));
 			return h(
 				"div",
 				{ className: "dpi-card dpi-ai" },
@@ -2185,11 +2155,8 @@ window.__ModuleLoader__.load({
 				result && result.localOnly
 					? h("div", { className: "dpi-muted dpi-local-only", title: result.localOnly.spec || "" }, "· " + result.localOnly.text)
 					: null,
-				/* R42：推荐列表最后永远跟一条「自定义条目」—— 没搜到、或用户就是知道自己要装什么时，
-				   直接填一个链接/包名提交；走的是与推荐卡同一个入口（submitInput） */
-				h("div", { className: "dpi-recos" },
-					result && result.recommendations && result.recommendations.length > 0
-						? [...result.recommendations.map((item, i) => {
+				result && result.recommendations && result.recommendations.length > 0
+					? h("div", { className: "dpi-recos" }, result.recommendations.map((item, i) => {
 						const isMcp = item.kind === "mcp";
 						const isSkill = item.kind === "skill";
 						return h("div", { className: "dpi-reco" + (isMcp ? " dpi-reco-mcp" : "") + (isSkill ? " dpi-reco-skill" : ""), key: "reco" + i },
@@ -2232,9 +2199,9 @@ window.__ModuleLoader__.load({
 								recoActions(item, isMcp),
 								item.url ? h("a", { className: "dpi-link", href: item.url, target: "_blank", rel: "noreferrer" }, "看来源") : null)
 						);
-							}),
-							customRow]
-						: [customRow]),
+							})
+						)
+					: null,
 				result && result.searchSuggestions && result.searchSuggestions.length ? h("div", { className: "dpi-muted" }, "换个搜索词：" + result.searchSuggestions.join("、")) : null,
 				result && result.degraded ? h("div", { className: "dpi-muted" }, "（AI 不可用，这里给的是确定性搜索的结果）") : null
 			);
@@ -3264,6 +3231,69 @@ window.__ModuleLoader__.load({
 			);
 		}
 
+		/* R43：推荐条数可自定义（1~20）—— 1/3/5 只是快捷档，真正生效的是那个数字。
+		   为什么不做成 SegRow 的第 4 档：用户要的就是「不在三档里也行」；
+		   快捷档留在输入框左边，是为了常用值不用敲。 */
+		function PicksRow(props) {
+			const { label, hint, value, onChange } = props;
+			const MIN = 1;
+			const MAX = 20;
+			const [draft, setDraft] = useState(String(value));
+			useEffect(() => {
+				setDraft(String(value));
+			}, [value]);
+			const commit = (raw, clamp) => {
+				const n = Math.round(Number(raw));
+				if (!Number.isFinite(n)) {
+					setDraft(String(value));
+					return;
+				}
+				if (n >= MIN && n <= MAX) {
+					setDraft(String(n));
+					if (n !== Number(value)) onChange(n);
+					return;
+				}
+				if (clamp) {
+					const v = Math.min(MAX, Math.max(MIN, n));
+					setDraft(String(v));
+					if (v !== Number(value)) onChange(v);
+				}
+			};
+			return h(
+				"div",
+				{ className: "dpi-set-row dpi-set-row-col" },
+				h("div", { className: "dpi-set-label" },
+					h("div", null, label),
+					hint ? h("div", { className: "dpi-muted dpi-set-hint" }, hint) : null),
+				h("div", { className: "dpi-picks" },
+					h("div", { className: "dpi-seg" }, [1, 3, 5].map((n) =>
+						h("button", {
+							key: "picks" + n,
+							className: "dpi-seg-btn" + (Number(value) === n ? " is-on" : ""),
+							onClick: () => onChange(n)
+						}, n + " 条" + (n === 3 ? "（默认）" : "")))),
+					h("div", { className: "dpi-picks-custom" },
+						h("span", { className: "dpi-muted" }, "自定义"),
+						h("input", {
+							className: "dpi-input-num",
+							type: "number",
+							min: String(MIN),
+							max: String(MAX),
+							step: "1",
+							value: draft,
+							"aria-label": label + "（自定义）",
+							onChange: (e) => {
+								setDraft(e.target.value);
+								commit(e.target.value, false);
+							},
+							onBlur: (e) => commit(e.target.value, true),
+							onKeyDown: (e) => {
+								if (e.key === "Enter") commit(e.target.value, true);
+							}
+						}),
+						h("span", { className: "dpi-muted" }, "条（1–20）"))));
+		}
+
 		function SettingsModal() {
 			const st = currentSettings();
 			const close = () => setLocal({ settingsOpen: false });
@@ -3331,11 +3361,10 @@ window.__ModuleLoader__.load({
 							h("div", { className: "dpi-set-section-title" }, "AI 推荐"),
 							h("div", { className: "dpi-muted dpi-set-hint" },
 								"「条数」是最多给几条推荐；「广度」决定每一类（插件 / MCP / 技能）各送多少候选进模型 —— 调广会多要一些搜索结果、也多送几条进模型，代价是慢一点、token 多一点。默认档 = 一直以来的行为。"),
-							h(SegRow, {
+							h(PicksRow, {
 								label: "推荐条数",
-								hint: "1 条最省；5 条会把同一需求下的不同路子（能读 / 能改 / 能自动化）都列出来。",
+								hint: "1–20 条都行，默认 3。条数越多，AI 越要把同一需求下的不同路子（能读 / 能改 / 能自动化）都列出来 —— 回复也更长更慢。条数超过这一档广度能送进模型的候选时，它只能给候选里的那些（标准档每类最多 8 / 4 / 4 条）。",
 								value: st.aiPicks,
-								options: [{ value: 1, label: "1 条" }, { value: 3, label: "3 条（默认）" }, { value: 5, label: "5 条" }],
 								onChange: (v) => saveSettings({ aiPicks: v })
 							}),
 							h(SegRow, {
@@ -3811,9 +3840,6 @@ window.__ModuleLoader__.load({
 .dpi-ai .dpi-ai-limits{margin:2px 0 8px;font-size:11.5px;line-height:1.5}
 .dpi-recos{display:flex;flex-direction:column;gap:8px;margin-top:8px}
 .dpi-reco{border:1px solid var(--dsw-alias-border-l1);border-radius:9px;padding:8px 10px}
-/* R42：自定义条目 —— 用虚线边框和推荐卡区分开（它不是 AI 选的，是人填的） */
-.dpi-reco-custom{border-style:dashed;background:color-mix(in srgb,var(--dsw-alias-bg-base) 92%,var(--dsw-alias-border-l1))}
-.dpi-reco-custom .dpi-composer-row{margin-top:6px}
 .dpi-reco-head{display:flex;gap:8px;align-items:center;font-size:12.5px}
 .dpi-reco-why{color:var(--dsw-alias-label-secondary);font-size:12px;margin-top:4px;line-height:1.55}
 /* R3：可信度徽章 / 红旗 / 用途-权限卡 */
@@ -3931,6 +3957,11 @@ window.__ModuleLoader__.load({
 .dpi-seg-btn:hover{border-color:var(--dsw-alias-border-l2)}
 .dpi-seg-btn.is-on{background:var(--dsw-alias-brand-primary);border-color:var(--dsw-alias-brand-primary);
   color:var(--dsw-alias-bg-base)}
+/* R43：推荐条数 —— 快捷档 + 自定义数字输入（1~20） */
+.dpi-picks{display:flex;flex-wrap:wrap;align-items:center;gap:10px}
+.dpi-picks-custom{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--dsw-alias-label-secondary)}
+.dpi-picks-custom .dpi-input-num{width:64px;padding:5px 6px;text-align:center;border:1px solid var(--dsw-alias-border-l1);
+  border-radius:8px;background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary);font:inherit;font-size:12.5px}
 .dpi-ask{display:flex;flex-direction:column;gap:6px;width:100%;margin-top:8px;padding:10px 12px;
   border-radius:10px;border:1px solid var(--dsw-alias-state-warn-primary,#d89614);
   background:var(--dsw-alias-bg-layer-2)}

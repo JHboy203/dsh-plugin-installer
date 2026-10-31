@@ -3842,7 +3842,11 @@ async function main() {
 		wideLimits.perKind.plugin > stdLimits.perKind.plugin && wideLimits.search.plugin > stdLimits.search.plugin &&
 		wideLimits.maxChars > stdLimits.maxChars && maxLimits.perKind.skill > wideLimits.perKind.skill,
 		{ wide: wideLimits.perKind, max: maxLimits.perKind });
-	eq("R41 条数：非法值落到最近档位（99 → 5）", aiLimits({ aiPicks: 99 }).picks, 5);
+	/* R43：用户澄清「自定义条目」指的是**设置里的推荐条数** —— 1~20 任意整数，不再是三档选一 */
+	eq("R43 条数：自定义值直接生效（7 条 → picks 7）", aiLimits({ aiPicks: 7 }).picks, 7);
+	eq("R43 条数：越界夹到边上（0 → 1、99 → 20）",
+		[aiLimits({ aiPicks: 0 }).picks, aiLimits({ aiPicks: 99 }).picks], [1, 20]);
+	eq("R43 条数：小数四舍五入成整数（4.6 → 5）", normalizeSettings({ aiPicks: 4.6 }).aiPicks, 5);
 	eq("R41 广度：写坏了回标准（不变成无限）", aiLimits({ aiBreadth: "insane" }).breadth, "standard");
 	const widePacked = packCandidates(bigCandidates, { perKind: wideLimits.perKind, maxChars: wideLimits.maxChars });
 	eq("R41 打包：广度档真的多送候选进模型（plugin 8 → 12）",
@@ -3885,17 +3889,19 @@ async function main() {
 	ok("R41 接线：AI 卡片显示本轮口径（最多 N 条 · 广度）",
 		/本轮设置：最多 /.test(clientSrcR41) && /dpi-ai-limits/.test(clientSrcR41));
 
-	/* R42：推荐列表的最后一条 = 「自定义条目」（自己填链接 / 包名 / mcp:名 / 本机 tgz）。
-	   它必须走与推荐卡**同一个**提交口 —— 不许为它另开安装旁路（否则预检/快照/诊断会被绕过）。 */
-	ok("R42 面板：推荐列表里永远有一条「自定义条目」（空结果时也渲染）",
-		/自定义条目/.test(clientSrcR41) && /dpi-reco-custom/.test(clientSrcR41) && /: \[customRow\]\)/.test(clientSrcR41) && /customRow\]/.test(clientSrcR41));
-	ok("R42 面板：自定义条目走 submitInput（不新开安装旁路）",
-		/const submitCustom = \(\) =>/.test(clientSrcR41) && /submitInput\(value\)/.test(clientSrcR41) && !/api\("\/submit"/.test(clientSrcR41.slice(clientSrcR41.indexOf("const submitCustom"), clientSrcR41.indexOf("const submitCustom") + 600)));
-	/* R42：把这一轮的验收固化成探针（换会话直接跑，不再手敲 curl 对数字） */
+	/* R43：设置面板里的「推荐条数」= 快捷档（1/3/5）+ 自定义数字输入；
+	   快捷档只是个方便，真正生效的是那个数字（越界在输入侧与设置侧都会夹）。 */
+	ok("R43 面板：推荐条数是自定义数字输入（保留 1/3/5 快捷档）",
+		/function PicksRow\(/.test(clientSrcR41) && /type: "number"/.test(clientSrcR41) &&
+		/自定义/.test(clientSrcR41) && /条（1–20）/.test(clientSrcR41));
+	ok("R43 面板：越界在输入侧就夹回（min/max + commit 里夹取）",
+		/min: String\(MIN\)/.test(clientSrcR41) && /max: String\(MAX\)/.test(clientSrcR41) &&
+		/Math\.min\(MAX, Math\.max\(MIN, n\)\)/.test(clientSrcR41));
+	/* R43：把这一轮的验收固化成探针（换会话直接跑，不再手敲 curl 对数字） */
 	const probeAiSrc = await readFile(join(pluginRoot, "dev", "probe-ai-breadth.mjs"), "utf8").catch(() => "");
-	ok("R42 探针：probe-ai-breadth 覆盖三档口径 + 自定义条目 + 一定恢复原设置",
+	ok("R43 探针：probe-ai-breadth 覆盖自定义条数 + 三档口径 + 一定恢复原设置",
 		/aiLimits\(\{\}\)/.test(probeAiSrc) && /AI_BREADTH_PRESETS/.test(probeAiSrc) &&
-		/自定义条目/.test(probeAiSrc) && /恢复原设置/.test(probeAiSrc) && /finally/.test(probeAiSrc));
+		/自定义条数/.test(probeAiSrc) && /恢复原设置/.test(probeAiSrc) && /finally/.test(probeAiSrc));
 
 	await rm(root, { recursive: true, force: true });
 

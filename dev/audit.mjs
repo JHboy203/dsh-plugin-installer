@@ -51,10 +51,10 @@ export const FROZEN_DEFAULTS = {
 };
 
 /** 文档里声明的自检项数（改断言就先跑一次 host_selfcheck，再同步这个数）。 */
-export const EXPECTED_ASSERTIONS = 1126;
+export const EXPECTED_ASSERTIONS = 1128;
 
 /** 界面自检项数（dev/render-check.cjs）。同样是「文档对表」的一半。 */
-const EXPECTED_RENDER_ASSERTIONS = 259;
+const EXPECTED_RENDER_ASSERTIONS = 260;
 
 /** 期望注册的宿主工具（漏一个 = 模型看不见一项能力）。R32 起 6 个（新增只读探针）。 */
 const EXPECTED_TOOLS = [
@@ -110,7 +110,10 @@ async function main() {
 	eq("R41：默认档 AI 推荐 = 3 条 / 标准广度（= R40 的行为）", [DEFAULTS.aiPicks, DEFAULTS.aiBreadth], [3, "standard"]);
 	ok("R41：广度档位只认 standard/wide/max，写坏了回标准",
 		normalizeSettings({ aiBreadth: "insane" }).aiBreadth === "standard" && normalizeSettings({ aiBreadth: "max" }).aiBreadth === "max");
-	eq("R41：条数落到最近合法档位（99 → 5）", normalizeSettings({ aiPicks: 99 }).aiPicks, 5);
+	eq("R43：条数越界夹到边上（99 → 20、0 → 1）",
+		[normalizeSettings({ aiPicks: 99 }).aiPicks, normalizeSettings({ aiPicks: 0 }).aiPicks], [20, 1]);
+	eq("R43：自定义条数原样保留（7 → 7），小数四舍五入（4.6 → 5）",
+		[normalizeSettings({ aiPicks: 7 }).aiPicks, normalizeSettings({ aiPicks: 4.6 }).aiPicks], [7, 5]);
 	ok("R41：三档广度单调变宽（标准 < 广 < 很广）", (() => {
 		const s = aiLimits({ aiBreadth: "standard" });
 		const w = aiLimits({ aiBreadth: "wide" });
@@ -137,6 +140,8 @@ async function main() {
 	/* ⑤ 客户端契约（用户看得见的那几个入口） */
 	const clientSrc = (await readText("client.js")) || "";
 	ok("客户端有 build 号", /const BUILD = "/.test(clientSrc));
+	ok("R43：面板的推荐条数是数字输入（不再只有 1/3/5 三档）",
+		/function PicksRow/.test(clientSrc) && /type: "number"/.test(clientSrc) && /1–20/.test(clientSrc));
 	ok("客户端会写回 /settings", clientSrc.includes('api("/settings"'));
 	ok("顶部有设置入口", clientSrc.includes("settingsOpen: true"));
 	ok("跳过审核走 skip-review", clientSrc.includes('act("skip-review")'));

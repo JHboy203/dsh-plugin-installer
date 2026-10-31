@@ -175,7 +175,7 @@ function textOf(node, acc) {
  * 正常不执行，所以**数源码不等于数断言**（实测 103 处、只跑 80 条）。真正的判据只能是
  * 「这次实际跑了几条」，所以由脚本自己报总数、并由自己比对。
  */
-const EXPECTED_TOTAL = 259;
+const EXPECTED_TOTAL = 260;
 
 let failed = 0;
 let passed = 0;
@@ -412,6 +412,15 @@ if (typeof t.SettingsModal === "function") {
 		check("设置面板有 AI 推荐区（条数 + 广度）", joinedSet.includes("AI 推荐") && joinedSet.includes("推荐条数") && joinedSet.includes("推荐广度"));
 		check("设置面板标明默认档 = 3 条 / 标准广度", joinedSet.includes("3 条（默认）") && joinedSet.includes("标准"));
 		check("设置面板有「很广」档可选（用户要查看更多）", joinedSet.includes("很广"));
+		/* R43：推荐条数是「自定义」的 —— 快捷档 1/3/5 仍在，另有一个 1~20 的数字输入（默认 3） */
+		const pickInputs = findNodes(el, (p) => typeof p.className === "string" && p.className.includes("dpi-input-num"));
+		check("R43 设置：推荐条数有「自定义」数字输入",
+			joinedSet.includes("自定义") && joinedSet.includes("条（1–20）") && pickInputs.length >= 1, pickInputs.length);
+		check("R43 设置：数字输入默认 3、范围 1–20",
+			String(pickInputs[0] && pickInputs[0].props.value) === "3" && String(pickInputs[0] && pickInputs[0].props.max) === "20",
+			pickInputs[0] && pickInputs[0].props);
+		check("R43 设置：1/3/5 快捷档仍在（3 条标默认）",
+			joinedSet.includes("1 条") && joinedSet.includes("3 条（默认）") && joinedSet.includes("5 条"));
 		check("设置面板默认渲染出开关", attrs.classes.filter((c) => c.includes("dpi-switch")).length >= 3, attrs.classes);
 		check("设置面板默认档：开着的开关不止一个", attrs.aria.filter((a) => a === "true").length >= 2, attrs.aria);
 	} catch (e) {
@@ -1679,9 +1688,6 @@ if (typeof t.Panel === "function") {
 		})(), panelText.slice(0, 600));
 		check("R37 Panel：「检查更新」在整页只出现一次（入口已合并）", (panelText.match(/检查更新/g) || []).length === 1, (panelText.match(/检查更新/g) || []).length);
 		check("R36 Panel：清单窗口默认不挂载（低频内容不占主面板）", !panelText.includes("看一段能直接抄") && !panelText.includes("只读 profile 的两份组合文件"));
-		/* R42：AI 卡片的推荐列表最后永远跟一条「自定义条目」—— 没搜到/自己知道要装什么时的手动入口 */
-		check("R42 Panel：AI 卡片有「自定义条目」入口", panelText.includes("自定义条目") && panelText.includes("不在上面的候选里也能直接提交"));
-		check("R42 Panel：自定义条目有提交按钮（「装这个」）", panelText.includes("装这个"));
 	} catch (e) {
 		check("R36 Panel：渲染不抛异常", false, String((e && e.message) || e));
 	}

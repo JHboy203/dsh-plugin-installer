@@ -1,5 +1,5 @@
 /**
- * dev/probe-ai-breadth.mjs — R41/R42 回归探针：AI 推荐的「条数 / 广度」口径 + 自定义条目入口。
+ * dev/probe-ai-breadth.mjs — R41/R43 回归探针：AI 推荐的「条数 / 广度」口径 + 自定义条数（1~20）。
  *
  * 为什么要有它：这两个旋钮会同时影响**搜索池子、送进模型的候选、预算、条数上限**，
  * 而且很容易「调了名字没生效」（R40 就是候选被整类切掉、R41 才把数字收进一个口径函数）。
@@ -8,7 +8,7 @@
  * 两段，默认只跑第一段：
  *  ① **离线**（不发网络）：aiLimits 三档单调 / 非法值夹取 / 默认档 = 3 条 + standard；
  *     packCandidates 在三档下每类候选数随档位增加、每类至少留 1 条、不超预算；
- *     客户端 bundle 里「自定义条目」入口与它的提交口还在（UI 改动不会悄悄消失）。
+ *     客户端 bundle 里推荐条数是「自定义」数字输入（1~20；快捷档 1/3/5 只是入口）。
  *  ② **在线**（`--base <GUI URL>`）：GET /settings 记下原值 → 三档各 POST 一次并跑同一条搜索、
  *     记录每档拿到的 plugin/mcp/skill 条数 → **finally 一定恢复原设置**（不会把你的面板留在很广）。
  *     ⚠️ `--ai` 才真调模型（会花钱），默认不跑。
@@ -61,8 +61,10 @@ report("三档广度单调变宽（每类候选 / 搜索池子 / 预算）",
 	wide.search.skill > std.search.skill && max.search.skill > wide.search.skill &&
 	wide.maxChars > std.maxChars && max.maxChars > wide.maxChars,
 	{ std: std.perKind, wide: wide.perKind, max: max.perKind });
-report("非法广度回标准、非法条数落最近档（99 → 5）",
-	aiLimits({ aiBreadth: "insane" }).breadth === "standard" && aiLimits({ aiPicks: 99 }).picks === 5);
+report("非法广度回标准（写坏了不变成无限）",
+	aiLimits({ aiBreadth: "insane" }).breadth === "standard");
+report("非法条数夹到上限（99 → 20；R43 起是自定义 1~20，不再是三档落档）",
+	aiLimits({ aiPicks: 99 }).picks === 20 && aiLimits({ aiPicks: 0 }).picks === 1);
 report("三档都在 AI_BREADTH_PRESETS 里（没有半截档位）",
 	Object.keys(AI_BREADTH_PRESETS).length === 3 && aiLimits({ aiBreadth: "max" }).breadthLabel === "很广");
 
@@ -92,12 +94,16 @@ report("打包结果不超预算",
 	packedStd.packed.json.length <= std.maxChars && packedWide.packed.json.length <= wide.maxChars && packedMax.packed.json.length <= max.maxChars);
 
 const clientSrc = await readFile(join(PLUGIN_DIR, "client.js"), "utf8").catch(() => "");
-report("面板里有「自定义条目」入口（不在候选里也能自己填一条）",
-	/自定义条目/.test(clientSrc) && /dpi-reco-custom/.test(clientSrc) && /submitCustom/.test(clientSrc));
-report("自定义条目走的是与推荐卡相同的提交口（submitInput）",
-	/const submitCustom = \(\) =>/.test(clientSrc) && /submitInput\(value\)/.test(clientSrc));
-report("自定义条目是推荐列表的一部分（列表为空时也渲染 customRow）",
-	/: \[customRow\]\)/.test(clientSrc) && /customRow\]/.test(clientSrc));
+/* R43：自定义条数 —— 1~20 的任意整数；快捷档 1/3/5 只是面板上的入口 */
+report("推荐条数是自定义的：7 条原样生效、默认仍是 3 条",
+	aiLimits({ aiPicks: 7 }).picks === 7 && aiLimits({}).picks === 3 && normalizeSettings({ aiPicks: 7 }).aiPicks === 7,
+	{ seven: aiLimits({ aiPicks: 7 }).picks });
+report("条数越界夹到边上、小数取整（0 → 1、99 → 20、4.6 → 5）",
+	aiLimits({ aiPicks: 0 }).picks === 1 && aiLimits({ aiPicks: 99 }).picks === 20 && normalizeSettings({ aiPicks: 4.6 }).aiPicks === 5,
+	{ lo: aiLimits({ aiPicks: 0 }).picks, hi: aiLimits({ aiPicks: 99 }).picks });
+report("面板里有「自定义」数字输入（快捷档 1/3/5 + 1–20 的范围）",
+	/function PicksRow/.test(clientSrc) && /type: "number"/.test(clientSrc) &&
+	/dpi-input-num/.test(clientSrc) && /1–20/.test(clientSrc));
 
 /* ── ② 在线：设置往返 + 每档搜索规模（不花钱；--ai 才调模型） ─────────── */
 const BASE = typeof arg("base", null) === "string" ? String(arg("base")).replace(/\/+$/, "") : null;
