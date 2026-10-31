@@ -3885,6 +3885,18 @@ async function main() {
 	ok("R41 接线：AI 卡片显示本轮口径（最多 N 条 · 广度）",
 		/本轮设置：最多 /.test(clientSrcR41) && /dpi-ai-limits/.test(clientSrcR41));
 
+	/* R42：推荐列表的最后一条 = 「自定义条目」（自己填链接 / 包名 / mcp:名 / 本机 tgz）。
+	   它必须走与推荐卡**同一个**提交口 —— 不许为它另开安装旁路（否则预检/快照/诊断会被绕过）。 */
+	ok("R42 面板：推荐列表里永远有一条「自定义条目」（空结果时也渲染）",
+		/自定义条目/.test(clientSrcR41) && /dpi-reco-custom/.test(clientSrcR41) && /: \[customRow\]\)/.test(clientSrcR41) && /customRow\]/.test(clientSrcR41));
+	ok("R42 面板：自定义条目走 submitInput（不新开安装旁路）",
+		/const submitCustom = \(\) =>/.test(clientSrcR41) && /submitInput\(value\)/.test(clientSrcR41) && !/api\("\/submit"/.test(clientSrcR41.slice(clientSrcR41.indexOf("const submitCustom"), clientSrcR41.indexOf("const submitCustom") + 600)));
+	/* R42：把这一轮的验收固化成探针（换会话直接跑，不再手敲 curl 对数字） */
+	const probeAiSrc = await readFile(join(pluginRoot, "dev", "probe-ai-breadth.mjs"), "utf8").catch(() => "");
+	ok("R42 探针：probe-ai-breadth 覆盖三档口径 + 自定义条目 + 一定恢复原设置",
+		/aiLimits\(\{\}\)/.test(probeAiSrc) && /AI_BREADTH_PRESETS/.test(probeAiSrc) &&
+		/自定义条目/.test(probeAiSrc) && /恢复原设置/.test(probeAiSrc) && /finally/.test(probeAiSrc));
+
 	await rm(root, { recursive: true, force: true });
 
 	/* 输出 */

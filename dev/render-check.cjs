@@ -175,7 +175,7 @@ function textOf(node, acc) {
  * 正常不执行，所以**数源码不等于数断言**（实测 103 处、只跑 80 条）。真正的判据只能是
  * 「这次实际跑了几条」，所以由脚本自己报总数、并由自己比对。
  */
-const EXPECTED_TOTAL = 257;
+const EXPECTED_TOTAL = 259;
 
 let failed = 0;
 let passed = 0;
@@ -1679,6 +1679,9 @@ if (typeof t.Panel === "function") {
 		})(), panelText.slice(0, 600));
 		check("R37 Panel：「检查更新」在整页只出现一次（入口已合并）", (panelText.match(/检查更新/g) || []).length === 1, (panelText.match(/检查更新/g) || []).length);
 		check("R36 Panel：清单窗口默认不挂载（低频内容不占主面板）", !panelText.includes("看一段能直接抄") && !panelText.includes("只读 profile 的两份组合文件"));
+		/* R42：AI 卡片的推荐列表最后永远跟一条「自定义条目」—— 没搜到/自己知道要装什么时的手动入口 */
+		check("R42 Panel：AI 卡片有「自定义条目」入口", panelText.includes("自定义条目") && panelText.includes("不在上面的候选里也能直接提交"));
+		check("R42 Panel：自定义条目有提交按钮（「装这个」）", panelText.includes("装这个"));
 	} catch (e) {
 		check("R36 Panel：渲染不抛异常", false, String((e && e.message) || e));
 	}
