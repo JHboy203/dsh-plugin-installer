@@ -43,7 +43,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { Installer } from "./lib/pipeline.js";
 import { buildInstallerTools } from "./lib/tools.js";
-import { createReviewer, runPanelAi } from "./lib/ai.js";
+import { assistCustomSource, createReviewer, runPanelAi } from "./lib/ai.js";
 import { checkDshToolsShadow } from "./lib/landmine.js";
 import { buildStamp, dataDir, hostVersions, profileDir, skillRoots } from "./lib/hostinfo.js";
 import { freshness, describeFreshness, recordApply } from "./lib/codestamp.js";
@@ -286,6 +286,14 @@ export async function apply(ctx) {
 					const body = await readJsonBody(req);
 					const settings = await installer.updateSettings(body);
 					return json(res, 200, { ok: true, settings, state: await installer.snapshotState() });
+				}
+
+				/* R45：「AI 辅助添加搜索来源」—— 只出**提案**，不保存；保存由用户在面板点「确认添加」。
+				   规则能认的（GitHub / registry / .json）不花 token；认不出才问模型。 */
+				if (path === "/sources/assist" && method === "POST") {
+					const body = await readJsonBody(req);
+					const result = await assistCustomSource(faces, { input: String(body.input || "") });
+					return json(res, 200, result);
 				}
 
 				if (path === "/doctor" && method === "GET") {

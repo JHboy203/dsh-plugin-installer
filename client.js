@@ -23,7 +23,7 @@ window.__ModuleLoader__.load({
 		/* 客户端 build 号（R5.1）：改 client.js 就提一位。
 		   client 会热重载、但没人保证「当前页面跑的是哪一版」—— 这个号随 client-state
 		   一起上报，宿主 /health 的 clientReport.build 就是答案（宿主侧另有 mtime 标签）。 */
-		const BUILD = "r44.0";
+		const BUILD = "r45.0";
 
 		/* ── 迷你 store（模块级，面板关着时图标也在用）──────────────────── */
 
@@ -493,7 +493,10 @@ window.__ModuleLoader__.load({
 			/* R41/R44：AI 推荐 —— 条数自定义 6~25，默认 6 / 标准广度 */
 			aiPicks: 6,
 			aiBreadth: "standard",
-			sources: { npm: true, github: true, hub: true }
+			sources: { npm: true, github: true, hub: true },
+			/* R45：自定义来源；网页解析默认关闭（用户指定） */
+			customSources: [],
+			allowWebSources: false
 		};
 
 		function currentSettings() {
@@ -3294,6 +3297,126 @@ window.__ModuleLoader__.load({
 						h("span", { className: "dpi-muted" }, "条（6–25）"))));
 		}
 
+		/* R45：用户自定义搜索来源。
+		   免责声明是**产品要求**（用户原话）：面板只提供可选渠道，不为来源代码/可信度/功能背书。
+		   「AI 辅助添加」只出提案；必须用户点「确认添加」才写进设置 —— 不自动保存。 */
+		const SOURCE_TYPE_LABELS = { npm: "npm registry", github: "GitHub 查询", json: "JSON 索引", web: "网页（AI 解析）" };
+		const SOURCE_PRESETS = [
+			{ label: "npm 镜像 · npmmirror", input: "https://registry.npmmirror.com" },
+			{ label: "GitHub · topic dsh-plugin", input: "topic:dsh-plugin" },
+			{ label: "GitHub · deepseek-ai 组织", input: "org:deepseek-ai" }
+		];
+		const SOURCE_DISCLAIMER =
+			"自定义来源只是「多一个可选渠道」：不保证其中的插件代码、来源、可信度或功能，面板也不为它背书；" +
+			"装不装、用不用请自行甄别。安装前的静态扫描与预检照常执行，但它们只能发现问题特征，不能证明安全。";
+
+		function CustomSourcesSection() {
+			const st = currentSettings();
+			const sources = Array.isArray(st.customSources) ? st.customSources : [];
+			const [input, setInput] = useState("");
+			const [busy, setBusy] = useState(false);
+			const [proposal, setProposal] = useState(null);
+			const [error, setError] = useState(null);
+			const ask = (text) => {
+				const value = String(text === undefined ? input : text).trim();
+				if (!value || busy) return;
+				setBusy(true);
+				setError(null);
+				setProposal(null);
+				api("/sources/assist", { method: "POST", body: JSON.stringify({ input: value }) })
+					.then((r) => {
+						if (!r || r.ok === false) {
+							setError((r && r.message) || "没能识别这个来源，换个写法或直接填网址");
+							return;
+						}
+						setProposal(r.proposal);
+					})
+					.catch((e) => setError("调用失败：" + String((e && e.message) || e)))
+					.then(() => setBusy(false));
+			};
+			const confirm = () => {
+				if (!proposal) return;
+				saveSettings({ customSources: [...sources, proposal] }).then(() => {
+					toast("已添加来源：" + proposal.label);
+					setProposal(null);
+					setInput("");
+				});
+			};
+			const toggle = (source) => {
+				saveSettings({ customSources: sources.map((it) => (it.id === source.id ? { ...it, enabled: it.enabled === false } : it)) });
+			};
+			const remove = (source) => {
+				saveSettings({ customSources: sources.filter((it) => it.id !== source.id) }).then(() => toast("已删除来源：" + source.label));
+			};
+			return h(
+				"div",
+				{ className: "dpi-src" },
+				h("div", { className: "dpi-set-section-title" }, "自定义来源"),
+				h("div", { className: "dpi-muted dpi-src-note" }, SOURCE_DISCLAIMER),
+				sources.length === 0
+					? h("div", { className: "dpi-muted" }, "还没有自定义来源。下面可以直接填网址，或点预设 / 让 AI 帮你归类。")
+					: h("div", { className: "dpi-src-list" }, sources.map((source) =>
+						h("div", { className: "dpi-src-row", key: source.id },
+							h("div", { className: "dpi-src-main" },
+								h("div", { className: "dpi-src-head" },
+									h("b", null, source.label),
+									h("span", { className: "dpi-tag" }, SOURCE_TYPE_LABELS[source.type] || source.type),
+									source.type === "web" && !st.allowWebSources
+										? h("span", { className: "dpi-tag dpi-tag-medium" }, "网页解析未开")
+										: null,
+									source.enabled === false ? h("span", { className: "dpi-tag" }, "已停用") : null),
+								h("div", { className: "dpi-muted dpi-src-target", title: source.target }, source.target),
+								source.note ? h("div", { className: "dpi-muted dpi-src-target" }, source.note) : null),
+							h("div", { className: "dpi-src-actions" },
+								h("button", { className: "dpi-btn dpi-btn-ghost dpi-btn-sm", onClick: () => toggle(source) }, source.enabled === false ? "启用" : "停用"),
+								h("button", { className: "dpi-btn dpi-btn-ghost dpi-btn-sm", onClick: () => remove(source) }, "删除"))))),
+				h("div", { className: "dpi-src-add" },
+					h("input", {
+						className: "dpi-input dpi-input-line",
+						placeholder: "粘贴网址，或写一句：npmmirror / topic:dsh-plugin / https://…/index.json",
+						value: input,
+						onChange: (e) => setInput(e.target.value),
+						onKeyDown: (e) => {
+							if (e.key === "Enter") ask();
+						}
+					}),
+					h("button", { className: "dpi-btn", disabled: busy || !input.trim(), onClick: () => ask() }, busy ? "识别中…" : "AI 辅助添加")),
+				h("div", { className: "dpi-src-presets" },
+					h("span", { className: "dpi-muted" }, "预设："),
+					SOURCE_PRESETS.map((preset) =>
+						h("button", {
+							key: preset.label,
+							className: "dpi-btn dpi-btn-ghost dpi-btn-sm",
+							disabled: busy,
+							onClick: () => {
+								setInput(preset.input);
+								ask(preset.input);
+							}
+						}, preset.label))),
+				error ? h("div", { className: "dpi-src-error" }, error) : null,
+				proposal
+					? h("div", { className: "dpi-src-proposal" },
+						h("div", { className: "dpi-src-head" },
+							h("b", null, "待确认：" + proposal.label),
+							h("span", { className: "dpi-tag dpi-tag-kind" }, SOURCE_TYPE_LABELS[proposal.type] || proposal.type)),
+						h("div", { className: "dpi-muted dpi-src-target", title: proposal.target }, proposal.target),
+						proposal.note ? h("div", { className: "dpi-muted" }, proposal.note) : null,
+						proposal.type === "web" && !st.allowWebSources
+							? h("div", { className: "dpi-muted dpi-src-warn" }, "这是网页来源：添加后还要打开下面的「允许 AI 解析任意网页」才会生效。")
+							: null,
+						h("div", { className: "dpi-actions dpi-actions-tight" },
+							h("button", { className: "dpi-btn dpi-btn-sm", onClick: () => setProposal(null) }, "取消"),
+							h("button", { className: "dpi-btn dpi-btn-primary dpi-btn-sm", onClick: confirm }, "确认添加")))
+					: null,
+				h(ToggleRow, {
+					label: "允许 AI 解析任意网页（默认关）",
+					hint: "开启后，网页来源在每次搜索时会抓一次页面并调一次模型 —— 更慢、可能花 token；只在你信任该来源时打开。",
+					on: st.allowWebSources,
+					onChange: (v) => saveSettings({ allowWebSources: v })
+				})
+			);
+		}
+
 		function SettingsModal() {
 			const st = currentSettings();
 			const close = () => setLocal({ settingsOpen: false });
@@ -3419,7 +3542,8 @@ window.__ModuleLoader__.load({
 							h("div", { className: "dpi-muted dpi-set-hint" }, "关掉某个源能少发请求（GitHub 搜索未认证只有 10 次/分）；至少要留一个。"),
 							h(ToggleRow, { label: "npm registry", on: st.sources.npm, onChange: (v) => setSources("npm", v) }),
 							h(ToggleRow, { label: "GitHub（仓库搜索 / topic 发现）", on: st.sources.github, onChange: (v) => setSources("github", v) }),
-							h(ToggleRow, { label: "dsh-hub 商店（评分 / 安装量）", on: st.sources.hub, onChange: (v) => setSources("hub", v) }))),
+							h(ToggleRow, { label: "dsh-hub 商店（评分 / 安装量）", on: st.sources.hub, onChange: (v) => setSources("hub", v) }),
+							h(CustomSourcesSection))),
 
 					h("div", { className: "dpi-actions" },
 						h("button", {
@@ -3962,6 +4086,21 @@ window.__ModuleLoader__.load({
 .dpi-picks-custom{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--dsw-alias-label-secondary)}
 .dpi-picks-custom .dpi-input-num{width:64px;padding:5px 6px;text-align:center;border:1px solid var(--dsw-alias-border-l1);
   border-radius:8px;background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary);font:inherit;font-size:12.5px}
+/* R45：自定义搜索来源 */
+.dpi-src{margin-top:10px;border-top:1px dashed var(--dpi-line);padding-top:10px;display:flex;flex-direction:column;gap:6px}
+.dpi-src-note{font-size:11.5px;line-height:1.55}
+.dpi-src-list{display:flex;flex-direction:column;gap:6px}
+.dpi-src-row{display:flex;gap:8px;justify-content:space-between;border:1px solid var(--dsw-alias-border-l1);border-radius:8px;padding:7px 9px}
+.dpi-src-main{min-width:0;display:flex;flex-direction:column;gap:3px;flex:1}
+.dpi-src-head{display:flex;gap:6px;align-items:center;flex-wrap:wrap;font-size:12.5px}
+.dpi-src-target{font-size:11.5px;word-break:break-all}
+.dpi-src-actions{display:flex;gap:4px;flex-shrink:0;align-items:flex-start}
+.dpi-src-add{display:flex;gap:8px;align-items:center}
+.dpi-src-presets{display:flex;gap:6px;align-items:center;flex-wrap:wrap;font-size:12px}
+.dpi-src-error{color:var(--dsw-alias-state-error-primary);font-size:12px;line-height:1.5}
+.dpi-src-warn{color:var(--dsw-alias-state-warn-primary);font-size:11.5px}
+.dpi-src-proposal{border:1px dashed var(--dsw-alias-brand-primary);border-radius:8px;padding:8px 10px;
+  display:flex;flex-direction:column;gap:4px;background:color-mix(in srgb,var(--dsw-alias-brand-primary) 6%,transparent)}
 .dpi-ask{display:flex;flex-direction:column;gap:6px;width:100%;margin-top:8px;padding:10px 12px;
   border-radius:10px;border:1px solid var(--dsw-alias-state-warn-primary,#d89614);
   background:var(--dsw-alias-bg-layer-2)}

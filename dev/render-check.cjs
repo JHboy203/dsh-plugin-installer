@@ -175,7 +175,7 @@ function textOf(node, acc) {
  * 正常不执行，所以**数源码不等于数断言**（实测 103 处、只跑 80 条）。真正的判据只能是
  * 「这次实际跑了几条」，所以由脚本自己报总数、并由自己比对。
  */
-const EXPECTED_TOTAL = 260;
+const EXPECTED_TOTAL = 262;
 
 let failed = 0;
 let passed = 0;
@@ -423,6 +423,13 @@ if (typeof t.SettingsModal === "function") {
 			joinedSet.includes("6 条（默认）") && joinedSet.includes("15 条") && joinedSet.includes("25 条"));
 		check("设置面板默认渲染出开关", attrs.classes.filter((c) => c.includes("dpi-switch")).length >= 3, attrs.classes);
 		check("设置面板默认档：开着的开关不止一个", attrs.aria.filter((a) => a === "true").length >= 2, attrs.aria);
+		/* R45：自定义搜索来源 —— 免责声明是产品要求；AI 辅助添加必须先出「待确认」再保存 */
+		check("R45 设置：有自定义来源区与免责声明",
+			joinedSet.includes("自定义来源") && joinedSet.includes("不保证其中的插件代码") &&
+			joinedSet.includes("自行甄别"), joinedSet.slice(0, 200));
+		check("R45 设置：有 AI 辅助添加 / 预设 / 网页解析开关（默认关）",
+			joinedSet.includes("AI 辅助添加") && joinedSet.includes("npmmirror") &&
+			joinedSet.includes("允许 AI 解析任意网页") && joinedSet.includes("默认关"));
 	} catch (e) {
 		check("设置面板渲染不抛异常", false, String((e && e.message) || e));
 	}

@@ -47,14 +47,17 @@ export const FROZEN_DEFAULTS = {
 	/* R41/R44：AI 推荐 —— 条数自定义 6~25，默认 6 / 标准广度 */
 	aiPicks: 6,
 	aiBreadth: "standard",
-	sources: { npm: true, github: true, hub: true }
+	sources: { npm: true, github: true, hub: true },
+	/* R45：自定义来源默认空；网页解析默认关闭 */
+	customSources: [],
+	allowWebSources: false
 };
 
 /** 文档里声明的自检项数（改断言就先跑一次 host_selfcheck，再同步这个数）。 */
-export const EXPECTED_ASSERTIONS = 1128;
+export const EXPECTED_ASSERTIONS = 1135;
 
 /** 界面自检项数（dev/render-check.cjs）。同样是「文档对表」的一半。 */
-const EXPECTED_RENDER_ASSERTIONS = 260;
+const EXPECTED_RENDER_ASSERTIONS = 262;
 
 /** 期望注册的宿主工具（漏一个 = 模型看不见一项能力）。R32 起 6 个（新增只读探针）。 */
 const EXPECTED_TOOLS = [
@@ -122,6 +125,9 @@ async function main() {
 			s.search.skill < w.search.skill && w.search.skill < m.search.skill &&
 			s.maxChars < w.maxChars && w.maxChars < m.maxChars;
 	})());
+	eq("R45：自定义来源默认空、网页解析默认关闭", [DEFAULTS.customSources.length, DEFAULTS.allowWebSources], [0, false]);
+	ok("R45：自定义来源坏条目被丢掉、合法的留下",
+		normalizeSettings({ customSources: [{ type: "npm", target: "https://registry.npmmirror.com" }, { type: "ftp", target: "ftp://x" }] }).customSources.length === 1);
 	ok("R41：摘要里能看出 AI 推荐的条数与广度", /AI 推荐 6 条 \/ 广度 标准/.test(describeSettings(DEFAULTS)), describeSettings(DEFAULTS));
 
 	/* ③ 工具契约（漏 output = 整个插件静默失活） */

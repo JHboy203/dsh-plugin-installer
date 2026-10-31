@@ -3907,6 +3907,32 @@ async function main() {
 		/aiLimits\(\{\}\)/.test(probeAiSrc) && /AI_BREADTH_PRESETS/.test(probeAiSrc) &&
 		/自定义条数/.test(probeAiSrc) && /恢复原设置/.test(probeAiSrc) && /finally/.test(probeAiSrc));
 
+	/* R45：自定义搜索来源（npm registry / GitHub 查询 / JSON 索引 / 网页 AI 解析）。
+	   默认关闭网页；「AI 辅助添加」只出提案、保存由用户确认；URL 安全边界只在 customsources 一处。 */
+	const settingsSrcR45 = await readFile(join(pluginRoot, "lib", "settings.js"), "utf8");
+	ok("R45 设置：自定义来源默认空、网页解析默认关闭",
+		/customSources: \[\]/.test(settingsSrcR45) && /allowWebSources: false/.test(settingsSrcR45));
+	eq("R45 设置：默认值就是空数组 + 网页关", [normalizeSettings({}).customSources.length, normalizeSettings({}).allowWebSources], [0, false]);
+	ok("R45 设置：坏条目被丢掉、合法的留下",
+		normalizeSettings({ customSources: [{ type: "npm", target: "https://registry.npmmirror.com" }, { type: "ftp", target: "ftp://x" }] }).customSources.length === 1);
+	const indexSrcR45 = await readFile(join(pluginRoot, "index.js"), "utf8");
+	const aiSrcR45 = await readFile(join(pluginRoot, "lib", "ai.js"), "utf8");
+	const pipelineSrcR45 = await readFile(join(pluginRoot, "lib", "pipeline.js"), "utf8");
+	ok("R45 接线：有个只出提案的 /sources/assist（不保存）",
+		/export async function assistCustomSource/.test(aiSrcR45) && /path === "\/sources\/assist"/.test(indexSrcR45),
+		{ ai: /assistCustomSource/.test(aiSrcR45), route: /\/sources\/assist/.test(indexSrcR45) });
+	ok("R45 接线：搜索把自定义来源并进内置源（web 走 AI 解析）",
+		/searchCustomSources\(normalized, customSettings\.customSources/.test(pipelineSrcR45) &&
+		/parseWebSource\(this\.ctx/.test(pipelineSrcR45));
+	ok("R45 面板：设置里有自定义来源区（免责声明 / AI 辅助添加 / 预设 / 网页开关）",
+		/function CustomSourcesSection/.test(clientSrcR41) && /不保证其中的插件代码/.test(clientSrcR41) &&
+		/AI 辅助添加/.test(clientSrcR41) && /SOURCE_PRESETS/.test(clientSrcR41) &&
+		/允许 AI 解析任意网页/.test(clientSrcR41));
+	const probeCustomSrc = await readFile(join(pluginRoot, "dev", "probe-custom-sources.mjs"), "utf8").catch(() => "");
+	ok("R45 探针：probe-custom-sources 覆盖 URL 边界 / 归一化 / 四类型编排 / web 默认关",
+		/checkSourceUrl/.test(probeCustomSrc) && /normalizeCustomSources/.test(probeCustomSrc) &&
+		/searchCustomSources/.test(probeCustomSrc) && /默认关闭/.test(probeCustomSrc));
+
 	await rm(root, { recursive: true, force: true });
 
 	/* 输出 */
