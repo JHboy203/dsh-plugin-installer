@@ -23,7 +23,7 @@ window.__ModuleLoader__.load({
 		/* 客户端 build 号（R5.1）：改 client.js 就提一位。
 		   client 会热重载、但没人保证「当前页面跑的是哪一版」—— 这个号随 client-state
 		   一起上报，宿主 /health 的 clientReport.build 就是答案（宿主侧另有 mtime 标签）。 */
-		const BUILD = "r38.1";
+		const BUILD = "r40.0";
 
 		/* ── 迷你 store（模块级，面板关着时图标也在用）──────────────────── */
 
@@ -2078,8 +2078,23 @@ window.__ModuleLoader__.load({
 			return rows;
 		}
 
-		/** R36：推荐卡底部动作 —— MCP 走「装成 MCP / 复制片段」，插件走「安装这个」。 */
+		/**
+		 * R36 / R40：推荐卡底部动作 —— 三类各有各的「装」：
+		 *   · plugin → 安装这个（提交 spec）
+		 *   · mcp    → 装成 MCP（写组合文件）/ 复制片段（缺参数时）
+		 *   · skill  → 安装这个 Skill（提交 treeUrl；面板现有的安装入口就认 tree 链接，
+		 *              装的是这个仓库的这个子目录，不会误装同仓库的别的技能）
+		 */
 		function recoActions(item, isMcp) {
+			if (item && item.kind === "skill") {
+				if (item.installedKnown) return h("span", { className: "dpi-muted" }, "技能根里已经有同名目录了（重装请到「已装 Skill」里按来源重装）");
+				if (item.installable === false) return h("span", { className: "dpi-muted" }, "不能装：" + (item.blockedReason || "SKILL.md 不合法"));
+				return h("button", {
+					className: "dpi-btn dpi-btn-primary dpi-btn-sm",
+					title: item.treeUrl || "",
+					onClick: () => { toast("提交技能目录：" + (item.subdir || item.name)); submitInput(item.treeUrl || item.spec || item.name); }
+				}, "安装这个 Skill");
+			}
 			if (!isMcp) return h("button", { className: "dpi-btn dpi-btn-primary dpi-btn-sm", onClick: () => submitInput(item.spec || item.name) }, "安装这个");
 			if (item.installedKnown) return h("span", { className: "dpi-muted" }, "已经在「已装 MCP」里（重启后才会出现在工具表）");
 			if (item.installable === false) {
@@ -2132,18 +2147,24 @@ window.__ModuleLoader__.load({
 				result && result.recommendations && result.recommendations.length > 0
 					? h("div", { className: "dpi-recos" }, result.recommendations.map((item, i) => {
 						const isMcp = item.kind === "mcp";
-						return h("div", { className: "dpi-reco" + (isMcp ? " dpi-reco-mcp" : ""), key: "reco" + i },
+						const isSkill = item.kind === "skill";
+						return h("div", { className: "dpi-reco" + (isMcp ? " dpi-reco-mcp" : "") + (isSkill ? " dpi-reco-skill" : ""), key: "reco" + i },
 							h("div", { className: "dpi-reco-head" },
 								h("b", null, item.displayName || item.name),
 								h("span", { className: "dpi-tag" }, item.source || "?"),
 								isMcp ? h("span", { className: "dpi-tag dpi-tag-kind" }, "MCP 服务器") : null,
+								isSkill ? h("span", { className: "dpi-tag dpi-tag-kind" }, "Skill") : null,
+								isSkill && item.subdir ? h("span", { className: "dpi-tag", title: item.treeUrl || "" }, item.subdir) : null,
+								isSkill && item.installable === false ? h("span", { className: "dpi-tag dpi-tag-medium" }, "SKILL.md 不合法") : null,
 								isMcp && item.transport ? h("span", { className: "dpi-tag" }, item.transport) : null,
 								isMcp && item.installable === false ? h("span", { className: "dpi-tag dpi-tag-medium" }, "需先填参数") : null,
 								item.installedKnown ? h("span", {
 									className: "dpi-tag dpi-tag-kind",
 									title: isMcp
 										? "profile 组合文件里已经有这台服务器（serverName=" + (item.serverName || item.installed) + "）"
-										: "本机已装这个包" + (item.installedSpec ? "（" + item.installedSpec + "）" : "") +
+										: isSkill
+											? "技能根里已经有同名目录（重复安装会覆盖；重装请到「已装 Skill」里按来源重装，那里有本地改动保护）"
+											: "本机已装这个包" + (item.installedSpec ? "（" + item.installedSpec + "）" : "") +
 											(item.installedSource === "different" ? " —— 同名但来源不同，见下面的红旗" : "")
 								}, isMcp ? "已配置" : "已装" + (item.installed ? " v" + item.installed : "") +
 									(item.installedKindLabel ? " · " + item.installedKindLabel : "")) : null,

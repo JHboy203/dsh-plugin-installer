@@ -209,6 +209,12 @@ export async function apply(ctx) {
 		options: { reviewer: createReviewer({ ctx: faces }) }
 	}).init();
 
+	/* R40：后台预热技能库（不阻塞启动）。冷启动时第一次「AI 搜索」要等技能库加载，
+	   这一步把它提前到启动之后；失败只影响第一次搜索，不让网络抖动拖慢 DSH。 */
+	Promise.resolve()
+		.then(() => installer.warmSearchSources?.())
+		.catch(() => {});
+
 	let lastClientState = null;
 
 	const dispose = ctx.webServer.register({

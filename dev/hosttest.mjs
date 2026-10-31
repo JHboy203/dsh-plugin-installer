@@ -29,6 +29,9 @@ import { precheck, describeCompatVersions as mCompatLine } from "../lib/precheck
 import { backupVendorTarball, createSnapshot, fileSpecPath, restoreProfileFiles, backupSkillInSnapshot, readSnapshotMeta, restoreSkill, restoreVendorTarball } from "../lib/snapshot.js";
 import { buildReviewInput } from "../lib/ai.js";
 import { estimateReviewTokens, reviewWorthIt } from "../lib/ai.js";
+/* R40：AI 候选的三类投影与「按类保底打包」都是纯函数 —— 这一层不联网、不花 token。 */
+import { packCandidates, toAiCandidate } from "../lib/ai.js";
+import { buildSkillCandidate, clearSkillSourceCache, scoreSkill, searchSkills } from "../lib/skillsource.js";
 import { packPluginTarball } from "../lib/pack.js";
 import { stagingRefsFromManifest, stagingKeepNames, rollbackPlan, splitUpgradeTargets, upgradeStalled, historyDropPlan, Installer, compactCollaborator } from "../lib/pipeline.js";
 /* R27：换版本 = 先卸后装 —— 判据（升级/降级/装回）与协作方探测都要能被单测喂对象 */
@@ -3724,6 +3727,108 @@ async function main() {
 	ok("R39 接线：安装时查目录基线（可注入，默认 githubPathCommits）",
 		/typeof this\.lookupPathCommit === "function" \? this\.lookupPathCommit : githubPathCommits/.test(pipelineSrcR39) &&
 		/lookup\(source\.owner, source\.repo, source\.path, ref\)/.test(pipelineSrcR39));
+
+	/* R40：用户问「AI 搜索是不是只有插件的推荐，没有 skill 还有 mcp 的推荐」。实测两条：
+	   ① MCP 有源但 `JSON.stringify(...).slice(0, 9000)` 把它整类切掉（16 候选 = 13,386 字，
+	      MCP 从第 10,386 字才开始）→ **按类保底打包**；
+	   ② Skill 连候选都没有 → 新增技能库源（官方技能库的 skills/<dir>/SKILL.md）。
+	   这一组只喂纯函数与注入的假源，不联网、不花 token。 */
+	const sampleSkillText = "---\nname: pdf\ndescription: Use this skill when the user works with PDF files; read, extract, merge.\n---\n\nbody\n";
+	const skillCandidate = buildSkillCandidate({ owner: "anthropics", repo: "skills", ref: "main", subdir: "skills/pdf", text: sampleSkillText, sourceLabel: "GitHub · 官方技能库" });
+	eq("R40 skill 候选：kind / treeUrl 指向仓库里那个子目录 / 可安装",
+		[skillCandidate.kind, skillCandidate.treeUrl, skillCandidate.installable],
+		["skill", "https://github.com/anthropics/skills/tree/main/skills/pdf", true]);
+	const badSkillCandidate = buildSkillCandidate({ owner: "o", repo: "r", ref: "main", subdir: "skills/x", text: "no frontmatter" });
+	ok("R40 skill 候选：SKILL.md 不合法 → installable=false 且写明理由",
+		badSkillCandidate.installable === false && /不合法/.test(badSkillCandidate.blockedReason || ""), badSkillCandidate.blockedReason);
+	eq("R40 匹配：名字命中 / 描述命中 / 无关",
+		[scoreSkill("pdf", skillCandidate) > 0, scoreSkill("pdf", { name: "xlsx", description: "pdf helpers" }) > 0, scoreSkill("kubernetes", skillCandidate)],
+		[true, true, 0]);
+	ok("R40 匹配：中文口语能命中英文技能库（表格 → spreadsheet/xlsx）",
+		scoreSkill("做个表格", { name: "xlsx", description: "spreadsheet helpers for Excel" }) > 0);
+	clearSkillSourceCache();
+	let listingCalls = 0;
+	const fakeSkillSource = { id: "fake-skills", owner: "o", repo: "r", ref: "main", label: "fake", shortLabel: "fake" };
+	const fakeSkillOptions = {
+		sources: [fakeSkillSource],
+		fetchListing: async () => { listingCalls += 1; return ["/skills/pdf/SKILL.md", "/skills/xlsx/SKILL.md", "/README.md"]; },
+		fetchSkillText: async (source, subdir) => (subdir.endsWith("pdf")
+			? sampleSkillText
+			: "---\nname: xlsx\ndescription: spreadsheet helpers for Excel files\n---\nbody")
+	};
+	const foundSkills = await searchSkills("pdf", { ...fakeSkillOptions, limit: 4 });
+	eq("R40 搜索：只把相关的技能给模型（README 之类不算技能）", foundSkills.items.map((item) => item.name), ["pdf"]);
+	eq("R40 搜索：provider 报「读到几个 / ok」", [foundSkills.providers[0].ok, foundSkills.providers[0].count], [true, 2]);
+	await searchSkills("pdf", { ...fakeSkillOptions, limit: 4 });
+	eq("R40 搜索：缓存命中后不重复拉清单", listingCalls, 1);
+	/* 真机实测：16 个 SKILL.md 一次性并发时，宿主进程里只成功 7 个（其余卡到超时）。
+	   所以加载是「限并发 4 + 单次失败重试一次」—— 下面两条钉住这两个行为。 */
+	clearSkillSourceCache();
+	let flakyCalls = 0;
+	const flakySkills = await searchSkills("pdf", {
+		sources: [{ id: "flaky-skills", owner: "o", repo: "r", ref: "main", label: "flaky" }],
+		fetchListing: async () => ["/skills/pdf/SKILL.md"],
+		fetchSkillText: async () => {
+			flakyCalls += 1;
+			if (flakyCalls === 1) throw new Error("ECONNRESET");
+			return sampleSkillText;
+		}
+	});
+	eq("R40 搜索：第一次失败会重试（ECONNRESET 不该让技能消失）", [flakySkills.items.length, flakyCalls], [1, 2]);
+	clearSkillSourceCache();
+	const partialSkills = await searchSkills("pdf", {
+		sources: [{ id: "partial-skills", owner: "o", repo: "r", ref: "main", label: "partial" }],
+		fetchListing: async () => ["/skills/pdf/SKILL.md", "/skills/xlsx/SKILL.md"],
+		fetchSkillText: async (source, subdir) => {
+			if (subdir.endsWith("xlsx")) throw new Error("timeout");
+			return sampleSkillText;
+		}
+	});
+	eq("R40 搜索：部分失败标 partial + failed 计数（不整类失败、也不假装全读到）",
+		[partialSkills.providers[0].ok, partialSkills.providers[0].partial, partialSkills.providers[0].failed, partialSkills.items.length],
+		[true, true, 1, 1]);
+	const brokenSkills = await searchSkills("pdf", {
+		sources: [{ id: "broken-skills", owner: "o", repo: "r", ref: "main", label: "broken" }],
+		fetchListing: async () => { throw new Error("jsdelivr down"); }
+	});
+	eq("R40 搜索：技能库读不到 → provider ok=false（面板说「没查到」而不是「没有技能」）",
+		[brokenSkills.providers[0].ok, /jsdelivr down/.test(brokenSkills.providers[0].error || ""), brokenSkills.items.length],
+		[false, true, 0]);
+	const longSkillDesc = "这是一段很长的技能描述。".repeat(12);
+	const bigCandidates = [
+		...Array.from({ length: 12 }, (_, i) => toAiCandidate({ kind: "plugin", name: "plugin-" + i, description: longSkillDesc, spec: "pkg-" + i, trust: { level: "community", badges: [{ label: "有源码" }], flags: [] }, popularity: { downloads: 1000 } })),
+		...Array.from({ length: 4 }, (_, i) => toAiCandidate({ kind: "mcp", name: "mcp-" + i, description: longSkillDesc, serverName: "mcp-" + i, transport: "streamable-http", installable: true })),
+		...Array.from({ length: 4 }, (_, i) => toAiCandidate({ kind: "skill", name: "skill-" + i, description: longSkillDesc, subdir: "skills/skill-" + i, treeUrl: "https://github.com/o/r/tree/main/skills/skill-" + i, installable: true }))
+	];
+	const packedCap = packCandidates(bigCandidates, { maxChars: 20000 });
+	eq("R40 打包：按类截到上限（plugin 12 → 8）并如实记省略数",
+		[packedCap.omitted.plugin, packedCap.candidates.filter((item) => item.kind === "plugin").length], [4, 8]);
+	const packedAi = packCandidates(bigCandidates, { maxChars: 6000 });
+	const packedKinds = new Set(packedAi.candidates.map((item) => item.kind));
+	ok("R40 打包：三类都活着（不会被整类切掉）",
+		packedKinds.has("plugin") && packedKinds.has("mcp") && packedKinds.has("skill"), [...packedKinds]);
+	ok("R40 打包：总字数不超过预算", packedAi.json.length <= 6000, packedAi.json.length);
+	ok("R40 打包：预算不够时先减条目最多的类，并把它记进省略数", packedAi.omitted.plugin > 4, packedAi.omitted);
+	eq("R40 打包：total 是输入总数（提示词里要说「共 N 条」）", packedAi.total, 20);
+	const tightAi = packCandidates(bigCandidates, { maxChars: 3000 });
+	const tightKinds = new Set(tightAi.candidates.map((item) => item.kind));
+	ok("R40 打包：预算再紧也每类至少留 1 条", tightAi.json.length <= 3000 && tightKinds.size === 3, { chars: tightAi.json.length, kinds: [...tightKinds] });
+	const mcpProjection = toAiCandidate({ kind: "mcp", name: "m", serverName: "m", transport: "sse", installable: true });
+	const pluginProjection = toAiCandidate({ kind: "plugin", name: "p", spec: "x", treeUrl: "https://should-be-dropped" });
+	eq("R40 投影：mcp 保留安装信息、plugin 不带 installable", [mcpProjection.kind, mcpProjection.installable, pluginProjection.kind, pluginProjection.installable], ["mcp", true, "plugin", null]);
+	ok("R40 投影：只有 skill 带 treeUrl / subdir", pluginProjection.treeUrl === null && toAiCandidate({ kind: "skill", name: "s", treeUrl: "https://x", subdir: "skills/s" }).treeUrl === "https://x");
+	const pipelineSrcR40 = await readFile(join(pluginRoot, "lib", "pipeline.js"), "utf8");
+	const aiSrcR40 = await readFile(join(pluginRoot, "lib", "ai.js"), "utf8");
+	const clientSrcR40 = await readFile(join(pluginRoot, "client.js"), "utf8");
+	ok("R40 接线：搜索并了技能源并单独报数", /searchSkills\(normalized/.test(pipelineSrcR40) && /skill: \{/.test(pipelineSrcR40));
+	ok("R40 接线：搜索结果里技能标「已装」", /installedSkillDirs\(skillRoots\(\)\)/.test(pipelineSrcR40));
+	ok("R40 接线：AI 候选走 packCandidates（不再整份 JSON 切 9000 字）",
+		/packCandidates\(candidates\)/.test(aiSrcR40) && !/JSON\.stringify\(candidates, null, 2\)\.slice/.test(aiSrcR40));
+	ok("R40 接线：推荐提示词写明三类与 skill 的装法", /kind="skill"/.test(aiSrcR40) && /treeUrl/.test(aiSrcR40));
+	ok("R40 接线：面板给技能一个「安装这个 Skill」（提交 treeUrl）", /安装这个 Skill/.test(clientSrcR40) && /submitInput\(item\.treeUrl/.test(clientSrcR40));
+	const indexSrcR40 = await readFile(join(pluginRoot, "index.js"), "utf8");
+	ok("R40 接线：启动后后台预热技能库（不阻塞 apply）",
+		/warmSearchSources/.test(indexSrcR40) && /async warmSearchSources\(\)/.test(pipelineSrcR40));
 
 	await rm(root, { recursive: true, force: true });
 
