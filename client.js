@@ -23,7 +23,7 @@ window.__ModuleLoader__.load({
 		/* 客户端 build 号（R5.1）：改 client.js 就提一位。
 		   client 会热重载、但没人保证「当前页面跑的是哪一版」—— 这个号随 client-state
 		   一起上报，宿主 /health 的 clientReport.build 就是答案（宿主侧另有 mtime 标签）。 */
-		const BUILD = "r43.0";
+		const BUILD = "r44.0";
 
 		/* ── 迷你 store（模块级，面板关着时图标也在用）──────────────────── */
 
@@ -490,8 +490,8 @@ window.__ModuleLoader__.load({
 			pollMs: 2500,
 			historyLimit: 8,
 			snapshotKeep: 40,
-			/* R41：AI 推荐 —— 默认 = 现在的行为（3 条 / 标准广度） */
-			aiPicks: 3,
+			/* R41/R44：AI 推荐 —— 条数自定义 6~25，默认 6 / 标准广度 */
+			aiPicks: 6,
 			aiBreadth: "standard",
 			sources: { npm: true, github: true, hub: true }
 		};
@@ -3231,13 +3231,13 @@ window.__ModuleLoader__.load({
 			);
 		}
 
-		/* R43：推荐条数可自定义（1~20）—— 1/3/5 只是快捷档，真正生效的是那个数字。
-		   为什么不做成 SegRow 的第 4 档：用户要的就是「不在三档里也行」；
+		/* R43/R44：推荐条数可自定义（6~25）—— 6/15/25 只是快捷档，真正生效的是那个数字。
+		   为什么不做成 SegRow 的几档：用户要的就是「不在快捷档里也行」；
 		   快捷档留在输入框左边，是为了常用值不用敲。 */
 		function PicksRow(props) {
 			const { label, hint, value, onChange } = props;
-			const MIN = 1;
-			const MAX = 20;
+			const MIN = 6;
+			const MAX = 25;
 			const [draft, setDraft] = useState(String(value));
 			useEffect(() => {
 				setDraft(String(value));
@@ -3266,12 +3266,12 @@ window.__ModuleLoader__.load({
 					h("div", null, label),
 					hint ? h("div", { className: "dpi-muted dpi-set-hint" }, hint) : null),
 				h("div", { className: "dpi-picks" },
-					h("div", { className: "dpi-seg" }, [1, 3, 5].map((n) =>
+					h("div", { className: "dpi-seg" }, [6, 15, 25].map((n) =>
 						h("button", {
 							key: "picks" + n,
 							className: "dpi-seg-btn" + (Number(value) === n ? " is-on" : ""),
 							onClick: () => onChange(n)
-						}, n + " 条" + (n === 3 ? "（默认）" : "")))),
+						}, n + " 条" + (n === 6 ? "（默认）" : "")))),
 					h("div", { className: "dpi-picks-custom" },
 						h("span", { className: "dpi-muted" }, "自定义"),
 						h("input", {
@@ -3291,7 +3291,7 @@ window.__ModuleLoader__.load({
 								if (e.key === "Enter") commit(e.target.value, true);
 							}
 						}),
-						h("span", { className: "dpi-muted" }, "条（1–20）"))));
+						h("span", { className: "dpi-muted" }, "条（6–25）"))));
 		}
 
 		function SettingsModal() {
@@ -3311,7 +3311,7 @@ window.__ModuleLoader__.load({
 				h("div", { className: "dpi-settings", onClick: (e) => e.stopPropagation() },
 					h("div", { className: "dpi-card-head" },
 						h("strong", null, "设置"),
-						h("span", { className: "dpi-muted" }, "默认档 = 现在的行为"),
+						h("span", { className: "dpi-muted" }, "设置只影响推荐与提醒，不放松安装判据"),
 						h("button", { className: "dpi-btn dpi-btn-ghost dpi-btn-sm", style: { marginLeft: "auto" }, onClick: close }, "关闭")),
 
 					h("div", { className: "dpi-set-body" },
@@ -3360,10 +3360,10 @@ window.__ModuleLoader__.load({
 						h("div", { className: "dpi-set-section" },
 							h("div", { className: "dpi-set-section-title" }, "AI 推荐"),
 							h("div", { className: "dpi-muted dpi-set-hint" },
-								"「条数」是最多给几条推荐；「广度」决定每一类（插件 / MCP / 技能）各送多少候选进模型 —— 调广会多要一些搜索结果、也多送几条进模型，代价是慢一点、token 多一点。默认档 = 一直以来的行为。"),
+								"「条数」是最多给几条推荐（默认 6，可自定义 6–25）；「广度」决定每一类（插件 / MCP / 技能）各送多少候选进模型 —— 调广会多要一些搜索结果、也多送几条进模型，代价是慢一点、token 多一点。"),
 							h(PicksRow, {
 								label: "推荐条数",
-								hint: "1–20 条都行，默认 3。条数越多，AI 越要把同一需求下的不同路子（能读 / 能改 / 能自动化）都列出来 —— 回复也更长更慢。条数超过这一档广度能送进模型的候选时，它只能给候选里的那些（标准档每类最多 8 / 4 / 4 条）。",
+								hint: "6–25 条都行，默认 6。条数越多，AI 越要把同一需求下的不同路子（能读 / 能改 / 能自动化）都列出来 —— 回复也更长更慢。条数超过这一档广度能送进模型的候选时，它只能给候选里的那些（标准档每类最多 8 / 4 / 4 条）。",
 								value: st.aiPicks,
 								onChange: (v) => saveSettings({ aiPicks: v })
 							}),
@@ -3957,7 +3957,7 @@ window.__ModuleLoader__.load({
 .dpi-seg-btn:hover{border-color:var(--dsw-alias-border-l2)}
 .dpi-seg-btn.is-on{background:var(--dsw-alias-brand-primary);border-color:var(--dsw-alias-brand-primary);
   color:var(--dsw-alias-bg-base)}
-/* R43：推荐条数 —— 快捷档 + 自定义数字输入（1~20） */
+/* R43/R44：推荐条数 —— 快捷档 + 自定义数字输入（6~25） */
 .dpi-picks{display:flex;flex-wrap:wrap;align-items:center;gap:10px}
 .dpi-picks-custom{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--dsw-alias-label-secondary)}
 .dpi-picks-custom .dpi-input-num{width:64px;padding:5px 6px;text-align:center;border:1px solid var(--dsw-alias-border-l1);

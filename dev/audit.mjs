@@ -44,8 +44,8 @@ export const FROZEN_DEFAULTS = {
 	pollMs: 2500,
 	historyLimit: 8,
 	snapshotKeep: 40,
-	/* R41：AI 推荐 —— 默认就是 R40 的行为（3 条 / 标准广度） */
-	aiPicks: 3,
+	/* R41/R44：AI 推荐 —— 条数自定义 6~25，默认 6 / 标准广度 */
+	aiPicks: 6,
 	aiBreadth: "standard",
 	sources: { npm: true, github: true, hub: true }
 };
@@ -106,14 +106,14 @@ async function main() {
 	eq("非法轮询落到最近合法值", clamped.pollMs, 2500);
 	eq("未知键丢弃", "evil" in clamped, false);
 	eq("三个源全关会兜回全开", normalizeSettings({ sources: { npm: false, github: false, hub: false } }).sources, FROZEN_DEFAULTS.sources);
-	/* R41：AI 推荐的条数 / 广度 —— 默认档就是 R40 的行为，调档只放宽预算，不放松判据 */
-	eq("R41：默认档 AI 推荐 = 3 条 / 标准广度（= R40 的行为）", [DEFAULTS.aiPicks, DEFAULTS.aiBreadth], [3, "standard"]);
+	/* R41/R44：AI 推荐的条数 / 广度 —— 条数 6~25、默认 6；调档只放宽预算，不放松判据 */
+	eq("R41/R44：默认档 AI 推荐 = 6 条 / 标准广度", [DEFAULTS.aiPicks, DEFAULTS.aiBreadth], [6, "standard"]);
 	ok("R41：广度档位只认 standard/wide/max，写坏了回标准",
 		normalizeSettings({ aiBreadth: "insane" }).aiBreadth === "standard" && normalizeSettings({ aiBreadth: "max" }).aiBreadth === "max");
-	eq("R43：条数越界夹到边上（99 → 20、0 → 1）",
-		[normalizeSettings({ aiPicks: 99 }).aiPicks, normalizeSettings({ aiPicks: 0 }).aiPicks], [20, 1]);
-	eq("R43：自定义条数原样保留（7 → 7），小数四舍五入（4.6 → 5）",
-		[normalizeSettings({ aiPicks: 7 }).aiPicks, normalizeSettings({ aiPicks: 4.6 }).aiPicks], [7, 5]);
+	eq("R43/R44：条数越界夹到边上（99 → 25、0 → 6）",
+		[normalizeSettings({ aiPicks: 99 }).aiPicks, normalizeSettings({ aiPicks: 0 }).aiPicks], [25, 6]);
+	eq("R43/R44：自定义条数原样保留（7 → 7），小数取整后再夹（4.6 → 6）",
+		[normalizeSettings({ aiPicks: 7 }).aiPicks, normalizeSettings({ aiPicks: 4.6 }).aiPicks], [7, 6]);
 	ok("R41：三档广度单调变宽（标准 < 广 < 很广）", (() => {
 		const s = aiLimits({ aiBreadth: "standard" });
 		const w = aiLimits({ aiBreadth: "wide" });
@@ -122,7 +122,7 @@ async function main() {
 			s.search.skill < w.search.skill && w.search.skill < m.search.skill &&
 			s.maxChars < w.maxChars && w.maxChars < m.maxChars;
 	})());
-	ok("R41：摘要里能看出 AI 推荐的条数与广度", /AI 推荐 3 条 \/ 广度 标准/.test(describeSettings(DEFAULTS)), describeSettings(DEFAULTS));
+	ok("R41：摘要里能看出 AI 推荐的条数与广度", /AI 推荐 6 条 \/ 广度 标准/.test(describeSettings(DEFAULTS)), describeSettings(DEFAULTS));
 
 	/* ③ 工具契约（漏 output = 整个插件静默失活） */
 	const tools = buildInstallerTools({ installer: {}, ctx: {} });
@@ -141,7 +141,7 @@ async function main() {
 	const clientSrc = (await readText("client.js")) || "";
 	ok("客户端有 build 号", /const BUILD = "/.test(clientSrc));
 	ok("R43：面板的推荐条数是数字输入（不再只有 1/3/5 三档）",
-		/function PicksRow/.test(clientSrc) && /type: "number"/.test(clientSrc) && /1–20/.test(clientSrc));
+		/function PicksRow/.test(clientSrc) && /type: "number"/.test(clientSrc) && /6–25/.test(clientSrc));
 	ok("客户端会写回 /settings", clientSrc.includes('api("/settings"'));
 	ok("顶部有设置入口", clientSrc.includes("settingsOpen: true"));
 	ok("跳过审核走 skip-review", clientSrc.includes('act("skip-review")'));

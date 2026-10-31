@@ -1,14 +1,14 @@
 /**
- * dev/probe-ai-breadth.mjs — R41/R43 回归探针：AI 推荐的「条数 / 广度」口径 + 自定义条数（1~20）。
+ * dev/probe-ai-breadth.mjs — R41/R44 回归探针：AI 推荐的「条数 / 广度」口径 + 自定义条数（6~25）。
  *
  * 为什么要有它：这两个旋钮会同时影响**搜索池子、送进模型的候选、预算、条数上限**，
  * 而且很容易「调了名字没生效」（R40 就是候选被整类切掉、R41 才把数字收进一个口径函数）。
  * 把它固化成探针后，换会话直接跑，不用再手敲 curl 对数字。
  *
  * 两段，默认只跑第一段：
- *  ① **离线**（不发网络）：aiLimits 三档单调 / 非法值夹取 / 默认档 = 3 条 + standard；
+ *  ① **离线**（不发网络）：aiLimits 三档单调 / 非法值夹取 / 默认档 = 6 条 + standard；
  *     packCandidates 在三档下每类候选数随档位增加、每类至少留 1 条、不超预算；
- *     客户端 bundle 里推荐条数是「自定义」数字输入（1~20；快捷档 1/3/5 只是入口）。
+ *     客户端 bundle 里推荐条数是「自定义」数字输入（6~25；快捷档 6/15/25 只是入口）。
  *  ② **在线**（`--base <GUI URL>`）：GET /settings 记下原值 → 三档各 POST 一次并跑同一条搜索、
  *     记录每档拿到的 plugin/mcp/skill 条数 → **finally 一定恢复原设置**（不会把你的面板留在很广）。
  *     ⚠️ `--ai` 才真调模型（会花钱），默认不跑。
@@ -16,7 +16,7 @@
  * 跑法：
  *   node dev/probe-ai-breadth.mjs
  *   node dev/probe-ai-breadth.mjs --base http://127.0.0.1:<端口>
- *   node dev/probe-ai-breadth.mjs --base http://127.0.0.1:<端口> --ai --picks 5
+ *   node dev/probe-ai-breadth.mjs --base http://127.0.0.1:<端口> --ai --picks 6
  *   host_selfcheck({plugin:"dsh-plugin-installer", script:"dev/probe-ai-breadth.mjs", args:["--base","http://127.0.0.1:<端口>"]})
  *
  * 退出码：任何一项 FAIL → 1；只打印 KNOWN 不红。
@@ -53,8 +53,8 @@ const std = aiLimits({});
 const wide = aiLimits({ aiBreadth: "wide" });
 const max = aiLimits({ aiBreadth: "max" });
 
-report("默认档 = 3 条 + 标准广度（= R41 之前的行为）",
-	std.picks === 3 && std.breadth === "standard" && std.perKind.plugin === 8 && std.maxChars === 12000,
+report("默认档 = 6 条 + 标准广度（R44：下限提到 6）",
+	std.picks === 6 && std.breadth === "standard" && std.perKind.plugin === 8 && std.maxChars === 12000,
 	{ picks: std.picks, breadth: std.breadth, perKind: std.perKind, maxChars: std.maxChars });
 report("三档广度单调变宽（每类候选 / 搜索池子 / 预算）",
 	wide.perKind.plugin > std.perKind.plugin && max.perKind.plugin > wide.perKind.plugin &&
@@ -63,8 +63,8 @@ report("三档广度单调变宽（每类候选 / 搜索池子 / 预算）",
 	{ std: std.perKind, wide: wide.perKind, max: max.perKind });
 report("非法广度回标准（写坏了不变成无限）",
 	aiLimits({ aiBreadth: "insane" }).breadth === "standard");
-report("非法条数夹到上限（99 → 20；R43 起是自定义 1~20，不再是三档落档）",
-	aiLimits({ aiPicks: 99 }).picks === 20 && aiLimits({ aiPicks: 0 }).picks === 1);
+report("非法条数夹到边上（99 → 25、0 → 6；R43 起是自定义 6~25，不再是三档落档）",
+	aiLimits({ aiPicks: 99 }).picks === 25 && aiLimits({ aiPicks: 0 }).picks === 6);
 report("三档都在 AI_BREADTH_PRESETS 里（没有半截档位）",
 	Object.keys(AI_BREADTH_PRESETS).length === 3 && aiLimits({ aiBreadth: "max" }).breadthLabel === "很广");
 
@@ -94,21 +94,21 @@ report("打包结果不超预算",
 	packedStd.packed.json.length <= std.maxChars && packedWide.packed.json.length <= wide.maxChars && packedMax.packed.json.length <= max.maxChars);
 
 const clientSrc = await readFile(join(PLUGIN_DIR, "client.js"), "utf8").catch(() => "");
-/* R43：自定义条数 —— 1~20 的任意整数；快捷档 1/3/5 只是面板上的入口 */
-report("推荐条数是自定义的：7 条原样生效、默认仍是 3 条",
-	aiLimits({ aiPicks: 7 }).picks === 7 && aiLimits({}).picks === 3 && normalizeSettings({ aiPicks: 7 }).aiPicks === 7,
+/* R43/R44：自定义条数 —— 6~25 的任意整数；快捷档 6/15/25 只是面板上的入口 */
+report("推荐条数是自定义的：7 条原样生效、默认是 6 条",
+	aiLimits({ aiPicks: 7 }).picks === 7 && aiLimits({}).picks === 6 && normalizeSettings({ aiPicks: 7 }).aiPicks === 7,
 	{ seven: aiLimits({ aiPicks: 7 }).picks });
-report("条数越界夹到边上、小数取整（0 → 1、99 → 20、4.6 → 5）",
-	aiLimits({ aiPicks: 0 }).picks === 1 && aiLimits({ aiPicks: 99 }).picks === 20 && normalizeSettings({ aiPicks: 4.6 }).aiPicks === 5,
+report("条数越界夹到边上、小数取整（0 → 6、99 → 25、4.6 → 6）",
+	aiLimits({ aiPicks: 0 }).picks === 6 && aiLimits({ aiPicks: 99 }).picks === 25 && normalizeSettings({ aiPicks: 4.6 }).aiPicks === 6,
 	{ lo: aiLimits({ aiPicks: 0 }).picks, hi: aiLimits({ aiPicks: 99 }).picks });
-report("面板里有「自定义」数字输入（快捷档 1/3/5 + 1–20 的范围）",
+report("面板里有「自定义」数字输入（快捷档 6/15/25 + 6–25 的范围）",
 	/function PicksRow/.test(clientSrc) && /type: "number"/.test(clientSrc) &&
-	/dpi-input-num/.test(clientSrc) && /1–20/.test(clientSrc));
+	/dpi-input-num/.test(clientSrc) && /6–25/.test(clientSrc));
 
 /* ── ② 在线：设置往返 + 每档搜索规模（不花钱；--ai 才调模型） ─────────── */
 const BASE = typeof arg("base", null) === "string" ? String(arg("base")).replace(/\/+$/, "") : null;
 const DO_AI = arg("ai", false) === true;
-const PICKS = Number(arg("picks", 3)) || 3;
+const PICKS = Number(arg("picks", 6)) || 6;
 
 if (!BASE) {
 	console.log("");
@@ -136,8 +136,8 @@ if (!BASE) {
 		console.log("· 面板：" + API + "（原设置：最多 " + original.aiPicks + " 条 / 广度 " + original.aiBreadth + "）");
 		const seen = {};
 		for (const breadth of ["standard", "wide", "max"]) {
-			const patched = await post("/settings", { aiBreadth: breadth, aiPicks: 5 });
-			const applied = patched.settings?.aiBreadth === breadth && patched.settings?.aiPicks === 5;
+			const patched = await post("/settings", { aiBreadth: breadth, aiPicks: 6 });
+			const applied = patched.settings?.aiBreadth === breadth && patched.settings?.aiPicks === 6;
 			const search = await post("/search", { query: "pdf" });
 			const kinds = kindsOf(search.items);
 			seen[breadth] = kinds;

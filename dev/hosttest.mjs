@@ -3830,54 +3830,58 @@ async function main() {
 	ok("R40 接线：启动后后台预热技能库（不阻塞 apply）",
 		/warmSearchSources/.test(indexSrcR40) && /async warmSearchSources\(\)/.test(pipelineSrcR40));
 
-	/* R41：用户要「AI 推荐更广更多」—— 条数与广度进设置，**默认档保持 R40 的行为**。
+	/* R41：用户要「AI 推荐更广更多」—— 条数与广度进设置。
+	   R44：条数范围改为 6~25、默认 6（用户 2026-10-31 指定），所以这里断言的是新默认。
 	   这一组用纯函数 + 假 ctx / 假 installer，不联网、不花 token。 */
 	const stdLimits = aiLimits({});
-	eq("R41 默认档：3 条 / 标准广度 / 每类 8·4·4 / 预算 12000",
+	eq("R41/R44 默认档：6 条 / 标准广度 / 每类 8·4·4 / 预算 12000",
 		[stdLimits.picks, stdLimits.breadth, stdLimits.perKind.plugin, stdLimits.perKind.mcp, stdLimits.perKind.skill, stdLimits.maxChars],
-		[3, "standard", 8, 4, 4, 12000]);
-	const wideLimits = aiLimits({ aiBreadth: "wide", aiPicks: 5 });
-	const maxLimits = aiLimits({ aiBreadth: "max", aiPicks: 5 });
+		[6, "standard", 8, 4, 4, 12000]);
+	const wideLimits = aiLimits({ aiBreadth: "wide", aiPicks: 15 });
+	const maxLimits = aiLimits({ aiBreadth: "max", aiPicks: 15 });
 	ok("R41 广度：广 / 很广 都更宽（每类上限、搜索条数、预算同时变宽）",
 		wideLimits.perKind.plugin > stdLimits.perKind.plugin && wideLimits.search.plugin > stdLimits.search.plugin &&
 		wideLimits.maxChars > stdLimits.maxChars && maxLimits.perKind.skill > wideLimits.perKind.skill,
 		{ wide: wideLimits.perKind, max: maxLimits.perKind });
-	/* R43：用户澄清「自定义条目」指的是**设置里的推荐条数** —— 1~20 任意整数，不再是三档选一 */
+	/* R43/R44：用户澄清「自定义条目」指的是**设置里的推荐条数** —— 6~25 任意整数，不再是三档选一 */
 	eq("R43 条数：自定义值直接生效（7 条 → picks 7）", aiLimits({ aiPicks: 7 }).picks, 7);
-	eq("R43 条数：越界夹到边上（0 → 1、99 → 20）",
-		[aiLimits({ aiPicks: 0 }).picks, aiLimits({ aiPicks: 99 }).picks], [1, 20]);
-	eq("R43 条数：小数四舍五入成整数（4.6 → 5）", normalizeSettings({ aiPicks: 4.6 }).aiPicks, 5);
+	eq("R43/R44 条数：越界夹到边上（0 → 6、99 → 25）",
+		[aiLimits({ aiPicks: 0 }).picks, aiLimits({ aiPicks: 99 }).picks], [6, 25]);
+	eq("R43/R44 条数：小数四舍五入后再夹（4.6 → 6）", normalizeSettings({ aiPicks: 4.6 }).aiPicks, 6);
 	eq("R41 广度：写坏了回标准（不变成无限）", aiLimits({ aiBreadth: "insane" }).breadth, "standard");
 	const widePacked = packCandidates(bigCandidates, { perKind: wideLimits.perKind, maxChars: wideLimits.maxChars });
 	eq("R41 打包：广度档真的多送候选进模型（plugin 8 → 12）",
 		widePacked.candidates.filter((item) => item.kind === "plugin").length, 12);
 
 	/* runPanelAi：设置从入口一路走到「给几条」与「送多少候选」 */
-	const fivePicks = ["skill-0", "skill-1", "mcp-0", "mcp-1", "plugin-0"];
+	const manyPicks = [
+		...Array.from({ length: 12 }, (_, i) => "plugin-" + i),
+		...Array.from({ length: 3 }, (_, i) => "mcp-" + i)
+	];
 	const fakeLlmCtx = {
 		agentDefaultModel: { currentSelection: () => ({ provider: "p", model: "m" }) },
 		llm: {
 			stream: async function* () {
-				yield { type: "text-delta", text: JSON.stringify({ reply: "ok", picks: fivePicks.map((name) => ({ name, why: "why" })) }) };
+				yield { type: "text-delta", text: JSON.stringify({ reply: "ok", picks: manyPicks.map((name) => ({ name, why: "why" })) }) };
 			}
 		}
 	};
 	const fakeSearch = async () => ({ items: bigCandidates.map((item) => ({ ...item, source: "fake" })) });
 	const aiWide = await runPanelAi({
 		ctx: fakeLlmCtx,
-		installer: { settings: normalizeSettings({ aiPicks: 5, aiBreadth: "max" }), search: fakeSearch },
+		installer: { settings: normalizeSettings({ aiPicks: 15, aiBreadth: "max" }), search: fakeSearch },
 		message: "做表格"
 	});
-	eq("R41 接线：runPanelAi 用设置里的条数上限（5 条全出）", aiWide.recommendations.length, 5);
+	eq("R41/R44 接线：runPanelAi 用设置里的条数上限（设 15 就出 15 条）", aiWide.recommendations.length, 15);
 	ok("R41 接线：回包带本轮口径与预算明细（面板要显示）",
-		Boolean(aiWide.limits) && aiWide.limits.picks === 5 && Boolean(aiWide.listing) && typeof aiWide.listing.total === "number",
+		Boolean(aiWide.limits) && aiWide.limits.picks === 15 && Boolean(aiWide.listing) && typeof aiWide.listing.total === "number",
 		aiWide.limits);
 	const aiDefault = await runPanelAi({
 		ctx: fakeLlmCtx,
 		installer: { settings: normalizeSettings({}), search: fakeSearch },
 		message: "做表格"
 	});
-	eq("R41 接线：默认档仍然只给 3 条（= R40 的行为）", [aiDefault.limits.picks, aiDefault.recommendations.length], [3, 3]);
+	eq("R41/R44 接线：默认档出 6 条（新默认 = 6，不再只给 3 条）", [aiDefault.limits.picks, aiDefault.recommendations.length], [6, 6]);
 	const pipelineSrcR41 = await readFile(join(pluginRoot, "lib", "pipeline.js"), "utf8");
 	const indexSrcR41 = await readFile(join(pluginRoot, "index.js"), "utf8");
 	const clientSrcR41 = await readFile(join(pluginRoot, "client.js"), "utf8");
@@ -3891,9 +3895,9 @@ async function main() {
 
 	/* R43：设置面板里的「推荐条数」= 快捷档（1/3/5）+ 自定义数字输入；
 	   快捷档只是个方便，真正生效的是那个数字（越界在输入侧与设置侧都会夹）。 */
-	ok("R43 面板：推荐条数是自定义数字输入（保留 1/3/5 快捷档）",
+	ok("R43 面板：推荐条数是自定义数字输入（保留 6/15/25 快捷档）",
 		/function PicksRow\(/.test(clientSrcR41) && /type: "number"/.test(clientSrcR41) &&
-		/自定义/.test(clientSrcR41) && /条（1–20）/.test(clientSrcR41));
+		/自定义/.test(clientSrcR41) && /条（6–25）/.test(clientSrcR41));
 	ok("R43 面板：越界在输入侧就夹回（min/max + commit 里夹取）",
 		/min: String\(MIN\)/.test(clientSrcR41) && /max: String\(MAX\)/.test(clientSrcR41) &&
 		/Math\.min\(MAX, Math\.max\(MIN, n\)\)/.test(clientSrcR41));
