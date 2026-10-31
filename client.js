@@ -490,6 +490,9 @@ window.__ModuleLoader__.load({
 			pollMs: 2500,
 			historyLimit: 8,
 			snapshotKeep: 40,
+			/* R41：AI 推荐 —— 默认 = 现在的行为（3 条 / 标准广度） */
+			aiPicks: 3,
+			aiBreadth: "standard",
 			sources: { npm: true, github: true, hub: true }
 		};
 
@@ -2108,6 +2111,7 @@ window.__ModuleLoader__.load({
 
 		function AiBox() {
 			const s = useStore();
+			const st = currentSettings();
 			const [text, setText] = useState("");
 			const busy = s.local.aiBusy;
 			const result = s.local.ai;
@@ -2122,12 +2126,19 @@ window.__ModuleLoader__.load({
 					})
 					.catch((e) => setLocal({ ai: { reply: "AI 调用失败：" + String((e && e.message) || e), recommendations: [] }, aiBusy: false }));
 			};
+			const breadthLabel = st.aiBreadth === "wide" ? "广" : st.aiBreadth === "max" ? "很广" : "标准";
+			const listing = result && result.listing;
 			return h(
 				"div",
 				{ className: "dpi-card dpi-ai" },
 				h("div", { className: "dpi-card-head" },
 					h("strong", null, "AI 推荐"),
 					h("span", { className: "dpi-muted" }, "只有三件事：搜索 / 推荐 / 递安装请求 —— 它不能装，装的是宿主代码")),
+				/* R41：现在能看见「这一轮按什么广度、给几条」——否则用户不知道设置有没有生效 */
+				h("div", { className: "dpi-muted dpi-ai-limits" },
+					"本轮设置：最多 " + st.aiPicks + " 条 · 广度 " + breadthLabel +
+					(listing && listing.total ? " · 候选 " + listing.total + " 条（列出 " + listing.listed + " 条）" : "") +
+					" —— 可在「设置 → AI 推荐」里调"),
 				h("div", { className: "dpi-composer-row" },
 					h("input", {
 						className: "dpi-input dpi-input-line",
@@ -3284,6 +3295,25 @@ window.__ModuleLoader__.load({
 							})),
 
 						h("div", { className: "dpi-set-section" },
+							h("div", { className: "dpi-set-section-title" }, "AI 推荐"),
+							h("div", { className: "dpi-muted dpi-set-hint" },
+								"「条数」是最多给几条推荐；「广度」决定每一类（插件 / MCP / 技能）各送多少候选进模型 —— 调广会多要一些搜索结果、也多送几条进模型，代价是慢一点、token 多一点。默认档 = 一直以来的行为。"),
+							h(SegRow, {
+								label: "推荐条数",
+								hint: "1 条最省；5 条会把同一需求下的不同路子（能读 / 能改 / 能自动化）都列出来。",
+								value: st.aiPicks,
+								options: [{ value: 1, label: "1 条" }, { value: 3, label: "3 条（默认）" }, { value: 5, label: "5 条" }],
+								onChange: (v) => saveSettings({ aiPicks: v })
+							}),
+							h(SegRow, {
+								label: "推荐广度",
+								hint: "标准 = 每类最多 8 / 4 / 4 条候选（默认）；广 = 12 / 6 / 8 并多要一些搜索结果；很广 = 16 / 8 / 12。候选再多也不会超预算：按类保底，省略多少会如实写在 AI 的回复里。",
+								value: st.aiBreadth,
+								options: [{ value: "standard", label: "标准" }, { value: "wide", label: "广" }, { value: "max", label: "很广" }],
+								onChange: (v) => saveSettings({ aiBreadth: v })
+							})),
+
+						h("div", { className: "dpi-set-section" },
 							h("div", { className: "dpi-set-section-title" }, "界面与性能"),
 							h(SegRow, {
 								label: "状态轮询间隔",
@@ -3745,6 +3775,7 @@ window.__ModuleLoader__.load({
 .dpi-attention{list-style:none;margin:0 0 12px;padding:0;display:flex;flex-direction:column;gap:6px;font-size:12px}
 .dpi-attention li{border-left:2px solid var(--dsw-alias-state-error-primary);padding-left:8px;display:flex;flex-direction:column;gap:2px}
 .dpi-ai .dpi-ai-reply{margin-top:8px;font-size:12.5px;line-height:1.6}
+.dpi-ai .dpi-ai-limits{margin:2px 0 8px;font-size:11.5px;line-height:1.5}
 .dpi-recos{display:flex;flex-direction:column;gap:8px;margin-top:8px}
 .dpi-reco{border:1px solid var(--dsw-alias-border-l1);border-radius:9px;padding:8px 10px}
 .dpi-reco-head{display:flex;gap:8px;align-items:center;font-size:12.5px}

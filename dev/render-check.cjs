@@ -175,7 +175,7 @@ function textOf(node, acc) {
  * 正常不执行，所以**数源码不等于数断言**（实测 103 处、只跑 80 条）。真正的判据只能是
  * 「这次实际跑了几条」，所以由脚本自己报总数、并由自己比对。
  */
-const EXPECTED_TOTAL = 254;
+const EXPECTED_TOTAL = 257;
 
 let failed = 0;
 let passed = 0;
@@ -408,6 +408,10 @@ if (typeof t.SettingsModal === "function") {
 		check("设置面板有「跳过审核」开关", joinedSet.includes("允许「跳过审核」按钮"));
 		check("设置面板有界面与性能项", joinedSet.includes("状态轮询间隔") && joinedSet.includes("历史显示条数") && joinedSet.includes("快照保留份数"));
 		check("设置面板有搜索来源项", joinedSet.includes("搜索来源"));
+		/* R41：AI 推荐的条数与广度必须在设置面板里看得见、选得到 */
+		check("设置面板有 AI 推荐区（条数 + 广度）", joinedSet.includes("AI 推荐") && joinedSet.includes("推荐条数") && joinedSet.includes("推荐广度"));
+		check("设置面板标明默认档 = 3 条 / 标准广度", joinedSet.includes("3 条（默认）") && joinedSet.includes("标准"));
+		check("设置面板有「很广」档可选（用户要查看更多）", joinedSet.includes("很广"));
 		check("设置面板默认渲染出开关", attrs.classes.filter((c) => c.includes("dpi-switch")).length >= 3, attrs.classes);
 		check("设置面板默认档：开着的开关不止一个", attrs.aria.filter((a) => a === "true").length >= 2, attrs.aria);
 	} catch (e) {

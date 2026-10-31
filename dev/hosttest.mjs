@@ -30,7 +30,7 @@ import { backupVendorTarball, createSnapshot, fileSpecPath, restoreProfileFiles,
 import { buildReviewInput } from "../lib/ai.js";
 import { estimateReviewTokens, reviewWorthIt } from "../lib/ai.js";
 /* R40：AI 候选的三类投影与「按类保底打包」都是纯函数 —— 这一层不联网、不花 token。 */
-import { packCandidates, toAiCandidate } from "../lib/ai.js";
+import { packCandidates, runPanelAi, toAiCandidate } from "../lib/ai.js";
 import { buildSkillCandidate, clearSkillSourceCache, scoreSkill, searchSkills } from "../lib/skillsource.js";
 import { packPluginTarball } from "../lib/pack.js";
 import { stagingRefsFromManifest, stagingKeepNames, rollbackPlan, splitUpgradeTargets, upgradeStalled, historyDropPlan, Installer, compactCollaborator } from "../lib/pipeline.js";
@@ -71,7 +71,7 @@ import {
 	summarizeInventory
 } from "../lib/inventory.js";
 import { checkUpdates, clearUpdateCache, clockText as mClockText, mergeUpdates, registryUrl, relationOf, summarizeUpdates } from "../lib/updates.js";
-import { DEFAULTS as SETTING_DEFAULTS, describeSettings, loadSettings, mergeSettings, normalizeSettings, saveSettings } from "../lib/settings.js";
+import { DEFAULTS as SETTING_DEFAULTS, aiLimits, describeSettings, loadSettings, mergeSettings, normalizeSettings, saveSettings } from "../lib/settings.js";
 import { checkDshToolsShadow, quarantineDshTools, removeDanglingLink } from "../lib/landmine.js";
 import { fileDepsOf, findDanglingFileDeps, inspectEnvironment } from "../lib/repair.js";
 import { scanToolContract, describeContractScan } from "../lib/contract.js";
@@ -3823,12 +3823,67 @@ async function main() {
 	ok("R40 接线：搜索并了技能源并单独报数", /searchSkills\(normalized/.test(pipelineSrcR40) && /skill: \{/.test(pipelineSrcR40));
 	ok("R40 接线：搜索结果里技能标「已装」", /installedSkillDirs\(skillRoots\(\)\)/.test(pipelineSrcR40));
 	ok("R40 接线：AI 候选走 packCandidates（不再整份 JSON 切 9000 字）",
-		/packCandidates\(candidates\)/.test(aiSrcR40) && !/JSON\.stringify\(candidates, null, 2\)\.slice/.test(aiSrcR40));
+		/packCandidates\(candidates\b/.test(aiSrcR40) && !/JSON\.stringify\(candidates, null, 2\)\.slice/.test(aiSrcR40));
 	ok("R40 接线：推荐提示词写明三类与 skill 的装法", /kind="skill"/.test(aiSrcR40) && /treeUrl/.test(aiSrcR40));
 	ok("R40 接线：面板给技能一个「安装这个 Skill」（提交 treeUrl）", /安装这个 Skill/.test(clientSrcR40) && /submitInput\(item\.treeUrl/.test(clientSrcR40));
 	const indexSrcR40 = await readFile(join(pluginRoot, "index.js"), "utf8");
 	ok("R40 接线：启动后后台预热技能库（不阻塞 apply）",
 		/warmSearchSources/.test(indexSrcR40) && /async warmSearchSources\(\)/.test(pipelineSrcR40));
+
+	/* R41：用户要「AI 推荐更广更多」—— 条数与广度进设置，**默认档保持 R40 的行为**。
+	   这一组用纯函数 + 假 ctx / 假 installer，不联网、不花 token。 */
+	const stdLimits = aiLimits({});
+	eq("R41 默认档：3 条 / 标准广度 / 每类 8·4·4 / 预算 12000",
+		[stdLimits.picks, stdLimits.breadth, stdLimits.perKind.plugin, stdLimits.perKind.mcp, stdLimits.perKind.skill, stdLimits.maxChars],
+		[3, "standard", 8, 4, 4, 12000]);
+	const wideLimits = aiLimits({ aiBreadth: "wide", aiPicks: 5 });
+	const maxLimits = aiLimits({ aiBreadth: "max", aiPicks: 5 });
+	ok("R41 广度：广 / 很广 都更宽（每类上限、搜索条数、预算同时变宽）",
+		wideLimits.perKind.plugin > stdLimits.perKind.plugin && wideLimits.search.plugin > stdLimits.search.plugin &&
+		wideLimits.maxChars > stdLimits.maxChars && maxLimits.perKind.skill > wideLimits.perKind.skill,
+		{ wide: wideLimits.perKind, max: maxLimits.perKind });
+	eq("R41 条数：非法值落到最近档位（99 → 5）", aiLimits({ aiPicks: 99 }).picks, 5);
+	eq("R41 广度：写坏了回标准（不变成无限）", aiLimits({ aiBreadth: "insane" }).breadth, "standard");
+	const widePacked = packCandidates(bigCandidates, { perKind: wideLimits.perKind, maxChars: wideLimits.maxChars });
+	eq("R41 打包：广度档真的多送候选进模型（plugin 8 → 12）",
+		widePacked.candidates.filter((item) => item.kind === "plugin").length, 12);
+
+	/* runPanelAi：设置从入口一路走到「给几条」与「送多少候选」 */
+	const fivePicks = ["skill-0", "skill-1", "mcp-0", "mcp-1", "plugin-0"];
+	const fakeLlmCtx = {
+		agentDefaultModel: { currentSelection: () => ({ provider: "p", model: "m" }) },
+		llm: {
+			stream: async function* () {
+				yield { type: "text-delta", text: JSON.stringify({ reply: "ok", picks: fivePicks.map((name) => ({ name, why: "why" })) }) };
+			}
+		}
+	};
+	const fakeSearch = async () => ({ items: bigCandidates.map((item) => ({ ...item, source: "fake" })) });
+	const aiWide = await runPanelAi({
+		ctx: fakeLlmCtx,
+		installer: { settings: normalizeSettings({ aiPicks: 5, aiBreadth: "max" }), search: fakeSearch },
+		message: "做表格"
+	});
+	eq("R41 接线：runPanelAi 用设置里的条数上限（5 条全出）", aiWide.recommendations.length, 5);
+	ok("R41 接线：回包带本轮口径与预算明细（面板要显示）",
+		Boolean(aiWide.limits) && aiWide.limits.picks === 5 && Boolean(aiWide.listing) && typeof aiWide.listing.total === "number",
+		aiWide.limits);
+	const aiDefault = await runPanelAi({
+		ctx: fakeLlmCtx,
+		installer: { settings: normalizeSettings({}), search: fakeSearch },
+		message: "做表格"
+	});
+	eq("R41 接线：默认档仍然只给 3 条（= R40 的行为）", [aiDefault.limits.picks, aiDefault.recommendations.length], [3, 3]);
+	const pipelineSrcR41 = await readFile(join(pluginRoot, "lib", "pipeline.js"), "utf8");
+	const indexSrcR41 = await readFile(join(pluginRoot, "index.js"), "utf8");
+	const clientSrcR41 = await readFile(join(pluginRoot, "client.js"), "utf8");
+	ok("R41 接线：搜索池子按广度取（limits.search 三条）",
+		/aiLimits\(this\.settings\)/.test(pipelineSrcR41) && /limits\.search\.plugin/.test(pipelineSrcR41) && /limits\.search\.skill/.test(pipelineSrcR41));
+	ok("R41 接线：/ai 把设置传进去", /settings: installer\.settings/.test(indexSrcR41));
+	ok("R41 接线：设置面板有「AI 推荐」与「推荐广度」两档",
+		/"AI 推荐"/.test(clientSrcR41) && /推荐广度/.test(clientSrcR41) && /aiBreadth/.test(clientSrcR41));
+	ok("R41 接线：AI 卡片显示本轮口径（最多 N 条 · 广度）",
+		/本轮设置：最多 /.test(clientSrcR41) && /dpi-ai-limits/.test(clientSrcR41));
 
 	await rm(root, { recursive: true, force: true });
 

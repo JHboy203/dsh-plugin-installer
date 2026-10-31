@@ -549,7 +549,7 @@ export async function apply(ctx) {
 				if (path === "/ai" && method === "POST") {
 					const body = await readJsonBody(req);
 					const faces = makeFaces(ctx);
-					const result = await runPanelAi({ ctx: faces, installer, message: String(body.message || "") });
+					const result = await runPanelAi({ ctx: faces, installer, message: String(body.message || ""), settings: installer.settings });
 					return json(res, 200, result);
 				}
 

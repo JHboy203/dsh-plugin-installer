@@ -23,7 +23,7 @@ import { readFile, readdir, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { DEFAULTS, describeSettings, normalizeSettings } from "../lib/settings.js";
+import { DEFAULTS, aiLimits, describeSettings, normalizeSettings } from "../lib/settings.js";
 import { buildInstallerTools } from "../lib/tools.js";
 import { buildStamp, dataDir, profileDir } from "../lib/hostinfo.js";
 import { stagingKeepNames } from "../lib/pipeline.js";
@@ -44,14 +44,17 @@ export const FROZEN_DEFAULTS = {
 	pollMs: 2500,
 	historyLimit: 8,
 	snapshotKeep: 40,
+	/* R41：AI 推荐 —— 默认就是 R40 的行为（3 条 / 标准广度） */
+	aiPicks: 3,
+	aiBreadth: "standard",
 	sources: { npm: true, github: true, hub: true }
 };
 
 /** 文档里声明的自检项数（改断言就先跑一次 host_selfcheck，再同步这个数）。 */
-export const EXPECTED_ASSERTIONS = 1111;
+export const EXPECTED_ASSERTIONS = 1123;
 
 /** 界面自检项数（dev/render-check.cjs）。同样是「文档对表」的一半。 */
-const EXPECTED_RENDER_ASSERTIONS = 254;
+const EXPECTED_RENDER_ASSERTIONS = 257;
 
 /** 期望注册的宿主工具（漏一个 = 模型看不见一项能力）。R32 起 6 个（新增只读探针）。 */
 const EXPECTED_TOOLS = [
@@ -103,6 +106,20 @@ async function main() {
 	eq("非法轮询落到最近合法值", clamped.pollMs, 2500);
 	eq("未知键丢弃", "evil" in clamped, false);
 	eq("三个源全关会兜回全开", normalizeSettings({ sources: { npm: false, github: false, hub: false } }).sources, FROZEN_DEFAULTS.sources);
+	/* R41：AI 推荐的条数 / 广度 —— 默认档就是 R40 的行为，调档只放宽预算，不放松判据 */
+	eq("R41：默认档 AI 推荐 = 3 条 / 标准广度（= R40 的行为）", [DEFAULTS.aiPicks, DEFAULTS.aiBreadth], [3, "standard"]);
+	ok("R41：广度档位只认 standard/wide/max，写坏了回标准",
+		normalizeSettings({ aiBreadth: "insane" }).aiBreadth === "standard" && normalizeSettings({ aiBreadth: "max" }).aiBreadth === "max");
+	eq("R41：条数落到最近合法档位（99 → 5）", normalizeSettings({ aiPicks: 99 }).aiPicks, 5);
+	ok("R41：三档广度单调变宽（标准 < 广 < 很广）", (() => {
+		const s = aiLimits({ aiBreadth: "standard" });
+		const w = aiLimits({ aiBreadth: "wide" });
+		const m = aiLimits({ aiBreadth: "max" });
+		return s.perKind.plugin < w.perKind.plugin && w.perKind.plugin < m.perKind.plugin &&
+			s.search.skill < w.search.skill && w.search.skill < m.search.skill &&
+			s.maxChars < w.maxChars && w.maxChars < m.maxChars;
+	})());
+	ok("R41：摘要里能看出 AI 推荐的条数与广度", /AI 推荐 3 条 \/ 广度 标准/.test(describeSettings(DEFAULTS)), describeSettings(DEFAULTS));
 
 	/* ③ 工具契约（漏 output = 整个插件静默失活） */
 	const tools = buildInstallerTools({ installer: {}, ctx: {} });
@@ -466,7 +483,18 @@ async function main() {
 	}
 	if (rawSettings) {
 		const normalized = normalizeSettings(rawSettings);
-		eq("settings.json 归一化后不变（没有会被静默改掉的值）", rawSettings, normalized);
+		/* 只比「文件里真写过」的键。schema 长出新默认值（R41 的 aiPicks / aiBreadth）不该红：
+		   缺键 = 用默认，不是「被静默改掉」；手改过 pollMs: 3000 这类值仍然会被抓出来。 */
+		const writtenSubset = (raw, norm) => {
+			const out = {};
+			for (const [key, value] of Object.entries(raw)) {
+				if (!(key in norm)) continue;
+				if (value && typeof value === "object" && !Array.isArray(value)) out[key] = writtenSubset(value, norm[key] || {});
+				else out[key] = norm[key];
+			}
+			return out;
+		};
+		eq("settings.json 里写过的值归一化后不变（没有被静默改掉）", writtenSubset(rawSettings, normalized), rawSettings);
 	}
 
 	/* ⑦ 未完成任务引用的 staging 目录还在不在（R5.1 的保鲜如果坏了会在这暴露） */
