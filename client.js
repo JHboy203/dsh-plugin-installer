@@ -23,7 +23,7 @@ window.__ModuleLoader__.load({
 		/* 客户端 build 号（R5.1）：改 client.js 就提一位。
 		   client 会热重载、但没人保证「当前页面跑的是哪一版」—— 这个号随 client-state
 		   一起上报，宿主 /health 的 clientReport.build 就是答案（宿主侧另有 mtime 标签）。 */
-		const BUILD = "r45.0";
+		const BUILD = "r46.0";
 
 		/* ── 迷你 store（模块级，面板关着时图标也在用）──────────────────── */
 
@@ -490,8 +490,8 @@ window.__ModuleLoader__.load({
 			pollMs: 2500,
 			historyLimit: 8,
 			snapshotKeep: 40,
-			/* R41/R44：AI 推荐 —— 条数自定义 6~25，默认 6 / 标准广度 */
-			aiPicks: 6,
+			/* R41/R44/R46：AI 推荐 —— 预设 1/3/5（默认 3）+ 自定义 6~25 / 标准广度 */
+			aiPicks: 3,
 			aiBreadth: "standard",
 			sources: { npm: true, github: true, hub: true },
 			/* R45：自定义来源；网页解析默认关闭（用户指定） */
@@ -3234,33 +3234,41 @@ window.__ModuleLoader__.load({
 			);
 		}
 
-		/* R43/R44：推荐条数可自定义（6~25）—— 6/15/25 只是快捷档，真正生效的是那个数字。
-		   为什么不做成 SegRow 的几档：用户要的就是「不在快捷档里也行」；
-		   快捷档留在输入框左边，是为了常用值不用敲。 */
+		/* R43/R44/R46：推荐条数 = 快捷档 1/3/5（默认 3）+ 自定义 6~25。
+		   自定义框在「当前是快捷档」时留空（placeholder 6–25），输入并确认后才切到自定义；
+		   这样不会出现「框里显示 3、但 3 不在自定义范围」的拧巴状态。 */
 		function PicksRow(props) {
 			const { label, hint, value, onChange } = props;
 			const MIN = 6;
 			const MAX = 25;
-			const [draft, setDraft] = useState(String(value));
+			const PRESETS = [1, 3, 5];
+			const isPreset = (v) => PRESETS.includes(Number(v));
+			const blank = (v) => (isPreset(v) ? "" : String(v));
+			const [draft, setDraft] = useState(blank(value));
 			useEffect(() => {
-				setDraft(String(value));
+				setDraft(blank(value));
 			}, [value]);
-			const commit = (raw, clamp) => {
-				const n = Math.round(Number(raw));
+			/* 与宿主 normalizeSettings 同语义：预设原样；6~25 原样；0/负数 → 1；2 → 3；4 → 5；>25 → 25 */
+			const clampPicks = (n) => {
+				if (isPreset(n)) return n;
+				if (n >= MIN) return Math.min(MAX, n);
+				if (n <= 1) return 1;
+				return n < 3 ? 3 : 5;
+			};
+			const commit = (raw) => {
+				const text = String(raw === undefined || raw === null ? "" : raw).trim();
+				if (!text) {
+					setDraft(blank(value));
+					return;
+				}
+				const n = Math.round(Number(text));
 				if (!Number.isFinite(n)) {
-					setDraft(String(value));
+					setDraft(blank(value));
 					return;
 				}
-				if (n >= MIN && n <= MAX) {
-					setDraft(String(n));
-					if (n !== Number(value)) onChange(n);
-					return;
-				}
-				if (clamp) {
-					const v = Math.min(MAX, Math.max(MIN, n));
-					setDraft(String(v));
-					if (v !== Number(value)) onChange(v);
-				}
+				const v = clampPicks(n);
+				setDraft(blank(v));
+				if (v !== Number(value)) onChange(v);
 			};
 			return h(
 				"div",
@@ -3269,12 +3277,15 @@ window.__ModuleLoader__.load({
 					h("div", null, label),
 					hint ? h("div", { className: "dpi-muted dpi-set-hint" }, hint) : null),
 				h("div", { className: "dpi-picks" },
-					h("div", { className: "dpi-seg" }, [6, 15, 25].map((n) =>
+					h("div", { className: "dpi-seg" }, PRESETS.map((n) =>
 						h("button", {
 							key: "picks" + n,
 							className: "dpi-seg-btn" + (Number(value) === n ? " is-on" : ""),
-							onClick: () => onChange(n)
-						}, n + " 条" + (n === 6 ? "（默认）" : "")))),
+							onClick: () => {
+								setDraft("");
+								onChange(n);
+							}
+						}, n + " 条" + (n === 3 ? "（默认）" : "")))),
 					h("div", { className: "dpi-picks-custom" },
 						h("span", { className: "dpi-muted" }, "自定义"),
 						h("input", {
@@ -3284,14 +3295,12 @@ window.__ModuleLoader__.load({
 							max: String(MAX),
 							step: "1",
 							value: draft,
+							placeholder: "6–25",
 							"aria-label": label + "（自定义）",
-							onChange: (e) => {
-								setDraft(e.target.value);
-								commit(e.target.value, false);
-							},
-							onBlur: (e) => commit(e.target.value, true),
+							onChange: (e) => setDraft(e.target.value),
+							onBlur: (e) => commit(e.target.value),
 							onKeyDown: (e) => {
-								if (e.key === "Enter") commit(e.target.value, true);
+								if (e.key === "Enter") commit(e.target.value);
 							}
 						}),
 						h("span", { className: "dpi-muted" }, "条（6–25）"))));
@@ -3483,10 +3492,10 @@ window.__ModuleLoader__.load({
 						h("div", { className: "dpi-set-section" },
 							h("div", { className: "dpi-set-section-title" }, "AI 推荐"),
 							h("div", { className: "dpi-muted dpi-set-hint" },
-								"「条数」是最多给几条推荐（默认 6，可自定义 6–25）；「广度」决定每一类（插件 / MCP / 技能）各送多少候选进模型 —— 调广会多要一些搜索结果、也多送几条进模型，代价是慢一点、token 多一点。"),
+								"「条数」预设 1 / 3 / 5（默认 3），也可以自定义 6–25；「广度」决定每一类（插件 / MCP / 技能）各送多少候选进模型 —— 调广会多要一些搜索结果、也多送几条进模型，代价是慢一点、token 多一点。"),
 							h(PicksRow, {
 								label: "推荐条数",
-								hint: "6–25 条都行，默认 6。条数越多，AI 越要把同一需求下的不同路子（能读 / 能改 / 能自动化）都列出来 —— 回复也更长更慢。条数超过这一档广度能送进模型的候选时，它只能给候选里的那些（标准档每类最多 8 / 4 / 4 条）。",
+								hint: "1 / 3 / 5 是预设（默认 3）；自定义可填 6–25，越界会夹到边上。条数越多，AI 越要把同一需求下的不同路子（能读 / 能改 / 能自动化）都列出来 —— 回复也更长更慢。条数超过这一档广度能送进模型的候选时，它只能给候选里的那些（标准档每类最多 8 / 4 / 4 条）。",
 								value: st.aiPicks,
 								onChange: (v) => saveSettings({ aiPicks: v })
 							}),

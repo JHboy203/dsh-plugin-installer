@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-installer",
-  "version": "0.16.0",
+  "version": "0.17.0",
   "private": true,
   "type": "module",
   "description": "DSH 侧边栏「插件/Skill 安装面板」：把 GitHub 链接、Release、.tgz/.zip 直链或本地压缩包丢进来，宿主侧确定性完成下载 → 解包 → 识别 → 安全预检 → 安装 → 快照/回滚 → 诊断；安装执行零 token，AI 只能推荐与提交请求。",

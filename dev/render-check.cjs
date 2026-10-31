@@ -410,17 +410,18 @@ if (typeof t.SettingsModal === "function") {
 		check("设置面板有搜索来源项", joinedSet.includes("搜索来源"));
 		/* R41：AI 推荐的条数与广度必须在设置面板里看得见、选得到 */
 		check("设置面板有 AI 推荐区（条数 + 广度）", joinedSet.includes("AI 推荐") && joinedSet.includes("推荐条数") && joinedSet.includes("推荐广度"));
-		check("设置面板标明默认档 = 6 条 / 标准广度", joinedSet.includes("6 条（默认）") && joinedSet.includes("标准"));
+		check("设置面板标明默认档 = 3 条 / 标准广度", joinedSet.includes("3 条（默认）") && joinedSet.includes("标准"));
 		check("设置面板有「很广」档可选（用户要查看更多）", joinedSet.includes("很广"));
-		/* R43/R44：推荐条数是「自定义」的 —— 快捷档 6/15/25 仍在，另有一个 6~25 的数字输入（默认 6） */
+		/* R43/R46：预设 1/3/5 保留，另有一个 6~25 的自定义数字输入（默认 3 → 输入框留空 + placeholder） */
 		const pickInputs = findNodes(el, (p) => typeof p.className === "string" && p.className.includes("dpi-input-num"));
 		check("R43 设置：推荐条数有「自定义」数字输入",
 			joinedSet.includes("自定义") && joinedSet.includes("条（6–25）") && pickInputs.length >= 1, pickInputs.length);
-		check("R43 设置：数字输入默认 6、范围 6–25",
-			String(pickInputs[0] && pickInputs[0].props.value) === "6" && String(pickInputs[0] && pickInputs[0].props.max) === "25",
+		check("R43 设置：数字输入范围 6–25、默认（预设 3 时）留空",
+			String(pickInputs[0] && pickInputs[0].props.value) === "" && String(pickInputs[0] && pickInputs[0].props.min) === "6" &&
+			String(pickInputs[0] && pickInputs[0].props.max) === "25" && String(pickInputs[0] && pickInputs[0].props.placeholder) === "6–25",
 			pickInputs[0] && pickInputs[0].props);
-		check("R43 设置：6/15/25 快捷档仍在（6 条标默认）",
-			joinedSet.includes("6 条（默认）") && joinedSet.includes("15 条") && joinedSet.includes("25 条"));
+		check("R43 设置：1/3/5 快捷档仍在（3 条标默认）",
+			joinedSet.includes("1 条") && joinedSet.includes("3 条（默认）") && joinedSet.includes("5 条"));
 		check("设置面板默认渲染出开关", attrs.classes.filter((c) => c.includes("dpi-switch")).length >= 3, attrs.classes);
 		check("设置面板默认档：开着的开关不止一个", attrs.aria.filter((a) => a === "true").length >= 2, attrs.aria);
 		/* R45：自定义搜索来源 —— 免责声明是产品要求；AI 辅助添加必须先出「待确认」再保存 */

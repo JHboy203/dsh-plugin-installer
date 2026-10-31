@@ -44,8 +44,8 @@ export const FROZEN_DEFAULTS = {
 	pollMs: 2500,
 	historyLimit: 8,
 	snapshotKeep: 40,
-	/* R41/R44：AI 推荐 —— 条数自定义 6~25，默认 6 / 标准广度 */
-	aiPicks: 6,
+	/* R41/R46：AI 推荐 —— 预设 1/3/5（默认 3）+ 自定义 6~25 / 标准广度 */
+	aiPicks: 3,
 	aiBreadth: "standard",
 	sources: { npm: true, github: true, hub: true },
 	/* R45：自定义来源默认空；网页解析默认关闭 */
@@ -54,7 +54,7 @@ export const FROZEN_DEFAULTS = {
 };
 
 /** 文档里声明的自检项数（改断言就先跑一次 host_selfcheck，再同步这个数）。 */
-export const EXPECTED_ASSERTIONS = 1135;
+export const EXPECTED_ASSERTIONS = 1136;
 
 /** 界面自检项数（dev/render-check.cjs）。同样是「文档对表」的一半。 */
 const EXPECTED_RENDER_ASSERTIONS = 262;
@@ -109,14 +109,15 @@ async function main() {
 	eq("非法轮询落到最近合法值", clamped.pollMs, 2500);
 	eq("未知键丢弃", "evil" in clamped, false);
 	eq("三个源全关会兜回全开", normalizeSettings({ sources: { npm: false, github: false, hub: false } }).sources, FROZEN_DEFAULTS.sources);
-	/* R41/R44：AI 推荐的条数 / 广度 —— 条数 6~25、默认 6；调档只放宽预算，不放松判据 */
-	eq("R41/R44：默认档 AI 推荐 = 6 条 / 标准广度", [DEFAULTS.aiPicks, DEFAULTS.aiBreadth], [6, "standard"]);
+	/* R41/R46：AI 推荐的条数 / 广度 —— 预设 1/3/5（默认 3）+ 自定义 6~25；调档只放宽预算，不放松判据 */
+	eq("R41/R46：默认档 AI 推荐 = 3 条 / 标准广度", [DEFAULTS.aiPicks, DEFAULTS.aiBreadth], [3, "standard"]);
 	ok("R41：广度档位只认 standard/wide/max，写坏了回标准",
 		normalizeSettings({ aiBreadth: "insane" }).aiBreadth === "standard" && normalizeSettings({ aiBreadth: "max" }).aiBreadth === "max");
-	eq("R43/R44：条数越界夹到边上（99 → 25、0 → 6）",
-		[normalizeSettings({ aiPicks: 99 }).aiPicks, normalizeSettings({ aiPicks: 0 }).aiPicks], [25, 6]);
-	eq("R43/R44：自定义条数原样保留（7 → 7），小数取整后再夹（4.6 → 6）",
-		[normalizeSettings({ aiPicks: 7 }).aiPicks, normalizeSettings({ aiPicks: 4.6 }).aiPicks], [7, 6]);
+	eq("R46：预设 1/3/5 原样保留", [normalizeSettings({ aiPicks: 1 }).aiPicks, normalizeSettings({ aiPicks: 5 }).aiPicks], [1, 5]);
+	eq("R46：条数越界夹到边上（99 → 25、0 → 1）",
+		[normalizeSettings({ aiPicks: 99 }).aiPicks, normalizeSettings({ aiPicks: 0 }).aiPicks], [25, 1]);
+	eq("R46：自定义原样保留（7 → 7），2/4 落最近预设、小数取整（2 → 3、4.6 → 5）",
+		[normalizeSettings({ aiPicks: 7 }).aiPicks, normalizeSettings({ aiPicks: 2 }).aiPicks, normalizeSettings({ aiPicks: 4.6 }).aiPicks], [7, 3, 5]);
 	ok("R41：三档广度单调变宽（标准 < 广 < 很广）", (() => {
 		const s = aiLimits({ aiBreadth: "standard" });
 		const w = aiLimits({ aiBreadth: "wide" });
@@ -128,7 +129,7 @@ async function main() {
 	eq("R45：自定义来源默认空、网页解析默认关闭", [DEFAULTS.customSources.length, DEFAULTS.allowWebSources], [0, false]);
 	ok("R45：自定义来源坏条目被丢掉、合法的留下",
 		normalizeSettings({ customSources: [{ type: "npm", target: "https://registry.npmmirror.com" }, { type: "ftp", target: "ftp://x" }] }).customSources.length === 1);
-	ok("R41：摘要里能看出 AI 推荐的条数与广度", /AI 推荐 6 条 \/ 广度 标准/.test(describeSettings(DEFAULTS)), describeSettings(DEFAULTS));
+	ok("R41：摘要里能看出 AI 推荐的条数与广度", /AI 推荐 3 条 \/ 广度 标准/.test(describeSettings(DEFAULTS)), describeSettings(DEFAULTS));
 
 	/* ③ 工具契约（漏 output = 整个插件静默失活） */
 	const tools = buildInstallerTools({ installer: {}, ctx: {} });
