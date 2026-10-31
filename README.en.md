@@ -16,6 +16,17 @@
 > the plugin tree is read at startup, so **DSH must be restarted once after installing**.
 > To run a self-check on any page: `Ctrl+Alt+D` (rebindable or disable in Settings).
 
+> **Current version `0.17.0` (2026-10-31)** — new in this release:
+> 1. **Tunable AI recommendations**: **1 / 3 / 5** picks (default 3) or a **custom 6–25**; breadth = standard / wide / max
+>    (widening per-kind candidates, search pool and budget together).
+> 2. **Custom search sources** (Settings → Sources → Custom sources): npm registry mirrors, GitHub queries
+>    (`topic:` / `org:` / `repo:`), JSON indexes, and arbitrary web pages (model-parsed, **off by default**).
+>    No format to memorise: hit “AI-assisted add” → review the proposal → “Confirm”. Public `http(s)` only;
+>    localhost / private addresses are rejected.
+> 3. **No endorsement**: hits from custom sources are labelled “custom source · unverified”. The panel only provides
+>    channels — judge the code, trustworthiness and functionality yourself. Install execution is still **zero-token**,
+>    and the pre-install static scan and precheck still run.
+
 One icon in the sidebar opens the "Plugin / Skill Install" panel: drop in a GitHub link, a Release page, a direct `.tgz`/`.zip` link, or a local archive/directory, and the panel handles **download → unpack → identify → security precheck → snapshot → install → diagnose → (on demand) rollback** on its own.
 
 **The install execution never calls a model**: deterministic code runs on the host side; the AI only does "recommendation" and "request submission." On this machine a Skill install measures **about 1.8 s**, and a plugin install up to confirmation **about 0.6 s**, neither spending tokens.
