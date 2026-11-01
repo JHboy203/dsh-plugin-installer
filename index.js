@@ -21,7 +21,10 @@
  *                                       fix-skill-frontmatter
  *   POST /plugin-installer/upload       拖进来的文件（原始字节，x-file-name 带头）
  *   POST /plugin-installer/ai           面板 AI：搜索 → 推荐 → 安装请求
- *   GET  /plugin-installer/ai-status    AI 通道是否可用
+ *   GET  /plugin-installer/ai-status    AI 通道是否可用（含「自选 / 跟随默认」与生效模型）
+ *   GET  /plugin-installer/models       可选模型目录（provider × model；5 分钟缓存，?refresh=1 刷新）
+ *   GET  /plugin-installer/onboarding   首次打开面板的引导状态
+ *   POST /plugin-installer/onboarding   记「引导看过了」（只记这一个状态）
  *   GET  /plugin-installer/doctor       环境体检（只读；修复走 action:"repair"）
  *   POST /plugin-installer/client-state  客户端自报（版本/几何/打开状态，只存内存）
  *   GET  /plugin-installer/health       自检
@@ -44,6 +47,7 @@ import { join } from "node:path";
 import { Installer } from "./lib/pipeline.js";
 import { buildInstallerTools } from "./lib/tools.js";
 import { assistCustomSource, createReviewer, runPanelAi } from "./lib/ai.js";
+import { listLlmModels } from "./lib/models.js";
 import { checkDshToolsShadow } from "./lib/landmine.js";
 import { buildStamp, dataDir, hostVersions, profileDir, skillRoots } from "./lib/hostinfo.js";
 import { freshness, describeFreshness, recordApply } from "./lib/codestamp.js";
@@ -216,6 +220,10 @@ export async function apply(ctx) {
 		.catch(() => {});
 
 	let lastClientState = null;
+	/* R48：模型目录缓存 —— listModels 可能走网络（每个 provider 有 5s 硬超时），
+	   面板打开设置时不该每次都等一遍；5 分钟内复用，?refresh=1 强制重读。 */
+	let modelCatalogCache = { at: 0, data: null };
+	const MODEL_CATALOG_TTL_MS = 5 * 60 * 1000;
 
 	const dispose = ctx.webServer.register({
 		kind: "prefix",
@@ -292,8 +300,40 @@ export async function apply(ctx) {
 				   规则能认的（GitHub / registry / .json）不花 token；认不出才问模型。 */
 				if (path === "/sources/assist" && method === "POST") {
 					const body = await readJsonBody(req);
-					const result = await assistCustomSource(faces, { input: String(body.input || "") });
+					const result = await assistCustomSource(faces, { input: String(body.input || ""), settings: installer.settings });
 					return json(res, 200, result);
+				}
+
+				/* R48：模型目录 —— 给面板的「自选模型」用。只读、不花 token。
+				   一个 provider 读不到只标它自己（lib/models.js），不会让整张表变空。 */
+				if (path === "/models" && method === "GET") {
+					const fresh = url.searchParams.get("refresh") === "1";
+					const now = Date.now();
+					if (!fresh && modelCatalogCache.data && now - modelCatalogCache.at < MODEL_CATALOG_TTL_MS) {
+						return json(res, 200, { ...modelCatalogCache.data, cached: true });
+					}
+					const listed = await listLlmModels(faces);
+					const data = {
+						ok: listed.ok,
+						error: listed.error || null,
+						at: listed.at,
+						count: listed.count || 0,
+						providers: listed.providers || [],
+						models: listed.models || [],
+						ai: installer.aiSelection()
+					};
+					modelCatalogCache = { at: now, data };
+					return json(res, 200, { ...data, cached: false });
+				}
+
+				/* R48：首次打开面板的引导 —— 只记「模型引导看过了没有」。 */
+				if (path === "/onboarding" && method === "GET") {
+					return json(res, 200, { ok: true, onboarding: installer.onboardingView(), ai: installer.aiSelection() });
+				}
+				if (path === "/onboarding" && method === "POST") {
+					const body = await readJsonBody(req);
+					const onboarding = await installer.markOnboarding(body);
+					return json(res, 200, { ok: true, onboarding, state: await installer.snapshotState() });
 				}
 
 				if (path === "/doctor" && method === "GET") {
@@ -574,7 +614,11 @@ export async function apply(ctx) {
 					return json(res, 200, {
 						ok: true,
 						llm: Boolean(faces.llm),
-						selection: selection ? { provider: selection.provider, model: selection.model } : null
+						/* 兼容旧字段：DSH 默认模型 */
+						selection: selection ? { provider: selection.provider, model: selection.model } : null,
+						/* R48：面板实际会用哪个模型（自选 > 默认），以及引导状态 */
+						ai: installer.aiSelection(),
+						onboarding: installer.onboardingView()
 					});
 				}
 

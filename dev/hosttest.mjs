@@ -33,6 +33,9 @@ import { estimateReviewTokens, reviewWorthIt } from "../lib/ai.js";
 import { packCandidates, runPanelAi, toAiCandidate } from "../lib/ai.js";
 /* R47：AI 辅助添加 / 网页解析的契约（未知输入 → 提案；网页只收公网 URL）。 */
 import { assistCustomSource, parseWebSource } from "../lib/ai.js";
+/* R48：模型自选（自选 > DSH 默认）+ 模型目录 + 首次引导状态 */
+import { askLlm, createReviewer, resolveSelection } from "../lib/ai.js";
+import { describeModelCatalog, listLlmModels } from "../lib/models.js";
 import { buildSkillCandidate, clearSkillSourceCache, scoreSkill, searchSkills } from "../lib/skillsource.js";
 import { packPluginTarball } from "../lib/pack.js";
 import { stagingRefsFromManifest, stagingKeepNames, rollbackPlan, splitUpgradeTargets, upgradeStalled, historyDropPlan, Installer, compactCollaborator } from "../lib/pipeline.js";
@@ -74,6 +77,8 @@ import {
 } from "../lib/inventory.js";
 import { checkUpdates, clearUpdateCache, clockText as mClockText, mergeUpdates, registryUrl, relationOf, summarizeUpdates } from "../lib/updates.js";
 import { DEFAULTS as SETTING_DEFAULTS, aiLimits, describeSettings, loadSettings, mergeSettings, normalizeSettings, saveSettings } from "../lib/settings.js";
+/* R48：自选模型的白名单归一化（写坏 = 跟随默认，不是报错） */
+import { normalizeAiModel } from "../lib/settings.js";
 import { checkDshToolsShadow, quarantineDshTools, removeDanglingLink } from "../lib/landmine.js";
 import { fileDepsOf, findDanglingFileDeps, inspectEnvironment } from "../lib/repair.js";
 import { scanToolContract, describeContractScan } from "../lib/contract.js";
@@ -1526,6 +1531,103 @@ async function main() {
 	await writeFile(join(settingsDir, "broken.json"), "{not json", "utf8");
 	const broken = await loadSettings(join(settingsDir, "broken.json"));
 	eq("settings: 文件写坏回退默认", broken.reviewLevel, "normal");
+
+	/* ⑲b R48：AI 模型自选 —— 自选 > DSH 默认；写坏 = 跟随默认；审查/推荐/辅助共用同一个出口 */
+	eq("R48: 默认不写 aiModel（跟随 DSH 默认）", normalizeSettings({}).aiModel, null);
+	eq("R48: 合法自选原样保留（去空白、丢多余字段）",
+		normalizeAiModel({ provider: " deepseek-account ", model: " deepseek-flash ", name: "x" }),
+		{ provider: "deepseek-account", model: "deepseek-flash" });
+	eq("R48: 缺 provider / 非对象 / 空串都退回 null",
+		[normalizeAiModel({ model: "m" }), normalizeAiModel("p/m"), normalizeAiModel({ provider: "p", model: "" })],
+		[null, null, null]);
+	eq("R48: mergeSettings 能用 null 把自选改回跟随默认",
+		mergeSettings({ ...SETTING_DEFAULTS, aiModel: { provider: "p", model: "m" } }, { aiModel: null }).aiModel, null);
+
+	const fakeDefaultCtx = { agentDefaultModel: { currentSelection: () => ({ provider: "def-p", model: "def-m" }) } };
+	eq("R48: 没自选 → 用 DSH 默认（source=default）",
+		resolveSelection(fakeDefaultCtx, SETTING_DEFAULTS), { provider: "def-p", model: "def-m", source: "default" });
+	eq("R48: 有自选 → 自选赢（source=custom）",
+		resolveSelection(fakeDefaultCtx, { ...SETTING_DEFAULTS, aiModel: { provider: "my-p", model: "my-m" } }),
+		{ provider: "my-p", model: "my-m", source: "custom" });
+	eq("R48: 两边都没有 → null（面板要能说「没有可用模型」）",
+		resolveSelection({}, SETTING_DEFAULTS), null);
+
+	const seenCalls = [];
+	const r48LlmCtx = {
+		agentDefaultModel: { currentSelection: () => ({ provider: "def-p", model: "def-m" }) },
+		llm: {
+			stream: async function* (options) {
+				seenCalls.push({ provider: options.provider, model: options.model });
+				yield { type: "text-delta", text: "{\"verdict\":\"safe\",\"findings\":[]}" };
+				yield { type: "finish", reason: { kind: "stop" } };
+			}
+		}
+	};
+	const customOut = await askLlm(r48LlmCtx, { system: "s", user: "u", settings: { ...SETTING_DEFAULTS, aiModel: { provider: "my-p", model: "my-m" } } });
+	eq("R48: askLlm 用自选模型并回报来源", [seenCalls[0].provider, seenCalls[0].model, customOut.modelSource], ["my-p", "my-m", "custom"]);
+	const defaultOut = await askLlm(r48LlmCtx, { system: "s", user: "u", settings: SETTING_DEFAULTS });
+	eq("R48: 没自选时 askLlm 跟随 DSH 默认", [seenCalls[1].provider, seenCalls[1].model, defaultOut.modelSource], ["def-p", "def-m", "default"]);
+	const noModel = await askLlm({ llm: { stream: async function* () {} } }, { system: "s", user: "u", settings: SETTING_DEFAULTS }).then(() => null, (e) => e.message);
+	ok("R48: 没有默认也没有自选 → 明确报错（不静默猜一个模型）", /没有设置默认模型/.test(String(noModel)) && /自选模型/.test(String(noModel)), noModel);
+
+	/* 审查：把「此刻的设置」传进去，结果里记录模型与来源；选错模型失败时也要写清是哪一个 */
+	const worthJob = {
+		id: "r48",
+		title: "x",
+		precheck: {
+			risks: { hits: [{ kind: "child-process", severity: "high", file: "a.js", line: 1, excerpt: "spawn" }], scripts: [{ name: "postinstall", command: "node x" }], combos: [] },
+			purpose: null,
+			needsAiReview: true
+		},
+		detected: { name: "x", kind: "bundle", version: "1.0.0", hasClient: false }
+	};
+	const reviewer = createReviewer({ ctx: r48LlmCtx });
+	const reviewed = await reviewer(worthJob, { ...SETTING_DEFAULTS, aiModel: { provider: "my-p", model: "my-m" } });
+	eq("R48: 审查结果记录自选模型与来源", [reviewed.status, reviewed.model, reviewed.modelSource], ["done", "my-p/my-m", "custom"]);
+	const reviewedDefault = await reviewer(worthJob, SETTING_DEFAULTS);
+	eq("R48: 没自选时审查跟随默认", [reviewedDefault.model, reviewedDefault.modelSource], ["def-p/def-m", "default"]);
+	const failedReview = await createReviewer({ ctx: { llm: { stream: async function* () { throw new Error("unknown provider gone"); } }, agentDefaultModel: { currentSelection: () => null } } })(worthJob, { ...SETTING_DEFAULTS, aiModel: { provider: "gone", model: "gone-m" } });
+	eq("R48: 自选模型调用失败时也写清「本来是哪个」", [failedReview.status, failedReview.model, failedReview.modelSource], ["failed", "gone/gone-m", "custom"]);
+
+	/* 模型目录：一个 provider 抛错只标它自己；一个都不出也不编 */
+	const catalog = await listLlmModels({
+		llm: {
+			stream: async function* () {},
+			listProviders: () => [{ id: "good", name: "Good" }, { id: "bad", name: "Bad" }, { id: "none", name: "None" }],
+			listModels: async (provider) => {
+				if (provider === "bad") throw new Error("401 密钥无效");
+				if (provider === "none") return [];
+				return [{ id: "m1", name: "M1" }, { provider: "good", id: "m2", name: "M2" }];
+			}
+		}
+	}, { timeoutMs: 200 });
+	eq("R48: 目录汇总 2 个模型 / 3 个 provider", [catalog.ok, catalog.count, catalog.providers.length], [true, 2, 3]);
+	eq("R48: 坏的 provider 只标它自己（不拖垮整张表）", catalog.providers.find((p) => p.id === "bad").ok, false);
+	ok("R48: 错误原因如实带回", /401/.test(catalog.providers.find((p) => p.id === "bad").error), catalog.providers.find((p) => p.id === "bad"));
+	eq("R48: 空列表就是 0，不是报错", catalog.providers.find((p) => p.id === "none").models.length, 0);
+	ok("R48: 目录摘要能读", /模型 2 个/.test(describeModelCatalog(catalog)), describeModelCatalog(catalog));
+	const hungCatalog = await listLlmModels({
+		llm: {
+			stream: async function* () {},
+			listProviders: () => [{ id: "hang", name: "Hang" }],
+			listModels: () => new Promise(() => {})
+		}
+	}, { timeoutMs: 60 });
+	ok("R48: 卡死的 provider 被硬超时掐掉（不拖住面板）", hungCatalog.providers[0].ok === false && /超时/.test(hungCatalog.providers[0].error), hungCatalog.providers[0]);
+
+	/* 首次引导：文件不存在 = 没看过；记一次之后 firstRun=false，且落盘可读回 */
+	const onboardDir = dir("onboarding");
+	await mkdir(onboardDir, { recursive: true });
+	const onboardInstaller = new Installer({ ctx: {}, options: {} });
+	onboardInstaller.root = onboardDir;
+	onboardInstaller.onboardingPath = join(onboardDir, "onboarding.json");
+	onboardInstaller.onboarding = { modelGuideSeenAt: null };
+	onboardInstaller.log = async () => {};
+	eq("R48: 没记过 = firstRun（第一次打开会看到引导）", onboardInstaller.onboardingView().firstRun, true);
+	const onboardMarked = await onboardInstaller.markOnboarding({ modelGuideSeen: true });
+	eq("R48: 记过之后 firstRun=false", onboardMarked.firstRun, false);
+	const onboardRaw = JSON.parse(await readFile(join(onboardDir, "onboarding.json"), "utf8"));
+	ok("R48: 引导状态写进 data/onboarding.json（重启后不再打扰）", typeof onboardRaw.modelGuideSeenAt === "string" && onboardRaw.modelGuideSeenAt.length > 10, onboardRaw);
 
 	/* 审核三档：低危扫描是「普通不拦、严格拦」的分界样本 */
 	const lowScan = {

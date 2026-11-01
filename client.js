@@ -23,7 +23,7 @@ window.__ModuleLoader__.load({
 		/* 客户端 build 号（R5.1）：改 client.js 就提一位。
 		   client 会热重载、但没人保证「当前页面跑的是哪一版」—— 这个号随 client-state
 		   一起上报，宿主 /health 的 clientReport.build 就是答案（宿主侧另有 mtime 标签）。 */
-		const BUILD = "r46.0";
+		const BUILD = "r48.0";
 
 		/* ── 迷你 store（模块级，面板关着时图标也在用）──────────────────── */
 
@@ -31,7 +31,7 @@ window.__ModuleLoader__.load({
 			data: null,
 			loading: true,
 			error: null,
-			local: { toast: null, busy: false, ai: null, aiBusy: false, open: false }
+			local: { toast: null, busy: false, ai: null, aiBusy: false, open: false, guideClosed: false, focusAiModel: false }
 		};
 		const listeners = new Set();
 		function emit() {
@@ -493,6 +493,8 @@ window.__ModuleLoader__.load({
 			/* R41/R44/R46：AI 推荐 —— 预设 1/3/5（默认 3）+ 自定义 6~25 / 标准广度 */
 			aiPicks: 3,
 			aiBreadth: "standard",
+			/* R48：AI 模型 —— null = 跟随 DSH 默认模型 */
+			aiModel: null,
 			sources: { npm: true, github: true, hub: true },
 			/* R45：自定义来源；网页解析默认关闭（用户指定） */
 			customSources: [],
@@ -2062,7 +2064,7 @@ window.__ModuleLoader__.load({
 				   而它说的正是「哪些链接不处理」，属于应该在的地方。 */
 				h("div", { className: "dpi-composer-note" },
 					h(Glyph, { name: "info", size: 13 }),
-					h("span", null, "网盘链接不自动下载（自己下好再拖进来）；只给名字会先搜候选。MCP 服务器也走这里：搜到会标 MCP，安装 = 往 profile 组合文件写一条配置（重启后生效）。全程只有确定性的下载 / 解包 / 预检 / 安装 —— 唯一会花 token 的是下面的 AI 推荐。")),
+					h("span", null, "网盘链接不自动下载（自己下好再拖进来）；只给名字会先搜候选。MCP 服务器也走这里：搜到会标 MCP，安装 = 往 profile 组合文件写一条配置（重启后生效）。全程只有确定性的下载 / 解包 / 预检 / 安装 —— 会花 token 的只有 AI 推荐、安装后的语义审查、以及下面这个输入框；用哪个模型见「设置 → AI 模型」。")),
 				dragging ? h("div", { className: "dpi-drop-veil" }, "松手：我会把它交给宿主解包识别") : null
 			);
 		}
@@ -3306,6 +3308,242 @@ window.__ModuleLoader__.load({
 						h("span", { className: "dpi-muted" }, "条（6–25）"))));
 		}
 
+		/* ── R48：AI 模型（自选 / 跟随 DSH 默认）────────────────────────
+		 * 用户诉求：设置里能自己选模型；不选就用 DSH 的默认模型；第一次装完打开面板
+		 * 要引导萌新去改，并说清「这个模型到底用在哪」。
+		 *
+		 * 三条口径（与宿主完全一致，别在别处再写一套）：
+		 *   · 宿主 `settings.aiModel = null` → 跟随 `agentDefaultModel.currentSelection()`
+		 *   · 面板只拉一次 `/models`（宿主 5 分钟缓存；可能走网络，所以每个 provider 5s 硬超时）
+		 *   · 选中的模型**每次调用现取**，改完下一次审查/推荐就用新的，不用重启
+		 */
+		function modelText(model) {
+			return model && model.provider && model.model ? model.provider + " / " + model.model : "";
+		}
+
+		function useModelCatalog(enabled) {
+			const [catalog, setCatalog] = useState(null);
+			const [loading, setLoading] = useState(false);
+			const [error, setError] = useState(null);
+			const load = useCallback((refresh) => {
+				setLoading(true);
+				setError(null);
+				api("/models" + (refresh ? "?refresh=1" : ""))
+					.then((r) => {
+						setCatalog(r || null);
+						if (!r || r.ok === false) setError((r && r.error) || "读不到模型列表");
+					})
+					.catch((e) => setError("读模型列表失败：" + String((e && e.message) || e)))
+					.then(() => setLoading(false));
+			}, []);
+			useEffect(() => {
+				if (enabled) load(false);
+			}, [enabled]);
+			return { catalog, loading, error, reload: () => load(true) };
+		}
+
+		/* 自绘模型列表（不用原生 <select>：它的弹出层是系统画的，CSS 改不动 —— 坑 108）。 */
+		function ModelPicker(props) {
+			const { catalog, loading, error, current, defaultModel, onPick, onRefresh } = props;
+			const [query, setQuery] = useState("");
+			const [manualOpen, setManualOpen] = useState(false);
+			const [mProvider, setMProvider] = useState((current && current.provider) || "");
+			const [mModel, setMModel] = useState((current && current.model) || "");
+			const models = catalog && Array.isArray(catalog.models) ? catalog.models : [];
+			const q = query.trim().toLowerCase();
+			const filtered = q
+				? models.filter((m) => ((m.provider || "") + " " + (m.providerName || "") + " " + (m.id || "") + " " + (m.name || "")).toLowerCase().includes(q))
+				: models;
+			const groups = [];
+			const index = new Map();
+			for (const m of filtered) {
+				if (!index.has(m.provider)) {
+					index.set(m.provider, { id: m.provider, name: m.providerName || m.provider, models: [] });
+					groups.push(index.get(m.provider));
+				}
+				index.get(m.provider).models.push(m);
+			}
+			const isCurrent = (m) => Boolean(current && current.provider === m.provider && current.model === m.id);
+			const isDefault = (m) => Boolean(defaultModel && defaultModel.provider === m.provider && defaultModel.model === m.id);
+			const badProviders = catalog && Array.isArray(catalog.providers) ? catalog.providers.filter((p) => !p.ok) : [];
+			const noCatalog = !loading && (!catalog || models.length === 0);
+			const showManual = manualOpen || noCatalog;
+			const manualReady = mProvider.trim() && mModel.trim();
+			return h(
+				"div",
+				{ className: "dpi-models" },
+				h("div", { className: "dpi-models-bar" },
+					h("input", {
+						className: "dpi-input dpi-input-line",
+						placeholder: "搜索模型（名字 / provider / id）",
+						value: query,
+						"aria-label": "搜索模型",
+						onChange: (e) => setQuery(e.target.value)
+					}),
+					h("button", { className: "dpi-btn dpi-btn-ghost dpi-btn-sm", disabled: loading, onClick: onRefresh }, loading ? "读取中…" : "刷新列表")),
+				loading ? h("div", { className: "dpi-muted dpi-models-note" }, "正在读取模型列表…（每个 provider 最多等 5 秒）") : null,
+				error && models.length === 0 ? h("div", { className: "dpi-muted dpi-models-note" }, error) : null,
+				groups.length > 0
+					? h("div", { className: "dpi-models-list" }, groups.map((group) =>
+						h("div", { key: "g" + group.id, className: "dpi-models-group" },
+							h("div", { className: "dpi-muted dpi-models-provider" }, group.name + (group.id !== group.name ? " · " + group.id : "")),
+							group.models.map((m) =>
+								h("button", {
+									key: group.id + "::" + m.id,
+									className: "dpi-model-row" + (isCurrent(m) ? " is-on" : ""),
+									onClick: () => onPick({ provider: m.provider, model: m.id })
+								},
+									h("span", { className: "dpi-model-name" }, m.name || m.id),
+									m.name && m.name !== m.id ? h("span", { className: "dpi-muted dpi-model-id" }, m.id) : null,
+									isDefault(m) ? h("span", { className: "dpi-tag" }, "DSH 默认") : null,
+									isCurrent(m) ? h("span", { className: "dpi-tag dpi-tag-ok" }, "当前") : null))))) 
+					: null,
+				badProviders.length > 0
+					? h("div", { className: "dpi-muted dpi-models-note" },
+						"读不到模型的 provider：" + badProviders.map((p) => p.id + "（" + (p.error || "未知原因") + "）").join("、"))
+					: null,
+				h("div", { className: "dpi-models-manual" },
+					h("button", { className: "dpi-btn dpi-btn-ghost dpi-btn-sm", onClick: () => setManualOpen(!manualOpen) }, manualOpen ? "收起手动填写" : "手动填写 provider / model"),
+					showManual
+						? h("div", { className: "dpi-models-manual-row" },
+							h("input", {
+								className: "dpi-input dpi-input-line",
+								placeholder: "provider（例如 deepseek-account）",
+								value: mProvider,
+								"aria-label": "provider",
+								onChange: (e) => setMProvider(e.target.value)
+							}),
+							h("input", {
+								className: "dpi-input dpi-input-line",
+								placeholder: "model（例如 deepseek-flash）",
+								value: mModel,
+								"aria-label": "model",
+								onChange: (e) => setMModel(e.target.value)
+							}),
+							h("button", {
+								className: "dpi-btn dpi-btn-sm",
+								disabled: !manualReady,
+								onClick: () => onPick({ provider: mProvider.trim(), model: mModel.trim() })
+							}, "用这个"))
+						: null)
+			);
+		}
+
+		function AiModelSection() {
+			const st = currentSettings();
+			const data = store.data || {};
+			const ai = data.ai || {};
+			const configured = st.aiModel || null;
+			const [pickMode, setPickMode] = useState(Boolean(configured));
+			const { catalog, loading, error, reload } = useModelCatalog(pickMode);
+			const effective = ai.effective || null;
+			const source = ai.source || (configured ? "custom" : ai.default ? "default" : null);
+			const note = (v) => (v === "custom" ? "面板自选" : v === "default" ? "跟随 DSH 默认" : "没有可用模型");
+			const pick = (model) => {
+				saveSettings({ aiModel: { provider: model.provider, model: model.model || model.id } }).then((r) => {
+					if (r && r.ok !== false) toast("面板模型已切到 " + model.provider + " / " + (model.model || model.id));
+				});
+			};
+			return h(
+				"div",
+				{ className: "dpi-set-ai-model", "data-section": "ai-model" },
+				h("div", { className: "dpi-muted dpi-set-hint" },
+					"面板里所有模型调用都用这一个选择：安装后的 AI 语义审查、AI 推荐、AI 辅助添加来源、网页来源解析。",
+					"不选 = 跟随 DSH 设置里的默认模型（改默认模型后，下一次调用立刻跟着变）。"),
+				h("div", { className: "dpi-set-row dpi-set-row-col" },
+					h("div", { className: "dpi-set-label" },
+						h("div", null, "当前生效"),
+						h("div", { className: "dpi-muted dpi-set-hint" },
+							effective
+								? "现在用：" + modelText(effective) + "（" + note(source) + "）"
+								: "现在没有可用的模型 —— 先去 DSH「设置 → 模型」选一个默认模型，或在这里自选。")),
+					h("div", { className: "dpi-seg" },
+						h("button", {
+							className: "dpi-seg-btn" + (!pickMode ? " is-on" : ""),
+							onClick: () => {
+								setPickMode(false);
+								saveSettings({ aiModel: null }).then(() => toast("已改为跟随 DSH 默认模型"));
+							}
+						}, "跟随 DSH 默认"),
+						h("button", {
+							className: "dpi-seg-btn" + (pickMode ? " is-on" : ""),
+							onClick: () => setPickMode(true)
+						}, "自选模型"))),
+				pickMode
+					? h("div", null,
+						configured ? null : h("div", { className: "dpi-muted dpi-models-note" }, "还没有保存自选模型 —— 在下面点一个；不点就仍然跟随默认。"),
+						h(ModelPicker, {
+							catalog,
+							loading,
+							error,
+							current: configured,
+							defaultModel: ai.default || null,
+							onPick: pick,
+							onRefresh: reload
+						}))
+					: null,
+				h("div", { className: "dpi-muted dpi-models-warn" },
+					"审查材料（最多 1.2 万字符的代码片段 + 安装脚本 + manifest 声明）会发给所选模型对应的服务商。",
+					"免费中继 / 第三方转发会把 prompt 转出去 —— 不建议给「审查」用。")
+			);
+		}
+
+		/* 第一次打开面板的引导（只出现一次；看过就记在 data/onboarding.json）。
+		   用户原话：「引导萌新去改模型，并说清楚要用在什么地方」—— 所以每条用途都写明白，
+		   并且把「用默认 / 去选一个」做成两条明确的路。 */
+		function ModelGuide() {
+			const s = useStore();
+			const data = s.data || {};
+			const ai = data.ai || {};
+			const defaultModel = ai.default || null;
+			const effective = ai.effective || null;
+			const close = (openSettings) => {
+				setLocal({ guideClosed: true, ...(openSettings ? { settingsOpen: true, focusAiModel: true } : {}) });
+				api("/onboarding", { method: "POST", body: JSON.stringify({ modelGuideSeen: true }) })
+					.then((r) => {
+						if (r && r.state) setStore({ data: r.state });
+					})
+					.catch(() => {});
+			};
+			return h(
+				"div",
+				{ className: "dpi-overlay", role: "dialog", "aria-label": "AI 模型引导" },
+				h("div", { className: "dpi-guide" },
+					h("div", { className: "dpi-card-head" },
+						h("strong", null, "先花 30 秒：定一下「AI 审查」用哪个模型"),
+						h("span", { className: "dpi-muted" }, "第一次使用 · 只出现一次")),
+					h("div", { className: "dpi-guide-body" },
+						h("div", { className: "dpi-muted" }, "装插件本身不花 token —— 下载、解包、扫描、预检、安装、快照、诊断全是确定性代码。会调模型的只有下面这几处："),
+						h("ol", { className: "dpi-guide-list" },
+							h("li", null,
+								h("b", null, "安装后的「AI 语义审查」"),
+								h("span", { className: "dpi-detail" }, "异步、不阻塞安装。把被标记的代码片段 + 安装脚本 + manifest 声明交给模型判风险；判 malicious 会标红并建议一键回滚。")),
+							h("li", null,
+								h("b", null, "面板里的「AI 推荐」"),
+								h("span", { className: "dpi-detail" }, "你描述想要什么，它从确定性搜索到的候选里挑几条，并写清为什么推荐。")),
+							h("li", null,
+								h("b", null, "「AI 辅助添加来源」/ 网页来源解析"),
+								h("span", { className: "dpi-detail" }, "把一句网址或网页正文交给模型归类/提取；网页解析默认关闭，只有你打开才用。"))),
+						h("div", { className: "dpi-guide-now" },
+							effective
+								? "现在用：" + modelText(effective) + "（" + (ai.source === "custom" ? "面板自选" : "跟随 DSH 默认") + "）"
+								: "现在没有可用的模型：先去 DSH「设置 → 模型」选一个默认模型。"),
+						defaultModel
+							? h("div", { className: "dpi-muted" }, "DSH 默认模型：" + modelText(defaultModel) + "。不在这里选，就一直跟着它；你在 DSH 里换默认模型，下一次调用立刻跟着换。")
+							: null,
+						h("div", { className: "dpi-guide-hint" },
+							"建议选一个能稳定输出 JSON、看得懂代码的模型。",
+							"审查材料（最多 1.2 万字符的代码片段）会发给它 —— 别用来路不明的免费中继做安全审查。"),
+						h("div", { className: "dpi-muted" }, "之后可以在面板右上角「设置 → AI 模型」里随时改，也可以随时改回跟随默认。")),
+					h("div", { className: "dpi-actions" },
+						h("button", {
+							className: "dpi-btn dpi-btn-primary",
+							onClick: () => close(true)
+						}, "去选一个模型"),
+						h("button", { className: "dpi-btn", onClick: () => close(false) }, "先用默认（稍后再说）")))
+			);
+		}
+
 		/* R45：用户自定义搜索来源。
 		   免责声明是**产品要求**（用户原话）：面板只提供可选渠道，不为来源代码/可信度/功能背书。
 		   「AI 辅助添加」只出提案；必须用户点「确认添加」才写进设置 —— 不自动保存。 */
@@ -3429,6 +3667,17 @@ window.__ModuleLoader__.load({
 		function SettingsModal() {
 			const st = currentSettings();
 			const close = () => setLocal({ settingsOpen: false });
+			/* R48：从首次引导点「去选一个模型」进来时，直接滚到 AI 模型区（不是让萌新自己找） */
+			useEffect(() => {
+				if (!store.local.focusAiModel) return;
+				try {
+					const section = document.querySelector(".dpi-set-ai-model");
+					if (section && typeof section.scrollIntoView === "function") section.scrollIntoView({ block: "center" });
+				} catch (e) {
+					/* 滚动失败不影响设置本身 */
+				}
+				setLocal({ focusAiModel: false });
+			}, []);
 			const setSources = (key, next) => {
 				const sources = { ...st.sources, [key]: next };
 				if (!sources.npm && !sources.github && !sources.hub) {
@@ -3488,6 +3737,10 @@ window.__ModuleLoader__.load({
 								on: st.skipReview,
 								onChange: (v) => saveSettings({ skipReview: v })
 							})),
+
+						h("div", { className: "dpi-set-section" },
+							h("div", { className: "dpi-set-section-title" }, "AI 模型"),
+							h(AiModelSection)),
 
 						h("div", { className: "dpi-set-section" },
 							h("div", { className: "dpi-set-section-title" }, "AI 推荐"),
@@ -3725,6 +3978,10 @@ window.__ModuleLoader__.load({
 					s.local.toast ? h("span", { className: "dpi-toast" }, s.local.toast) : null),
 
 				s.local.settingsOpen ? h(SettingsModal) : null,
+
+				/* R48：第一次打开面板（装完插件后的第一次）—— 引导选模型，说清用在哪。
+				   关掉（无论哪条路）都会把「看过了」记到宿主，之后不再出现。 */
+				data.onboarding && data.onboarding.firstRun && !s.local.guideClosed ? h(ModelGuide) : null,
 
 				/* R36：三个低频清单 —— 点「清单」里的哪一项，才挂载哪一个浮窗。 */
 				listWindow === "plugins"
@@ -4095,6 +4352,40 @@ window.__ModuleLoader__.load({
 .dpi-picks-custom{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--dsw-alias-label-secondary)}
 .dpi-picks-custom .dpi-input-num{width:64px;padding:5px 6px;text-align:center;border:1px solid var(--dsw-alias-border-l1);
   border-radius:8px;background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary);font:inherit;font-size:12.5px}
+/* R48：AI 模型（自选 / 跟随 DSH 默认） */
+.dpi-set-ai-model{display:flex;flex-direction:column;gap:8px}
+.dpi-models{display:flex;flex-direction:column;gap:8px;border:1px solid var(--dsw-alias-border-l1);border-radius:10px;
+  padding:9px 10px;background:color-mix(in srgb,var(--dsw-alias-bg-layer-2) 70%,transparent)}
+.dpi-models-bar{display:flex;gap:8px;align-items:center}
+.dpi-models-bar .dpi-input{flex:1;min-width:0}
+.dpi-models-list{max-height:220px;overflow:auto;display:flex;flex-direction:column;gap:8px;padding:4px 2px;scrollbar-width:thin}
+.dpi-models-group{display:flex;flex-direction:column;gap:3px}
+.dpi-models-provider{font-size:11px;letter-spacing:.04em;opacity:.85}
+.dpi-model-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;width:100%;text-align:left;padding:5px 8px;
+  border-radius:7px;border:1px solid transparent;background:transparent;color:inherit;cursor:pointer;font:inherit;font-size:12.5px}
+.dpi-model-row:hover{background:var(--dsw-alias-bg-layer-2)}
+.dpi-model-row.is-on{border-color:var(--dsw-alias-brand-primary);
+  background:color-mix(in srgb,var(--dsw-alias-brand-primary) 9%,transparent)}
+.dpi-model-name{font-weight:500;min-width:0;word-break:break-word}
+.dpi-model-id{font-size:11px;word-break:break-all}
+.dpi-models-note{font-size:11.5px;line-height:1.5}
+.dpi-models-warn{font-size:11.5px;line-height:1.55;color:var(--dsw-alias-state-warn-primary,#c48b1d)}
+.dpi-models-manual{display:flex;flex-direction:column;gap:6px}
+.dpi-models-manual-row{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.dpi-models-manual-row .dpi-input{flex:1;min-width:140px}
+.dpi-tag-ok{border-color:var(--dsw-alias-state-success-primary);color:var(--dsw-alias-state-success-primary)}
+/* R48：首次打开面板的引导（只出现一次） */
+.dpi-guide{width:min(640px,100%);max-height:calc(100vh - 96px);overflow:auto;box-sizing:border-box;
+  background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);border-radius:14px;
+  border:1px solid var(--dpi-line);padding:16px 18px 18px;
+  box-shadow:0 24px 64px -28px rgba(0,0,0,.6),0 2px 8px rgba(0,0,0,.18)}
+.dpi-guide-body{display:flex;flex-direction:column;gap:8px;margin:8px 0 4px;font-size:12.5px;line-height:1.6}
+.dpi-guide-list{margin:2px 0 2px 18px;padding:0;display:flex;flex-direction:column;gap:7px}
+.dpi-guide-list li b{font-weight:600;margin-right:2px}
+.dpi-guide-list li .dpi-detail{display:block;margin-top:2px}
+.dpi-guide-now{padding:7px 10px;border-radius:8px;background:var(--dsw-alias-bg-layer-2);
+  border:1px solid var(--dsw-alias-border-l1);font-size:12.5px}
+.dpi-guide-hint{font-size:12px;line-height:1.6;color:var(--dsw-alias-state-warn-primary,#c48b1d)}
 /* R45：自定义搜索来源 */
 .dpi-src{margin-top:10px;border-top:1px dashed var(--dpi-line);padding-top:10px;display:flex;flex-direction:column;gap:6px}
 .dpi-src-note{font-size:11.5px;line-height:1.55}
@@ -4234,6 +4525,10 @@ window.__ModuleLoader__.load({
 			beep,
 			desktopNotify,
 			SettingsModal,
+			/* R48：AI 模型（设置区 / 自选列表 / 首次引导）—— 三段都要能被无头渲染到 */
+			AiModelSection,
+			ModelPicker,
+			ModelGuide,
 			SkipReviewButton,
 			/* R9：安装脚本待批准卡（无头渲染要摸得到，否则二次确认态没人验） */
 			BuildApprovalCard,

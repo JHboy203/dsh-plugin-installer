@@ -47,6 +47,8 @@ export const FROZEN_DEFAULTS = {
 	/* R41/R46：AI 推荐 —— 预设 1/3/5（默认 3）+ 自定义 6~25 / 标准广度 */
 	aiPicks: 3,
 	aiBreadth: "standard",
+	/* R48：AI 模型 —— null = 跟随 DSH 默认模型（默认档不许漂移） */
+	aiModel: null,
 	sources: { npm: true, github: true, hub: true },
 	/* R45：自定义来源默认空；网页解析默认关闭 */
 	customSources: [],
@@ -54,10 +56,10 @@ export const FROZEN_DEFAULTS = {
 };
 
 /** 文档里声明的自检项数（改断言就先跑一次 host_selfcheck，再同步这个数）。 */
-export const EXPECTED_ASSERTIONS = 1141;
+export const EXPECTED_ASSERTIONS = 1163;
 
 /** 界面自检项数（dev/render-check.cjs）。同样是「文档对表」的一半。 */
-const EXPECTED_RENDER_ASSERTIONS = 262;
+const EXPECTED_RENDER_ASSERTIONS = 275;
 
 /** 期望注册的宿主工具（漏一个 = 模型看不见一项能力）。R32 起 6 个（新增只读探针）。 */
 const EXPECTED_TOOLS = [
@@ -127,6 +129,34 @@ async function main() {
 			s.maxChars < w.maxChars && w.maxChars < m.maxChars;
 	})());
 	eq("R45：自定义来源默认空、网页解析默认关闭", [DEFAULTS.customSources.length, DEFAULTS.allowWebSources], [0, false]);
+	/* R48：面板自选模型 —— 默认必须是「跟随 DSH 默认」（null），且有白名单与兜底 */
+	eq("R48：默认 AI 模型 = 跟随 DSH 默认（null）", DEFAULTS.aiModel, null);
+	eq("R48：自选模型只留 {provider, model}，多余字段丢掉",
+		normalizeSettings({ aiModel: { provider: " p ", model: " m ", name: "x", evil: 1 } }).aiModel, { provider: "p", model: "m" });
+	eq("R48：自选模型写坏 / 缺一半 → 跟随默认（null）",
+		[normalizeSettings({ aiModel: { provider: "p" } }).aiModel, normalizeSettings({ aiModel: "p/m" }).aiModel, normalizeSettings({ aiModel: { provider: "", model: "m" } }).aiModel],
+		[null, null, null]);
+	ok("R48：摘要里能看出「跟随默认 / 自选」",
+		/模型 跟随 DSH 默认/.test(describeSettings(DEFAULTS)) &&
+		/模型 自选 deepseek-account\/deepseek-flash/.test(describeSettings({ ...DEFAULTS, aiModel: { provider: "deepseek-account", model: "deepseek-flash" } })),
+		describeSettings(DEFAULTS));
+	/* R48：三条接线 —— 模型目录 / 引导状态 / 首次引导（少一条就有一条新功能是死的） */
+	const indexSrcR48 = (await readText("index.js")) || "";
+	ok("R48：宿主有 /models 与 /onboarding 路由", /path === "\/models"/.test(indexSrcR48) && /path === "\/onboarding"/.test(indexSrcR48));
+	const pipelineSrcR48 = (await readText(join("lib", "pipeline.js"))) || "";
+	ok("R48：审查时把「此刻的设置」传进 reviewer（模型改了不用重启）",
+		/reviewer\(job, this\.settings\)/.test(pipelineSrcR48));
+	const modelsSrcR48 = (await readText(join("lib", "models.js"))) || "";
+	ok("R48：模型目录有硬超时，一个 provider 失败不拖垮整张表",
+		/withTimeout/.test(modelsSrcR48) && /listModels\(provider\.id\)/.test(modelsSrcR48) && /ok: false/.test(modelsSrcR48));
+	const clientSrcR48 = (await readText("client.js")) || "";
+	ok("R48：面板有 AI 模型设置 + 首次引导，且说清用途",
+		/AI 模型/.test(clientSrcR48) && /ModelGuide/.test(clientSrcR48) && /AI 语义审查/.test(clientSrcR48) && /api\("\/onboarding"/.test(clientSrcR48));
+	const aiSrcR48 = (await readText(join("lib", "ai.js"))) || "";
+	ok("R48：自选模型只有一处出口（resolveSelection），面板与流水线都走它",
+		/export function resolveSelection/.test(aiSrcR48) &&
+		/import \{ parseWebSource, resolveSelection \}/.test(pipelineSrcR48) &&
+		/resolveSelection\(this\.ctx, this\.settings\)/.test(pipelineSrcR48));
 	ok("R45：自定义来源坏条目被丢掉、合法的留下",
 		normalizeSettings({ customSources: [{ type: "npm", target: "https://registry.npmmirror.com" }, { type: "ftp", target: "ftp://x" }] }).customSources.length === 1);
 	/* R47：设置往返探针 —— 它改真设置，所以必须有 finally 恢复（否则换会话会看到 probe 来源） */

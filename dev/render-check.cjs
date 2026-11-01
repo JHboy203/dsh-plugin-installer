@@ -175,7 +175,7 @@ function textOf(node, acc) {
  * 正常不执行，所以**数源码不等于数断言**（实测 103 处、只跑 80 条）。真正的判据只能是
  * 「这次实际跑了几条」，所以由脚本自己报总数、并由自己比对。
  */
-const EXPECTED_TOTAL = 262;
+const EXPECTED_TOTAL = 275;
 
 let failed = 0;
 let passed = 0;
@@ -431,18 +431,36 @@ if (typeof t.SettingsModal === "function") {
 		check("R45 设置：有 AI 辅助添加 / 预设 / 网页解析开关（默认关）",
 			joinedSet.includes("AI 辅助添加") && joinedSet.includes("npmmirror") &&
 			joinedSet.includes("允许 AI 解析任意网页") && joinedSet.includes("默认关"));
+		/* R48：AI 模型 —— 默认必须写明「跟随 DSH 默认」，并说清材料会发给谁 */
+		check("R48 设置：有 AI 模型区（跟随默认 / 自选）",
+			joinedSet.includes("AI 模型") && joinedSet.includes("跟随 DSH 默认") && joinedSet.includes("自选模型"));
+		check("R48 设置：没配默认模型时如实说「没有可用模型」", joinedSet.includes("没有可用的模型"));
+		check("R48 设置：写明审查材料会发给所选服务商（不要把代码发给免费中继）",
+			joinedSet.includes("会发给所选模型对应的服务商") && joinedSet.includes("不建议给「审查」用"));
 	} catch (e) {
 		check("设置面板渲染不抛异常", false, String((e && e.message) || e));
 	}
 
-	/* 换成「声音开 + 审核严格 + 红点关」再渲染：选中态必须跟着设置走 */
-	t.store.data = { settings: { sound: true, reviewLevel: "strict", redDot: false } };
+	/* 换成「声音开 + 审核严格 + 红点关 + 自选模型」再渲染：选中态必须跟着设置走 */
+	t.store.data = {
+		settings: { sound: true, reviewLevel: "strict", redDot: false, aiModel: { provider: "deepseek-account", model: "deepseek-flash" } },
+		ai: {
+			configured: { provider: "deepseek-account", model: "deepseek-flash" },
+			default: { provider: "deepseek-account", model: "deepseek-flash" },
+			effective: { provider: "deepseek-account", model: "deepseek-flash" },
+			source: "custom"
+		}
+	};
 	resetHooks();
 	try {
 		const el2 = t.SettingsModal({});
+		const joined2 = textOf(el2).join(" | ");
 		const onSegs = findNodes(el2, (p) => typeof p.className === "string" && p.className.includes("dpi-seg-btn") && p.className.includes("is-on"));
 		const onText = onSegs.map((b) => textOf(b.children).join("")).join("|");
 		check("设置面板：严格档显示为选中", onText.includes("严格"), onText);
+		check("R48 设置：自选模型时显示「现在用 …（面板自选）」",
+			joined2.includes("现在用：deepseek-account / deepseek-flash（面板自选）"), joined2.slice(0, 400));
+		check("R48 设置：自选档显示为选中", onText.includes("自选模型"), onText);
 		const offSwitch = findNodes(el2, (p) => typeof p.className === "string" && p.className.includes("dpi-switch") && !p.className.includes("is-on") && p["aria-checked"] === "false");
 		check("设置面板：关掉的开关有未选中态", offSwitch.length >= 1, offSwitch.length);
 	} catch (e) {
@@ -451,6 +469,70 @@ if (typeof t.SettingsModal === "function") {
 	t.store.data = savedData;
 } else {
 	check("__test 暴露了 SettingsModal", false);
+}
+
+/* ── R48：首次打开面板的模型引导 / 自选列表 ───────────────────────── */
+if (typeof t.ModelGuide === "function") {
+	const savedData = t.store.data;
+	t.store.data = {
+		ai: {
+			configured: null,
+			default: { provider: "deepseek-account", model: "deepseek-flash" },
+			effective: { provider: "deepseek-account", model: "deepseek-flash" },
+			source: "default"
+		},
+		onboarding: { firstRun: true, modelGuideSeenAt: null }
+	};
+	resetHooks();
+	try {
+		const el = t.ModelGuide({});
+		const text = textOf(el).join(" | ");
+		check("R48 引导：标「第一次使用 / 只出现一次」", text.includes("第一次使用") && text.includes("只出现一次"));
+		check("R48 引导：三处用途都写出来",
+			text.includes("AI 语义审查") && text.includes("AI 推荐") && text.includes("AI 辅助添加来源"));
+		check("R48 引导：说清现在用哪个、跟随 DSH 默认",
+			text.includes("现在用：deepseek-account / deepseek-flash（跟随 DSH 默认）") && text.includes("DSH 默认模型"));
+		check("R48 引导：两条明确的路（去选 / 先用默认）",
+			text.includes("去选一个模型") && text.includes("先用默认（稍后再说）"));
+		check("R48 引导：写明材料会发给所选服务商、别用免费中继",
+			text.includes("会发给") && text.includes("免费中继"));
+	} catch (e) {
+		check("R48 引导渲染不抛异常", false, String((e && e.message) || e));
+	}
+	t.store.data = savedData;
+} else {
+	check("__test 暴露了 ModelGuide", false);
+}
+
+if (typeof t.ModelPicker === "function") {
+	resetHooks();
+	try {
+		const el = t.ModelPicker({
+			catalog: {
+				models: [
+					{ provider: "p", providerName: "P", id: "m1", name: "M1" },
+					{ provider: "p", providerName: "P", id: "m2", name: "M2" }
+				],
+				providers: [{ id: "p", name: "P", ok: true }, { id: "bad", name: "Bad", ok: false, error: "401 密钥无效" }]
+			},
+			loading: false,
+			error: null,
+			current: null,
+			defaultModel: { provider: "p", model: "m1" },
+			onPick: () => {},
+			onRefresh: () => {}
+		});
+		const text = textOf(el).join(" | ");
+		const rows = findNodes(el, (p) => typeof p.className === "string" && p.className.includes("dpi-model-row"));
+		check("R48 自选：模型列表逐条可点", rows.length === 2, rows.length);
+		check("R48 自选：默认模型有标记", text.includes("DSH 默认"));
+		check("R48 自选：读不到的 provider 如实列出（含原因）",
+			text.includes("读不到模型的 provider") && text.includes("401 密钥无效"));
+	} catch (e) {
+		check("R48 自选列表渲染不抛异常", false, String((e && e.message) || e));
+	}
+} else {
+	check("__test 暴露了 ModelPicker", false);
 }
 
 if (typeof t.SkipReviewButton === "function") {
