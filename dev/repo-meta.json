@@ -1,0 +1,4 @@
+{
+  "description": "DSH 侧栏「插件 / Skill 安装」：GitHub / Release / 压缩包 / 本地目录 → 下载·解包·预检·快照·安装·诊断·回滚；MCP 与 Skill 也可装；AI 模型可自选（默认跟随 DSH），首次打开有引导；支持自定义搜索来源；安装零 token。 | DSH sidebar installer for plugins, Skills and MCP: deterministic pipeline; pick the AI model (defaults to DSH) with a first-run guide; custom search sources; zero-token installs.",
+  "topics": ["deepseek-harness", "dsh", "dsh-plugin", "panel", "plugin-installer", "skill-installer", "windows", "ai-model", "first-run-guide"]
+}

@@ -1628,6 +1628,11 @@ async function main() {
 	eq("R48: 记过之后 firstRun=false", onboardMarked.firstRun, false);
 	const onboardRaw = JSON.parse(await readFile(join(onboardDir, "onboarding.json"), "utf8"));
 	ok("R48: 引导状态写进 data/onboarding.json（重启后不再打扰）", typeof onboardRaw.modelGuideSeenAt === "string" && onboardRaw.modelGuideSeenAt.length > 10, onboardRaw);
+	/* R48.1：面板「再看一次引导」= 把状态清回 null —— 不再需要手改 JSON */
+	const onboardReset = await onboardInstaller.markOnboarding({ modelGuideSeen: false });
+	eq("R48.1: 重置后 firstRun 又变成 true（可重看）", [onboardReset.firstRun, onboardReset.modelGuideSeenAt], [true, null]);
+	const onboardResetRaw = JSON.parse(await readFile(join(onboardDir, "onboarding.json"), "utf8"));
+	ok("R48.1: 重置落盘为 {modelGuideSeenAt:null}", onboardResetRaw.modelGuideSeenAt === null, onboardResetRaw);
 
 	/* 审核三档：低危扫描是「普通不拦、严格拦」的分界样本 */
 	const lowScan = {

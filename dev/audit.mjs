@@ -56,10 +56,10 @@ export const FROZEN_DEFAULTS = {
 };
 
 /** 文档里声明的自检项数（改断言就先跑一次 host_selfcheck，再同步这个数）。 */
-export const EXPECTED_ASSERTIONS = 1163;
+export const EXPECTED_ASSERTIONS = 1165;
 
 /** 界面自检项数（dev/render-check.cjs）。同样是「文档对表」的一半。 */
-const EXPECTED_RENDER_ASSERTIONS = 275;
+const EXPECTED_RENDER_ASSERTIONS = 276;
 
 /** 期望注册的宿主工具（漏一个 = 模型看不见一项能力）。R32 起 6 个（新增只读探针）。 */
 const EXPECTED_TOOLS = [
@@ -157,6 +157,28 @@ async function main() {
 		/export function resolveSelection/.test(aiSrcR48) &&
 		/import \{ parseWebSource, resolveSelection \}/.test(pipelineSrcR48) &&
 		/resolveSelection\(this\.ctx, this\.settings\)/.test(pipelineSrcR48));
+	/* R48.1：把这一轮的收尾也钉住 —— 引导可重看、发版一条命令（默认 dry-run） */
+	ok("R48.1：引导可以重看（modelGuideSeen:false 把状态清回 null）",
+		/patch\.modelGuideSeen === false/.test(pipelineSrcR48) && /next\.modelGuideSeenAt = null/.test(pipelineSrcR48));
+	ok("R48.1：面板有「再看一次引导」入口（发 false，不手改 onboarding.json）",
+		/再看一次引导/.test(clientSrcR48) && /modelGuideSeen: false/.test(clientSrcR48));
+	const releaseSrcR48 = (await readText(join("dev", "release.mjs"))) || "";
+	ok("R48.1：发版脚本存在，默认 dry-run，且用 --verify-tag（422 的真出路）",
+		/const APPLY = has\("--apply"\)/.test(releaseSrcR48) &&
+		/"--verify-tag"/.test(releaseSrcR48) &&
+		/releases\/latest/.test(releaseSrcR48) &&
+		!/git", \["push"/.test(releaseSrcR48));
+	let repoMeta = null;
+	try {
+		repoMeta = JSON.parse((await readText(join("dev", "repo-meta.json"))) || "null");
+	} catch {
+		repoMeta = null;
+	}
+	ok("R48.1：仓库介绍源文件存在（≤350 字符、topics 非空）",
+		Boolean(repoMeta) && typeof repoMeta.description === "string" &&
+		repoMeta.description.length > 0 && repoMeta.description.length <= 350 &&
+		Array.isArray(repoMeta.topics) && repoMeta.topics.length > 0,
+		repoMeta ? { chars: repoMeta.description && repoMeta.description.length, topics: repoMeta.topics && repoMeta.topics.length } : null);
 	ok("R45：自定义来源坏条目被丢掉、合法的留下",
 		normalizeSettings({ customSources: [{ type: "npm", target: "https://registry.npmmirror.com" }, { type: "ftp", target: "ftp://x" }] }).customSources.length === 1);
 	/* R47：设置往返探针 —— 它改真设置，所以必须有 finally 恢复（否则换会话会看到 probe 来源） */

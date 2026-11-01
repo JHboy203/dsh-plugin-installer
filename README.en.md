@@ -16,20 +16,22 @@
 > the plugin tree is read at startup, so **DSH must be restarted once after installing**.
 > To run a self-check on any page: `Ctrl+Alt+D` (rebindable or disable in Settings).
 
-> **Current version `0.18.0` (2026-11-01)** — new in this release:
+> **Current version `0.18.1` (2026-11-01)** — new in this release:
 > 1. **Pick the AI model yourself** (Settings → AI model): by default it **follows DSH's default model**; you can also
 >    pin a model for the panel only (post-install semantic review / AI recommendation / AI-assisted source add all share it).
 >    No restart needed — the next call uses the new model.
 > 2. **First-open guide**: the first time you open the panel after installing, a one-off "30 seconds to pick a model" card
 >    explains **exactly where the model is used**, who receives the material, and how to choose; you can change it later
 >    in Settings, or switch back to following the default.
-> 3. **Tunable AI recommendations**: **1 / 3 / 5** picks (default 3) or a **custom 6–25**; breadth = standard / wide / max
+> 3. **Replay the guide** (Settings → AI model → “Show the guide again”): clears the “seen” state and replays it immediately — no
+>    hand-editing `data/onboarding.json`.
+> 4. **Tunable AI recommendations**: **1 / 3 / 5** picks (default 3) or a **custom 6–25**; breadth = standard / wide / max
 >    (widening per-kind candidates, search pool and budget together).
-> 4. **Custom search sources** (Settings → Sources → Custom sources): npm registry mirrors, GitHub queries
+> 5. **Custom search sources** (Settings → Sources → Custom sources): npm registry mirrors, GitHub queries
 >    (`topic:` / `org:` / `repo:`), JSON indexes, and arbitrary web pages (model-parsed, **off by default**).
 >    No format to memorise: hit “AI-assisted add” → review the proposal → “Confirm”. Public `http(s)` only;
 >    localhost / private addresses are rejected.
-> 5. **No endorsement**: hits from custom sources are labelled “custom source · unverified”. The panel only provides
+> 6. **No endorsement**: hits from custom sources are labelled “custom source · unverified”. The panel only provides
 >    channels — judge the code, trustworthiness and functionality yourself. Install execution is still **zero-token**,
 >    and the pre-install static scan and precheck still run.
 

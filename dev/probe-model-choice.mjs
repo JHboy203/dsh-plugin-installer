@@ -143,6 +143,14 @@ ok("面板：引导只出现一次（有 firstRun 判据）", /onboarding\.first
 const pipelineSrc = await readFile(join(root, "lib", "pipeline.js"), "utf8");
 ok("接线：审查时传的是「此刻的设置」（改模型不用重启）", /reviewer\(job, this\.settings\)/.test(pipelineSrc));
 
+/* ⑦ R48.1 收尾：引导可以重看；发版脚本默认 dry-run（今天踩过的 422 出路都在里面） */
+ok("引导：可以复位重看（modelGuideSeen:false → null）",
+	/patch\.modelGuideSeen === false/.test(pipelineSrc) && /next\.modelGuideSeenAt = null/.test(pipelineSrc));
+ok("面板：有「再看一次引导」入口", /再看一次引导/.test(clientSrc) && /modelGuideSeen: false/.test(clientSrc));
+const releaseSrc = await readFile(join(root, "dev", "release.mjs"), "utf8");
+ok("发版：脚本默认 dry-run（--apply 才写），且先建 tag 再 --verify-tag",
+	/const APPLY = has\("--apply"\)/.test(releaseSrc) && /"--verify-tag"/.test(releaseSrc) && /releases\/latest/.test(releaseSrc));
+
 console.log("");
 console.log("SUMMARY " + passed + " passed, " + failed.length + " failed, " + (passed + failed.length) + " total");
 if (failed.length > 0) process.exitCode = 1;

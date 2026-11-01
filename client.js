@@ -23,7 +23,7 @@ window.__ModuleLoader__.load({
 		/* 客户端 build 号（R5.1）：改 client.js 就提一位。
 		   client 会热重载、但没人保证「当前页面跑的是哪一版」—— 这个号随 client-state
 		   一起上报，宿主 /health 的 clientReport.build 就是答案（宿主侧另有 mtime 标签）。 */
-		const BUILD = "r48.0";
+		const BUILD = "r49.0";
 
 		/* ── 迷你 store（模块级，面板关着时图标也在用）──────────────────── */
 
@@ -3482,6 +3482,20 @@ window.__ModuleLoader__.load({
 							onRefresh: reload
 						}))
 					: null,
+				h("div", { className: "dpi-model-replay" },
+					h("button", {
+						className: "dpi-btn dpi-btn-ghost dpi-btn-sm",
+						onClick: () => {
+							/* R48.1：复位「已看过」并立刻重播引导 —— 不再需要手改 data/onboarding.json */
+							api("/onboarding", { method: "POST", body: JSON.stringify({ modelGuideSeen: false }) })
+								.then((r) => {
+									if (r && r.state) setStore({ data: r.state });
+									setLocal({ guideClosed: false, settingsOpen: false, focusAiModel: false });
+								})
+								.catch((e) => toast("没能重置引导：" + String((e && e.message) || e)));
+						}
+					}, "再看一次引导"),
+					h("span", { className: "dpi-muted" }, "清掉「已看过」的状态，立刻重播上面的说明。")),
 				h("div", { className: "dpi-muted dpi-models-warn" },
 					"审查材料（最多 1.2 万字符的代码片段 + 安装脚本 + manifest 声明）会发给所选模型对应的服务商。",
 					"免费中继 / 第三方转发会把 prompt 转出去 —— 不建议给「审查」用。")
@@ -4370,6 +4384,9 @@ window.__ModuleLoader__.load({
 .dpi-model-id{font-size:11px;word-break:break-all}
 .dpi-models-note{font-size:11.5px;line-height:1.5}
 .dpi-models-warn{font-size:11.5px;line-height:1.55;color:var(--dsw-alias-state-warn-primary,#c48b1d)}
+/* R48.1：重播首次引导（清掉「已看过」） */
+.dpi-model-replay{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding-top:2px}
+.dpi-model-replay .dpi-muted{font-size:11.5px;line-height:1.5}
 .dpi-models-manual{display:flex;flex-direction:column;gap:6px}
 .dpi-models-manual-row{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
 .dpi-models-manual-row .dpi-input{flex:1;min-width:140px}

@@ -175,7 +175,7 @@ function textOf(node, acc) {
  * 正常不执行，所以**数源码不等于数断言**（实测 103 处、只跑 80 条）。真正的判据只能是
  * 「这次实际跑了几条」，所以由脚本自己报总数、并由自己比对。
  */
-const EXPECTED_TOTAL = 275;
+const EXPECTED_TOTAL = 276;
 
 let failed = 0;
 let passed = 0;
@@ -435,6 +435,8 @@ if (typeof t.SettingsModal === "function") {
 		check("R48 设置：有 AI 模型区（跟随默认 / 自选）",
 			joinedSet.includes("AI 模型") && joinedSet.includes("跟随 DSH 默认") && joinedSet.includes("自选模型"));
 		check("R48 设置：没配默认模型时如实说「没有可用模型」", joinedSet.includes("没有可用的模型"));
+		check("R48.1 设置：可以「再看一次引导」（不用手改 onboarding.json）",
+			joinedSet.includes("再看一次引导") && joinedSet.includes("清掉「已看过」的状态"));
 		check("R48 设置：写明审查材料会发给所选服务商（不要把代码发给免费中继）",
 			joinedSet.includes("会发给所选模型对应的服务商") && joinedSet.includes("不建议给「审查」用"));
 	} catch (e) {
