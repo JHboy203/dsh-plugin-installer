@@ -98,6 +98,14 @@ const pushed = (() => {
 	}
 })();
 const tagExists = ghExists(["api", "repos/" + repo + "/git/refs/tags/" + tag]);
+let tagSha = null;
+if (tagExists) {
+	try {
+		tagSha = ghText(["api", "repos/" + repo + "/git/refs/tags/" + tag, "--jq", ".object.sha"]).trim();
+	} catch {
+		tagSha = null;
+	}
+}
 let latest = null;
 try {
 	latest = ghText(["api", "repos/" + repo + "/releases/latest", "--jq", ".tag_name"]).trim() || null;
@@ -131,7 +139,7 @@ console.log("  version    " + version + "  (tag " + tag + ")");
 console.log("  head       " + headShort + "  branch " + (branch || "(detached)"));
 console.log("  worktree   " + (dirty.length === 0 ? "clean" : "DIRTY (" + dirty.length + " files)"));
 console.log("  pushed     " + (pushed ? "yes" : "NO"));
-console.log("  tag        " + (tagExists ? "already exists (will not overwrite)" : "absent (will create at head)"));
+console.log("  tag        " + (tagExists ? "already exists at " + String(tagSha || "?").slice(0, 7) + (tagSha === head ? " (= head, will reuse)" : " (NOT head — will not overwrite)") : "absent (will create at head)"));
 console.log("  release    " + (releaseExists ? "already exists (will not overwrite)" : "absent"));
 console.log("  latest     " + (latest || "(none)"));
 console.log("  notes      " + notesPath + "  (" + (notesOk ? notesBytes + " bytes" : "MISSING") + ")");
@@ -141,6 +149,7 @@ console.log("  mode       " + (APPLY ? "APPLY" : "dry-run (add --apply to write)
 
 const problems = [];
 if (dirty.length > 0 && !ALLOW_DIRTY) problems.push("worktree is dirty (commit first, or --allow-dirty)");
+if (tagExists && tagSha && tagSha !== head) problems.push("tag " + tag + " already exists at " + tagSha.slice(0, 7) + ", not at head " + headShort);
 if (!pushed) problems.push("HEAD is not on the remote (git push first)");
 if (releaseExists) problems.push("release " + tag + " already exists");
 if (!notesOk) problems.push("release notes file is missing/empty: " + notesPath);
