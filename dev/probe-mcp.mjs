@@ -134,6 +134,19 @@ const baseText = "# header\n- id: mcp-old\n  name: '@deepseek-ai/dsh-mcp-client'
 const appended = appendMcpEntryText(baseText, { id: "mcp-new", serverName: "new", transport: "streamable-http", url: "https://new/mcp" });
 ok("追加：保留原条目", appended.ok && appended.text.includes("mcp-old") && appended.text.includes("mcp-new"), appended.text);
 
+/* ⑤b 新行必须落在 `- insert:` 里（顶层 `- id:` 匹配不到行 → loader 跳过 → 工具永远不出现） */
+const insAppended = appendMcpEntryText("# header\n", { id: "mcp-z", serverName: "z", transport: "stdio", command: "node" });
+ok("追加：包在根级 - insert: 里", /^- insert:\s*$/m.test(insAppended.text) && /^ {4}- id: mcp-z$/m.test(insAppended.text), insAppended.text);
+ok("追加：顶层不再出现裸 - id:", !/^- id: /m.test(insAppended.text), insAppended.text);
+const insParsed = parseCompositionEntries(insAppended.text, { file: "cordis.patch.yml" });
+ok("解析：能读回 insert 里的条目", insParsed.length === 1 && insParsed[0].id === "mcp-z" && insParsed[0].config.command === "node", insParsed.length);
+ok("解析：insert 里的行号仍指向真实行", insParsed[0].line === 6 && insAppended.text.split("\n")[5].includes("mcp-z"), { line: insParsed[0].line });
+const mixed = parseCompositionEntries(
+	"# h\n- id: mcp-top\n  name: '@deepseek-ai/dsh-mcp-client'\n  config:\n    serverName: top\n    transport: stdio\n    command: node\n" +
+	"- insert:\n    - id: mcp-in\n      name: '@deepseek-ai/dsh-mcp-client'\n      config:\n        serverName: in\n        transport: stdio\n        command: node\n        args:\n          - '-y'\n"
+);
+ok("解析：旧顶层行 + 新 insert 行共存", mixed.length === 2 && mixed[0].id === "mcp-top" && mixed[1].id === "mcp-in" && JSON.stringify(mixed[1].config.args) === JSON.stringify(["-y"]), mixed.map((m) => m.id));
+
 /* ⑥ 真写一份 profile（临时目录） */
 const root = await mkdtemp(join(tmpdir(), "dpi-mcp-"));
 try {
