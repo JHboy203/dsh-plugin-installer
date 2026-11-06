@@ -1,4 +1,4 @@
-# 交给 AI：安装 dsh-plugin-installer v0.19.0
+# 交给 AI：安装 dsh-plugin-installer v0.19.1
 
 > 这份文件是写给**AI 助手**看的（也可以直接把这个文件的内容贴进对话）。
 > 人类用户请关掉它，去看同目录的 `02 使用手册（先看这个）.docx`。
@@ -9,7 +9,7 @@
 纯 Node/ESM 的宿主插件 + 一个 Web 客户端 bundle（侧栏入口，文案「插件安装」）。
 它自己不需要 Python、ffmpeg、Node 之外的任何东西；Node 由 DSH 自带。
 
-- 包名 / 版本：`dsh-plugin-installer` / `0.19.0`
+- 包名 / 版本：`dsh-plugin-installer` / `0.19.1`
 - 版本区间要求：`engines.dsh` = `>=0.2.1-rc.1 <0.3.0`（DSH 0.2.1 及以上、0.3.0 以下）
 - 安装包内容：`install.ps1`（安装器）、`payload/`（插件运行期文件）、`uninstall.ps1`、`install.cmd`、`INSTALL-README.txt`
 - 同目录另有：`*.tgz`（npm 风格包，`package/` 前缀）
