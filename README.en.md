@@ -16,6 +16,21 @@
 > the plugin tree is read at startup, so **DSH must be restarted once after installing**.
 > To run a self-check on any page: `Ctrl+Alt+D` (rebindable or disable in Settings).
 
+> **Current version `0.19.0` (2026-11-06)** — four pieces of feedback turned into code:
+> 1. **Complete snapshots; rollback stops eating your edits.** `pnpm-workspace.yaml` is snapshotted too
+>    (the trust-policy exemption is written there), a **post-install** copy is taken, and rollback does a
+>    **pre / post / now three-way comparison**: a `cordis.patch.yml` you edited *after* installing is
+>    **not overwritten** (the live copy is saved under `conflicts/` and reported), and config files the
+>    install itself created are removed so "rollback" really rolls back.
+> 2. **"Don't overwrite local edits" now ships with a patch export.** Before overwriting a modified Skill,
+>    the diff against upstream is written to `<data>/patches/<name>-<timestamp>.diff`, so you can take the
+>    upstream update *and* replay your own work.
+> 3. **Step ten: restart DSH.** Whether a restart is needed is decided by *which layer changed*
+>    (plugin / version change / MCP → restart; Skill → no restart), not by a single host receipt field.
+> 4. **Cross-spelling de-duplication.** `github:o/r`, `https://github.com/o/r`, a trailing slash, `.git`
+>    and letter case normalise to one key; a second active job for the same package is refused.
+>    Self-checks: hosttest **1206** / audit **225** / render-check **276**, 0 failures.
+>
 > **Current version `0.18.1` (2026-11-01)** — new in this release:
 > 1. **Pick the AI model yourself** (Settings → AI model): by default it **follows DSH's default model**; you can also
 >    pin a model for the panel only (post-install semantic review / AI recommendation / AI-assisted source add all share it).

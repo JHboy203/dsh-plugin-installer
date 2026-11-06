@@ -56,7 +56,7 @@ export const FROZEN_DEFAULTS = {
 };
 
 /** 文档里声明的自检项数（改断言就先跑一次 host_selfcheck，再同步这个数）。 */
-export const EXPECTED_ASSERTIONS = 1165;
+export const EXPECTED_ASSERTIONS = 1206;
 
 /** 界面自检项数（dev/render-check.cjs）。同样是「文档对表」的一半。 */
 const EXPECTED_RENDER_ASSERTIONS = 276;
@@ -622,6 +622,26 @@ async function main() {
 	eq("R33：Python 规则产出的每个 kind 都有中文标签", pyKinds.filter((kind) => !RISK_KIND_LABELS[kind]), []);
 	ok("R33：新增的 db-connect 在「数据」档里算本来就该有（否则「连数据库」会被判越界）",
 		(PURPOSES.data.expected || []).includes("db-connect"));
+
+	/* ⑦c R49（B 站评论四条 + 图 4 那一问）——判据全在「回滚会不会吃掉用户的手改」这一侧，
+	   静态检查钉的是「接线还在不在」：改了函数却忘了从流水线调用，行为自检也可能看不出来。 */
+	const r49SnapSrc = String(await readText(join("lib", "snapshot.js")));
+	const r49PipeSrc = String(await readText(join("lib", "pipeline.js")));
+	const r49InstallSrc = String(await readText(join("lib", "install.js")));
+	const r49UrlsSrc = String(await readText(join("lib", "urls.js")));
+	ok("R49：快照把 pnpm-workspace.yaml 一起拍（R31 的 trustPolicyExclude 写在这里）",
+		/const PROFILE_FILES = \[[^\]]*"pnpm-workspace\.yaml"/.test(r49SnapSrc));
+	ok("R49：回滚是三方比对（pre / post / now）+ 冲突另存，而不是「不一样就覆盖」",
+		/export function classifyProfileDrift/.test(r49SnapSrc) && /after-profile/.test(r49SnapSrc) && /conflicts/.test(r49SnapSrc));
+	ok("R49：装完之后会拍 post（且幂等，重复诊断不覆盖证据）",
+		/captureProfileAfter/.test(r49PipeSrc) && /afterCaptured/.test(r49PipeSrc));
+	ok("R49：覆盖本地改过的技能前先导出 patch",
+		/writeSkillPatch/.test(r49InstallSrc) && /patchDir/.test(r49InstallSrc));
+	ok("R49：第十步按「改动落在哪一层」判，不只看宿主回执",
+		/export function restartPlan/.test(r49InstallSrc) && /code: "restart-step"/.test(r49InstallSrc));
+	ok("R49：队列去重用归一后的来源键（github: 与 github.com 网址同键）",
+		/dedupeKeyOf\(/.test(r49PipeSrc) && /export function dedupeKeyOf/.test(r49UrlsSrc));
+	ok("R49：同名同类只允许一条任务在飞（防「重复插两次」）", /findActiveDuplicate/.test(r49PipeSrc));
 
 	/* ⑧ 文档与断言数对表（提示级：改了测试忘了改文档是常态） */
 	for (const doc of ["README.md", join("..", "★交接文件·插件安装面板.md")]) {

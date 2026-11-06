@@ -17,7 +17,7 @@ import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 
 import { satisfiesVersion, versionGap } from "../lib/semver.js";
-import { classifyInput } from "../lib/urls.js";
+import { classifyInput, dedupeKeyOf } from "../lib/urls.js";
 import { DEFAULT_LIMITS, extractToDir, findBsdtar, sniffFormat } from "../lib/formats.js";
 import { detectKind, repoRelativePath } from "../lib/detect.js";
 import { parseSkillFrontmatter, yamlFrontmatterIssue } from "../lib/detect.js";
@@ -26,7 +26,9 @@ import { buildSkillView, planSkillFix, planSkillPark, readSkillsOnDisk, rewriteS
 import { buildSkillLedgerEntry, checkSkillUpdates, hashSkillDir, planSkillReinstall, readSkillLedger, recordSkillSource } from "../lib/skillledger.js";
 import { scanTree, redact, detectPromptInjection } from "../lib/scan.js";
 import { precheck, describeCompatVersions as mCompatLine } from "../lib/precheck.js";
-import { backupVendorTarball, createSnapshot, fileSpecPath, restoreProfileFiles, backupSkillInSnapshot, readSnapshotMeta, restoreSkill, restoreVendorTarball } from "../lib/snapshot.js";
+import { backupVendorTarball, captureProfileAfter, classifyProfileDrift, createSnapshot, fileSpecPath, restoreProfileFiles, backupSkillInSnapshot, readSnapshotMeta, restoreSkill, restoreVendorTarball, summarizeDrift } from "../lib/snapshot.js";
+/* R49：本地改动导出（覆盖前把「你的改动 vs 上游」做成 patch） */
+import { diffSkillDirs, writeSkillPatch } from "../lib/skillpatch.js";
 import { buildReviewInput } from "../lib/ai.js";
 import { estimateReviewTokens, reviewWorthIt } from "../lib/ai.js";
 /* R40：AI 候选的三类投影与「按类保底打包」都是纯函数 —— 这一层不联网、不花 token。 */
@@ -83,7 +85,7 @@ import { checkDshToolsShadow, quarantineDshTools, removeDanglingLink } from "../
 import { fileDepsOf, findDanglingFileDeps, inspectEnvironment } from "../lib/repair.js";
 import { scanToolContract, describeContractScan } from "../lib/contract.js";
 import { inspectProfile, repairProfile } from "../lib/profilehealth.js";
-import { diagnose, installPlugin } from "../lib/install.js";
+import { diagnose, installPlugin, restartPlan } from "../lib/install.js";
 import { injectFixLine, scanInject, servicesFromHostError } from "../lib/inject.js";
 import { activationFindings, scanActivation, summarizeActivation } from "../lib/activation.js";
 import {
@@ -1152,6 +1154,111 @@ async function main() {
 		rollbackPlan({ bundleName: "x", upgrade: false, previousVersion: null, previousSpec: "^0.5.0" }).mode, "restore-only");
 	eq("rollbackPlan: 本地包没有旧包也没有旧版本 → 只还原声明（别把新版又装一遍）",
 		rollbackPlan({ bundleName: "x", upgrade: false, previousVersion: null, previousSpec: "file:C:/tmp/x.tgz" }).mode, "restore-only");
+
+	/* ═══ R49（B 站评论四条反馈）══════════════════════════════════════════
+	   ① 快照要连宿主登记配置一起拍、② 同来源要有去重键、
+	   ③「改过不覆盖」要配 patch 导出、④ 第十步：装完提示重启。
+	   外加图 4 的问题：装之前手改过 cordis.patch.yml，回滚会不会一起吃掉。 */
+
+	/* ① 漂移判据：六种形态都要钉住（纯函数） */
+	eq("drift: 两边都没有 → 不动", classifyProfileDrift({ pre: null, post: null, now: null }).action, "unchanged");
+	eq("drift: 现在与装前一致 → 不动", classifyProfileDrift({ pre: "a", post: "b", now: "a" }).action, "unchanged");
+	eq("drift: 现在正是这次安装写的 → 还原", classifyProfileDrift({ pre: "a", post: "b", now: "b" }).action, "restore");
+	eq("drift: 文件被删了 → 按快照恢复", classifyProfileDrift({ pre: "a", post: "b", now: null }).action, "restore");
+	eq("drift: 装完之后手改过 → 判冲突（不覆盖）", classifyProfileDrift({ pre: "a", post: "b", now: "c" }).action, "conflict");
+	eq("drift: 这次安装新建且没被改 → 删掉才算回滚干净", classifyProfileDrift({ pre: null, post: "x", now: "x" }).action, "remove");
+	eq("drift: 这次安装新建但被改过 → 冲突（不删）", classifyProfileDrift({ pre: null, post: "x", now: "y" }).action, "conflict");
+	eq("drift: 旧快照没有 post → 如实 unverified", classifyProfileDrift({ pre: "a", post: null, now: "c" }).action, "unverified");
+	const driftSummary = summarizeDrift("a\nb\n", "a\nB\nc\n");
+	eq("drift: 摘要数出增删行数", [driftSummary.added, driftSummary.removed], [2, 1]);
+	ok("drift: 摘要给出第一处不同", typeof driftSummary.first === "string" && driftSummary.first.length > 0, driftSummary);
+
+	/* ② 真盘：装完之后手改 cordis.patch.yml，回滚不能吃掉它（图 4 的原问题） */
+	const r49Profile = dir("r49-profile");
+	await mkdir(r49Profile, { recursive: true });
+	await writeFile(join(r49Profile, "package.json"), '{"dependencies":{}}');
+	await writeFile(join(r49Profile, "cordis.patch.yml"), "# before\n");
+	await writeFile(join(r49Profile, "pnpm-workspace.yaml"), "trustPolicyExclude: []\n");
+	const r49Snaps = dir("r49-snaps");
+	await mkdir(r49Snaps, { recursive: true });
+	const r49Snap = await createSnapshot({ root: r49Snaps, reason: "r49", profileDir: r49Profile, skillsRoot: null, bundles: [], plugins: [], versions: {} });
+	ok("R49: 快照含 pnpm-workspace.yaml（R31 的豁免写这里）", r49Snap.meta.savedFiles.includes("pnpm-workspace.yaml"), r49Snap.meta.savedFiles);
+	/* 模拟「这次安装」写下去的三处改动 */
+	await writeFile(join(r49Profile, "package.json"), '{"dependencies":{"x":"1.0.0"}}');
+	await writeFile(join(r49Profile, "cordis.patch.yml"), "# before\n# added-by-install\n");
+	await writeFile(join(r49Profile, "pnpm-workspace.yaml"), "trustPolicyExclude:\n  - a@1.0.0\n");
+	const r49Capture = await captureProfileAfter(r49Snap.dir, r49Profile);
+	eq("R49: 装完之后拍了 post", r49Capture.ok, true);
+	ok("R49: post 里含 pnpm-workspace.yaml", r49Capture.captured.includes("pnpm-workspace.yaml"), r49Capture.captured);
+	/* 用户装完之后又手加了一段 MCP 配置 */
+	await writeFile(join(r49Profile, "cordis.patch.yml"), "# before\n# added-by-install\n# 我手加的 MCP\n");
+	const r49Restored = await restoreProfileFiles(r49Snap.dir, r49Profile);
+	eq("R49: package.json 按快照还原", await readFile(join(r49Profile, "package.json"), "utf8"), '{"dependencies":{}}');
+	eq("R49: pnpm-workspace.yaml 也回滚（豁免不留在盘上）",
+		await readFile(join(r49Profile, "pnpm-workspace.yaml"), "utf8"), "trustPolicyExclude: []\n");
+	ok("R49: 装完之后手改的 cordis.patch.yml 没被覆盖",
+		(await readFile(join(r49Profile, "cordis.patch.yml"), "utf8")).includes("我手加的 MCP"));
+	eq("R49: 冲突如实报出来（点名文件）", r49Restored.conflicts.map((item) => item.file), ["cordis.patch.yml"]);
+	ok("R49: 冲突时把当前内容另存成证据",
+		Boolean(r49Restored.conflicts[0] && r49Restored.conflicts[0].backup) &&
+		(await readFile(r49Restored.conflicts[0].backup, "utf8")).includes("我手加的 MCP"));
+
+	/* ③ 这次安装新建的配置 → 回滚要删掉（不然「回滚了」但 MCP 还在） */
+	const r49NewProfile = dir("r49-new-profile");
+	await mkdir(r49NewProfile, { recursive: true });
+	await writeFile(join(r49NewProfile, "package.json"), '{"dependencies":{}}');
+	const r49NewSnaps = dir("r49-new-snaps");
+	await mkdir(r49NewSnaps, { recursive: true });
+	const r49NewSnap = await createSnapshot({ root: r49NewSnaps, reason: "r49-new", profileDir: r49NewProfile, skillsRoot: null, bundles: [], plugins: [], versions: {} });
+	await writeFile(join(r49NewProfile, "cordis.patch.yml"), "# created-by-install\n");
+	await captureProfileAfter(r49NewSnap.dir, r49NewProfile);
+	const r49NewRestored = await restoreProfileFiles(r49NewSnap.dir, r49NewProfile);
+	eq("R49: 这次安装新建的配置文件被删掉", r49NewRestored.removed, ["cordis.patch.yml"]);
+	const stillThere = await stat(join(r49NewProfile, "cordis.patch.yml")).then(() => true).catch(() => false);
+	eq("R49: 删干净了（磁盘上确实没有）", stillThere, false);
+
+	/* ④ 第十步：重启判据按「改动落在哪一层」，不按宿主回执 */
+	eq("R49: 插件安装 → 要重启", restartPlan({ install: { kind: "bundle", ok: true, application: "applied" } }).needed, true);
+	eq("R49: 换版本 → 要重启", restartPlan({ install: { kind: "bundle", ok: true, upgrade: true } }).needed, true);
+	eq("R49: MCP 写 patch 层 → 要重启", restartPlan({ install: { kind: "mcp", ok: true } }).needed, true);
+	eq("R49: 技能落目录 → 不用重启", restartPlan({ install: { kind: "skill", ok: true } }).needed, false);
+	eq("R49: 技能被显式标记 → 才要重启", restartPlan({ install: { kind: "skill", ok: true }, restart: { needed: true, reasons: ["客户端 bundle 变了"] } }).needed, true);
+	eq("R49: 装失败的不催重启", restartPlan({ install: { kind: "bundle", ok: false } }).needed, false);
+	eq("R49: 宿主回执说 restart-required 也算（不退化）", restartPlan({ install: { kind: "unknown", application: "restart-required" } }).needed, true);
+	ok("R49: 理由里写明「启动时才读」",
+		restartPlan({ install: { kind: "bundle", ok: true } }).reasons.join("|").includes("启动"),
+		restartPlan({ install: { kind: "bundle", ok: true } }).reasons);
+
+	/* ⑤ 本地改动导出成 patch：覆盖前导，装完能照着重放 */
+	const patchBefore = dir("patch-before");
+	const patchAfter = dir("patch-after");
+	await mkdir(patchBefore, { recursive: true });
+	await mkdir(patchAfter, { recursive: true });
+	await writeFile(join(patchBefore, "SKILL.md"), "---\nname: demo\n---\nv1\n");
+	await writeFile(join(patchAfter, "SKILL.md"), "---\nname: demo\n---\nv2\n");
+	await writeFile(join(patchBefore, "only-local.md"), "my notes\n");
+	await writeFile(join(patchAfter, "upstream-new.md"), "new in upstream\n");
+	const patchDiff = await diffSkillDirs(patchBefore, patchAfter);
+	eq("R49: patch 认出三个文件有差异", patchDiff.files.length, 3);
+	ok("R49: patch 是统一 diff 形状", patchDiff.text.includes("--- a/SKILL.md") && patchDiff.text.includes("+++ b/SKILL.md"), patchDiff.text.slice(0, 120));
+	const patchOut = dir("patches-out");
+	const writtenPatch = await writeSkillPatch({ beforeDir: patchBefore, afterDir: patchAfter, name: "demo skill", outDir: patchOut, at: "2026-11-06T12:00:00.000Z" });
+	ok("R49: patch 落成 .diff 文件", writtenPatch.ok === true && writtenPatch.empty === false && writtenPatch.path.endsWith(".diff"), writtenPatch);
+	ok("R49: 文件名把空格换成 -（可直接双击/复制）", !writtenPatch.path.includes(" "), writtenPatch.path);
+	const patchText = await readFile(writtenPatch.path, "utf8");
+	ok("R49: patch 正文里有你的 + 行", patchText.includes("+v2"), patchText.slice(0, 200));
+	eq("R49: 没有差异时不写空文件", (await writeSkillPatch({ beforeDir: patchBefore, afterDir: patchBefore, name: "same", outDir: patchOut })).empty, true);
+
+	/* ⑥ 跨写法去重（图 1②：重复插两次会崩） */
+	eq("R49: github: 与网址折算成同一个键", dedupeKeyOf("github:o/r"), dedupeKeyOf("https://github.com/o/r/"));
+	eq("R49: .git 后缀与尾斜杠不影响键", dedupeKeyOf("https://github.com/o/r.git"), dedupeKeyOf("https://github.com/o/r"));
+	eq("R49: 大小写不影响键", dedupeKeyOf("https://github.com/O/R"), dedupeKeyOf("github:o/r"));
+	ok("R49: 子目录不同 → 不同键（不瞎并）",
+		dedupeKeyOf("https://github.com/o/r") !== dedupeKeyOf("https://github.com/o/r/tree/main/skills/x"));
+	ok("R49: ref 不同 → 不同键",
+		dedupeKeyOf("github:o/r") !== dedupeKeyOf("github:o/r#v2"));
+	eq("R49: 纯包名走 npm 键", dedupeKeyOf("dsh-plugin-installer"), "npm:dsh-plugin-installer");
+	ok("R49: 本机路径不会被并成 npm 键", dedupeKeyOf("D:/a/b.tgz") !== dedupeKeyOf("b.tgz"));
 
 	/* ⑦.5 重打包成 tgz（安装不依赖临时目录）*/
 	const packSrc = dir("packSrc");

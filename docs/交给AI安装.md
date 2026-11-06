@@ -1,4 +1,4 @@
-# 交给 AI：安装 dsh-plugin-installer v0.18.1
+# 交给 AI：安装 dsh-plugin-installer v0.19.0
 
 > 这份文件是写给**AI 助手**看的（也可以直接把这个文件的内容贴进对话）。
 > 人类用户请关掉它，去看同目录的 `02 使用手册（先看这个）.docx`。
@@ -9,7 +9,7 @@
 纯 Node/ESM 的宿主插件 + 一个 Web 客户端 bundle（侧栏入口，文案「插件安装」）。
 它自己不需要 Python、ffmpeg、Node 之外的任何东西；Node 由 DSH 自带。
 
-- 包名 / 版本：`dsh-plugin-installer` / `0.18.1`
+- 包名 / 版本：`dsh-plugin-installer` / `0.19.0`
 - 版本区间要求：`engines.dsh` = `>=0.2.1-rc.1 <0.3.0`（DSH 0.2.1 及以上、0.3.0 以下）
 - 安装包内容：`install.ps1`（安装器）、`payload/`（插件运行期文件）、`uninstall.ps1`、`install.cmd`、`INSTALL-README.txt`
 - 同目录另有：`*.tgz`（npm 风格包，`package/` 前缀）
@@ -27,7 +27,7 @@
 
 ## 首选：让用户自己双击安装包
 
-`01 安装（双击这个）.exe`（= `dsh-plugin-installer-0.18.1-setup.exe`）就是自解压安装器：
+`01 安装（双击这个）.exe`（= `dsh-plugin-installer-<版本>-setup.exe`）就是自解压安装器：
 它会自己找 profile、拷文件、建 junction、写 profile 的 `package.json`（写前备份）、体检环境。
 **这条路最稳，你不需要动手。**
 你只需要告诉用户三件事：双击 → 看到「安装完成！」按回车 → 完全退出 DSH 再打开。
@@ -50,7 +50,7 @@ $linkPath   = Join-Path $profileDir ('node_modules\' + $name)
 # 1) 解压 tgz → payload 目录（tgz 里是 package/ 前缀）
 #    tar.exe 是 Windows 自带的；也可以用解压软件手动解
 New-Item -ItemType Directory -Force -Path $copyDir | Out-Null
-tar -xzf '<包所在的绝对路径>\dsh-plugin-installer-0.18.1.tgz' -C $copyDir --strip-components=1
+tar -xzf '<包所在的绝对路径>\dsh-plugin-installer-<版本>.tgz' -C $copyDir --strip-components=1
 
 # 2) 建目录联接（不需要管理员）
 if (Test-Path $linkPath) { cmd /c rmdir "$linkPath" }
