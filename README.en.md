@@ -16,7 +16,12 @@
 > the plugin tree is read at startup, so **DSH must be restarted once after installing**.
 > To run a self-check on any page: `Ctrl+Alt+D` (rebindable or disable in Settings).
 
-> **Current version `0.19.0` (2026-11-06)** — four pieces of feedback turned into code:
+> **Current version `0.19.1` (2026-11-06)** — rollback preview: see what "roll back" will do *before* clicking it.
+> The post-install diagnosis now lists, per file, whether rollback would **restore** it, **delete** it
+> (created by this install), or **keep your edit** (you changed it afterwards) — using the *same pure function*
+> the real rollback uses. The preview is read-only. Self-checks: hosttest **1211** / audit **226** / render-check **276**.
+>
+> **Previous version `0.19.0` (2026-11-06)** — four pieces of feedback turned into code:
 > 1. **Complete snapshots; rollback stops eating your edits.** `pnpm-workspace.yaml` is snapshotted too
 >    (the trust-policy exemption is written there), a **post-install** copy is taken, and rollback does a
 >    **pre / post / now three-way comparison**: a `cordis.patch.yml` you edited *after* installing is

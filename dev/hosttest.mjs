@@ -26,7 +26,7 @@ import { buildSkillView, planSkillFix, planSkillPark, readSkillsOnDisk, rewriteS
 import { buildSkillLedgerEntry, checkSkillUpdates, hashSkillDir, planSkillReinstall, readSkillLedger, recordSkillSource } from "../lib/skillledger.js";
 import { scanTree, redact, detectPromptInjection } from "../lib/scan.js";
 import { precheck, describeCompatVersions as mCompatLine } from "../lib/precheck.js";
-import { backupVendorTarball, captureProfileAfter, classifyProfileDrift, createSnapshot, fileSpecPath, restoreProfileFiles, backupSkillInSnapshot, readSnapshotMeta, restoreSkill, restoreVendorTarball, summarizeDrift } from "../lib/snapshot.js";
+import { backupVendorTarball, captureProfileAfter, classifyProfileDrift, createSnapshot, fileSpecPath, previewRollback, restoreProfileFiles, backupSkillInSnapshot, readSnapshotMeta, restoreSkill, restoreVendorTarball, summarizeDrift } from "../lib/snapshot.js";
 /* R49：本地改动导出（覆盖前把「你的改动 vs 上游」做成 patch） */
 import { diffSkillDirs, writeSkillPatch } from "../lib/skillpatch.js";
 import { buildReviewInput } from "../lib/ai.js";
@@ -1248,6 +1248,26 @@ async function main() {
 	const patchText = await readFile(writtenPatch.path, "utf8");
 	ok("R49: patch 正文里有你的 + 行", patchText.includes("+v2"), patchText.slice(0, 200));
 	eq("R49: 没有差异时不写空文件", (await writeSkillPatch({ beforeDir: patchBefore, afterDir: patchBefore, name: "same", outDir: patchOut })).empty, true);
+
+	/* ⑤b 回滚预演（R49.1）：点回滚之前先看清后果 —— 与真回滚同一个纯函数 */
+	const previewAfterInstall = await previewRollback(r49Snap.dir, r49Profile);
+	ok("R49: 预演时清单里不再有「装完手改」的包（已回滚过）", Array.isArray(previewAfterInstall.files), previewAfterInstall);
+	const r49PreviewProfile = dir("r49-preview-profile");
+	await mkdir(r49PreviewProfile, { recursive: true });
+	await writeFile(join(r49PreviewProfile, "package.json"), '{"dependencies":{}}');
+	const r49PreviewSnaps = dir("r49-preview-snaps");
+	await mkdir(r49PreviewSnaps, { recursive: true });
+	const r49PreviewSnap = await createSnapshot({ root: r49PreviewSnaps, reason: "preview", profileDir: r49PreviewProfile, skillsRoot: null, bundles: [], plugins: [], versions: {} });
+	await writeFile(join(r49PreviewProfile, "package.json"), '{"dependencies":{"x":"1.0.0"}}');
+	await writeFile(join(r49PreviewProfile, "cordis.patch.yml"), "# created-by-install\n");
+	await captureProfileAfter(r49PreviewSnap.dir, r49PreviewProfile);
+	await writeFile(join(r49PreviewProfile, "cordis.patch.yml"), "# created-by-install\n# 我手加的\n");
+	const preview = await previewRollback(r49PreviewSnap.dir, r49PreviewProfile);
+	const previewByFile = Object.fromEntries(preview.files.map((item) => [item.file, item.action]));
+	eq("R49: 预演说 package.json 会被还原", previewByFile["package.json"], "restore");
+	eq("R49: 预演说新建配置会被删除", previewByFile["cordis.patch.yml"], "conflict");
+	ok("R49: 预演不动磁盘（跑完文件还在）", (await readFile(join(r49PreviewProfile, "cordis.patch.yml"), "utf8")).includes("我手加的"));
+	ok("R49: 预演只列会变的文件（不含未变化的）", !("pnpm-lock.yaml" in previewByFile), Object.keys(previewByFile));
 
 	/* ⑥ 跨写法去重（图 1②：重复插两次会崩） */
 	eq("R49: github: 与网址折算成同一个键", dedupeKeyOf("github:o/r"), dedupeKeyOf("https://github.com/o/r/"));

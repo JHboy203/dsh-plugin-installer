@@ -56,7 +56,7 @@ export const FROZEN_DEFAULTS = {
 };
 
 /** 文档里声明的自检项数（改断言就先跑一次 host_selfcheck，再同步这个数）。 */
-export const EXPECTED_ASSERTIONS = 1206;
+export const EXPECTED_ASSERTIONS = 1211;
 
 /** 界面自检项数（dev/render-check.cjs）。同样是「文档对表」的一半。 */
 const EXPECTED_RENDER_ASSERTIONS = 276;
@@ -642,6 +642,8 @@ async function main() {
 	ok("R49：队列去重用归一后的来源键（github: 与 github.com 网址同键）",
 		/dedupeKeyOf\(/.test(r49PipeSrc) && /export function dedupeKeyOf/.test(r49UrlsSrc));
 	ok("R49：同名同类只允许一条任务在飞（防「重复插两次」）", /findActiveDuplicate/.test(r49PipeSrc));
+	ok("R49.1：诊断里有「回滚预演」（与真回滚同一个纯函数 previewRollback）",
+		/export async function previewRollback/.test(r49SnapSrc) && /previewRollback/.test(r49InstallSrc) && /code: "rollback-preview"/.test(r49InstallSrc));
 
 	/* ⑧ 文档与断言数对表（提示级：改了测试忘了改文档是常态） */
 	for (const doc of ["README.md", join("..", "★交接文件·插件安装面板.md")]) {
