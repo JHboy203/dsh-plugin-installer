@@ -1295,6 +1295,27 @@ async function main() {
 	eq("pack: 解回来还是 2 个文件", unpacked.files, 2);
 	ok("pack: 布局是 npm 约定的 package/ 前缀", (await readFile(join(unpackDir, "package", "package.json"), "utf8")).includes("pack-me"));
 	ok("pack: 内容逐字一致", (await readFile(join(unpackDir, "package", "lib", "index.js"), "utf8")) === "export function apply(){}\n");
+
+	/* R52：长路径。以前 ustar 只写 name(100)，超长直接报「路径过长，无法打进 tgz」，
+	   带深层 assets 的插件（用户在装 dsh-guizang-design 时撞到的）
+	   就永远装不上。现在走 ustar 的 prefix(155) 与 PAX 两种标准机制。 */
+	const longRel =
+		"skills/guizang-social-card-skill/assets/screenshot-backgrounds/style-b/lemon-green-dot-shadow.webp";
+	await mkdir(join(packSrc, "skills", "guizang-social-card-skill", "assets", "screenshot-backgrounds", "style-b"), { recursive: true });
+	await writeFile(join(packSrc, ...longRel.split("/")), "IMG");
+	/* 单个 120 字节的文件名：只有一处 `/`，prefix 拆不开 → 必须走 PAX */
+	const paxName = "n".repeat(120) + ".bin";
+	await writeFile(join(packSrc, paxName), "PAX");
+	const tgzLong = join(root, "pack-long.tgz");
+	const packedLong = await packPluginTarball(packSrc, tgzLong);
+	eq("R52 长路径：打包不再报「路径过长」", packedLong.files, 4);
+	const longOut = dir("packOutLong");
+	const longUnpacked = await extractToDir(await readFile(tgzLong), "tar.gz", longOut);
+	eq("R52 长路径：解回来文件数一致", longUnpacked.files, 4);
+	ok("R52 长路径：prefix 拆分的深层路径能原样取回",
+		(await readFile(join(longOut, "package", ...longRel.split("/")), "utf8")) === "IMG");
+	ok("R52 长路径：>100 字节的单段文件名走 PAX 也能取回",
+		(await readFile(join(longOut, "package", paxName), "utf8")) === "PAX");
 	const refs = stagingRefsFromManifest({
 		dependencies: {
 			"a-plugin": "file:D:/x/data/staging/job-1/pack/pkg.tgz",
