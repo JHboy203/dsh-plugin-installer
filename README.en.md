@@ -19,7 +19,7 @@
 > **Current version `0.19.1` (2026-11-06)** — rollback preview: see what "roll back" will do *before* clicking it.
 > The post-install diagnosis now lists, per file, whether rollback would **restore** it, **delete** it
 > (created by this install), or **keep your edit** (you changed it afterwards) — using the *same pure function*
-> the real rollback uses. The preview is read-only. Self-checks: hosttest **1211** / audit **226** / render-check **276**.
+> the real rollback uses. The preview is read-only. Self-checks: hosttest **1215** / audit **226** / render-check **282**.
 >
 > **Previous version `0.19.0` (2026-11-06)** — four pieces of feedback turned into code:
 > 1. **Complete snapshots; rollback stops eating your edits.** `pnpm-workspace.yaml` is snapshotted too

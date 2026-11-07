@@ -63,7 +63,7 @@ import {
 	splitHoistedKey
 } from "../lib/profilestate.js";
 import { buildStamp } from "../lib/hostinfo.js";
-import { normalizeNpmSpec } from "../lib/download.js";
+import { normalizeNpmSpec, rankAssets } from "../lib/download.js";
 import {
 	annotateInstalled,
 	annotateShadows,
@@ -2915,6 +2915,20 @@ async function main() {
 	eq("input: 裸包名仍然走搜索", classifyInput("dsh-ffmpeg").kind, "name");
 	eq("download: 解析前剥掉 npm: 前缀", normalizeNpmSpec("npm:@scope/x@^1.0.0"), "@scope/x@^1.0.0");
 	eq("download: 没有前缀时原样返回", normalizeNpmSpec(" dsh-x "), "dsh-x");
+
+	/* R50：Release 多资产时别拿「套壳包」。用户 2026-11-07 实测的那两个资产名照抄进来：
+	   旧规则只看名字里有没有 dsh，两个都命中 → 拿了 GitHub 返回的第一个（带安装说明的 zip）
+	   → 解出来是说明 + 内层包 → 判未识别 → 卡在「已转人工确认」。 */
+	const assetsR50 = [
+		{ name: "dsh-media-desk-2.6.1-with-install-guide.zip", browser_download_url: "u1", size: 3213583 },
+		{ name: "dsh-media-desk-2.6.1.tgz", browser_download_url: "u2", size: 3211436 }
+	];
+	const rankedR50 = rankAssets(assetsR50);
+	eq("R50 资产排序：.tgz 排在「with-install-guide.zip」前面", rankedR50[0] && rankedR50[0].name, "dsh-media-desk-2.6.1.tgz");
+	eq("R50 资产排序：套壳包仍留在候选里（可作退路）", rankedR50.length, 2);
+	eq("R50 资产排序：安装器/平台包被排除", rankAssets([{ name: "setup.exe" }, { name: "dsh-x-1.0.0.tgz" }]).length, 1);
+	eq("R50 资产排序：plugin 命名优先于普通 zip",
+		(rankAssets([{ name: "a.zip" }, { name: "dsh-x-plugin.zip" }])[0] || {}).name, "dsh-x-plugin.zip");
 
 	/* 接线（静态）：三个入口都得真的接上，别又变成「算了但没用」 */
 	const pipelineSrcR12 = await readFile(join(pluginRoot, "lib", "pipeline.js"), "utf8");

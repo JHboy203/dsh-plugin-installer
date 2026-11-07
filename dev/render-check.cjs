@@ -175,7 +175,7 @@ function textOf(node, acc) {
  * 正常不执行，所以**数源码不等于数断言**（实测 103 处、只跑 80 条）。真正的判据只能是
  * 「这次实际跑了几条」，所以由脚本自己报总数、并由自己比对。
  */
-const EXPECTED_TOTAL = 276;
+const EXPECTED_TOTAL = 282;
 
 let failed = 0;
 let passed = 0;
@@ -1748,6 +1748,52 @@ if (typeof t.AiBox === "function") {
 	t.store.local = saved;
 } else {
 	check("__test 暴露了 AiBox", false);
+}
+
+/* R50：搜索结果的出口 —— 用户原话「搜索栏清空之后，上轮搜索的结果会一直存在，导致空间占用」 */
+if (typeof t.AiBox === "function") {
+	const saved = t.store.local;
+	t.store.local = { aiBusy: false, ai: { reply: "搜索：time（1 条）", recommendations: [] } };
+	resetHooks();
+	const withResult = textOf(t.AiBox({})).join(" | ");
+	check("R50 AI 推荐：有结果时给「清空结果」按钮", withResult.includes("清空结果"), withResult.slice(0, 240));
+	t.store.local = { aiBusy: false, ai: null };
+	resetHooks();
+	const noResult = textOf(t.AiBox({})).join(" | ");
+	check("R50 AI 推荐：没结果时不显示「清空结果」", !noResult.includes("清空结果"), noResult.slice(0, 200));
+	t.store.local = saved;
+} else {
+	check("__test 暴露了 AiBox（R50 清空结果）", false);
+}
+
+/* R50：预检阻断之后不能再是死胡同 —— 用户原话「转人工确认之后，并没有下一步的提示……无法继续」 */
+if (typeof t.JobDetail === "function") {
+	resetHooks();
+	const blockedJob = {
+		id: "job-r50-blocked",
+		status: "failed",
+		title: "woniuniuniu/dsh-media-desk（★426）",
+		input: { raw: "https://github.com/woniuniuniu/dsh-media-desk", kind: "github-repo", label: "woniuniuniu/dsh-media-desk" },
+		createdAt: Date.now() - 60000,
+		updatedAt: Date.now() - 3000,
+		stages: [],
+		detected: { kind: "unknown", files: 2, bytes: 3213583, innerArchives: ["dsh-media-desk-2.6.1.tgz"], version: null },
+		error: { code: "precheck-blocked", stage: "precheck", message: "安全预检阻断安装：未识别内容，已转人工确认", plain: "", fix: [] },
+		alternatives: [{ name: "dsh-media-desk-2.6.1.tgz", url: "https://example.com/dsh-media-desk-2.6.1.tgz", size: 3211436 }]
+	};
+	const blockedEl = t.JobDetail({ job: blockedJob });
+	const blockedText = blockedEl ? textOf(blockedEl).join(" | ") : "";
+	check("R50 阻断后：给出「下一步」卡（不再只写已转人工确认）", blockedText.includes("下一步：换一份能装的包"), blockedText.slice(0, 420));
+	check("R50 阻断后：同版本另一个资产做成按钮", blockedText.includes("改用 dsh-media-desk-2.6.1.tgz"), blockedText.slice(0, 620));
+	check("R50 阻断后：说清包里还有内层归档", blockedText.includes("包里另有一个归档"), blockedText.slice(0, 620));
+
+	resetHooks();
+	const noAltJob = Object.assign({}, blockedJob, { alternatives: null, detected: { kind: "unknown", files: 2, version: null } });
+	const noAltEl = t.JobDetail({ job: noAltJob });
+	const noAltText = noAltEl ? textOf(noAltEl).join(" | ") : "";
+	check("R50 阻断后：没有候选资产时给「拖目录 / 贴路径」的出路", noAltText.includes("拖进面板") && noAltText.includes("本地路径"), noAltText.slice(0, 620));
+} else {
+	check("__test 暴露了 JobDetail（R50 下一步）", false);
 }
 
 if (typeof t.Panel === "function") {

@@ -23,7 +23,7 @@ window.__ModuleLoader__.load({
 		/* 客户端 build 号（R5.1）：改 client.js 就提一位。
 		   client 会热重载、但没人保证「当前页面跑的是哪一版」—— 这个号随 client-state
 		   一起上报，宿主 /health 的 clientReport.build 就是答案（宿主侧另有 mtime 标签）。 */
-		const BUILD = "r49.0";
+		const BUILD = "r50.0";
 
 		/* ── 迷你 store（模块级，面板关着时图标也在用）──────────────────── */
 
@@ -1529,6 +1529,9 @@ window.__ModuleLoader__.load({
 						job.error.fix && job.error.fix.length > 0 ? h(FixSteps, { steps: job.error.fix, actions: job.error.actions }) : null)
 					: null,
 
+				/* R50：预检阻断后的「下一步」—— 面板不能再只说「已转人工确认」然后没动作 */
+				h(NextStepCard, { job }),
+
 				/* R9：安装脚本待批准 —— 面板上直接给「允许并重试」，别让人自己去翻 yaml */
 				h(BuildApprovalCard, { job, busy, act }),
 
@@ -2154,7 +2157,16 @@ window.__ModuleLoader__.load({
 							if (e.key === "Enter") ask();
 						}
 					}),
-					h("button", { className: "dpi-btn", disabled: busy || !text.trim(), onClick: ask }, busy ? "思考中…" : "问 AI")),
+					h("button", { className: "dpi-btn", disabled: busy || !text.trim(), onClick: ask }, busy ? "思考中…" : "问 AI"),
+					/* R50：搜索结果会一直挂着占掉半屏（用户原话：「搜索栏清空之后，上轮搜索的结果会一直存在」），
+					   给一个显式出口：连输入框一起清掉。只在真有结果时出现。 */
+					result
+						? h("button", {
+							className: "dpi-btn dpi-btn-ghost",
+							title: "清掉这一轮的推荐结果（搜索框一起清空）",
+							onClick: () => { setText(""); setLocal({ ai: null }); }
+						}, "清空结果")
+						: null),
 				result && result.reply ? h("div", { className: "dpi-ai-reply" }, result.reply) : null,
 				/* R25：搜的是本机自己写的插件时，六个源都不会有它 —— 不说清楚，6 条不相干的结果看起来像搜索坏了 */
 				result && result.localOnly
@@ -3828,6 +3840,34 @@ window.__ModuleLoader__.load({
 						}, "恢复默认"),
 						h("span", { className: "dpi-muted" }, "改动立刻生效，存在 data/settings.json")))
 			);
+		}
+
+		/**
+		 * R50：「下一步」—— 预检阻断之后**必须给能点的东西**。
+		 * 用户原话（2026-11-07）：「插件转人工确认之后，并没有下一步的提示，我确认该插件没有问题，但是无法继续」。
+		 * 真实病因：Release 有两个资产（`-with-install-guide.zip` 与 `.tgz`），旧的选择规则只看「名字里有没有 dsh」，
+		 * 于是拿了套壳 zip → 里面是说明 + 内层包 → 判未识别 → 死胡同，而 error 里还写着「看面板里的「下一步」」。
+		 * 现在：① 同版本其它资产直接做成按钮（换一个就能装）；② 没有候选时给两条手上能做的动作。
+		 */
+		function NextStepCard(props) {
+			const { job } = props;
+			if (!job || job.status !== "failed" || !job.error || job.error.code !== "precheck-blocked") return null;
+			const alts = (job.alternatives || []).filter((a) => a && a.url);
+			const inner = (job.detected && job.detected.innerArchives) || [];
+			return h("div", { className: "dpi-ask" },
+				h("b", null, "下一步：换一份能装的包"),
+				h("div", { className: "dpi-detail" },
+					"这份资产里没有可安装的东西 —— 既没有 dsh.bundle，也没有 SKILL.md。",
+					inner.length > 0 ? "包里另有一个归档：" + inner.join("、") + "，那个才像插件包。" : ""),
+				alts.length > 0
+					? h("div", { className: "dpi-actions dpi-actions-tight" },
+						alts.map((a, i) => h("button", {
+							key: "alt" + i,
+							className: "dpi-btn dpi-btn-primary dpi-btn-sm",
+							onClick: () => submitInput(a.url)
+						}, "改用 " + a.name)))
+					: h("div", { className: "dpi-detail" },
+						"把解压后的插件目录（含 package.json、且声明了 dsh.bundle 的那层）拖进面板，或把它的本地路径贴进来 —— 面板会按本地目录装。"));
 		}
 
 		/**
